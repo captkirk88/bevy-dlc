@@ -14,8 +14,8 @@ use secure_gate::{dynamic_alias, fixed_alias};
 // secure wrappers for seeds / passphrases used with `DlcKey`
 fixed_alias!(pub PrivateKey, 32);
 fixed_alias!(pub PublicKey, 32);
-// secure wrapper for issued offline-signed tokens (zeroized on drop)
-dynamic_alias!(pub PrivateToken, String);
+// secure wrapper for issued offline-signed signed-license (zeroized on drop)
+dynamic_alias!(pub SignedLicense, String);
 
 dynamic_alias!(pub Product, String);
 
@@ -60,7 +60,7 @@ impl std::fmt::Display for DlcId {
 pub mod prelude {
     pub use crate::{
         DlcHandle, DlcId, DlcKey, DlcManager, DlcPlugin, EncryptedAsset, PrivateKey, PublicKey, Product,
-        PrivateToken, VerifiedToken, build_encrypted_container_bytes, dlc_unlocked,
+        SignedLicense, VerifiedLicense, build_encrypted_container_bytes, dlc_unlocked,
         pack_encrypted_asset, pack_encrypted_pack, parse_encrypted, parse_encrypted_pack,
     };
     pub use base64::Engine as _;
@@ -111,23 +111,23 @@ impl DlcKey {
     /// private-key creation explicit (breaking change) and enables callers to
     /// later prove knowledge of that publickey when creating tokens.
     pub fn from_priv_and_pub(
-        seed: PrivateKey,
+        privkey: PrivateKey,
         publickey: PublicKey,
     ) -> Result<Self, DlcError> {
         // derive public bytes from the protected seed and validate via
         // `from_seed_and_public_key` so we never sign using only the seed
-        let seed_bytes = seed.expose_secret();
-        let kp = Ed25519KeyPair::from_seed_and_public_key(seed_bytes, publickey.expose_secret())
+        let priv_bytes = privkey.expose_secret();
+        let kp = Ed25519KeyPair::from_seed_and_public_key(priv_bytes, publickey.expose_secret())
             .map_err(|e| DlcError::CryptoError(format!("invalid seed: {:?}", e)))?;
         let mut pub_bytes = [0u8; 32];
         pub_bytes.copy_from_slice(kp.public_key().as_ref());
 
         // validate construction using both seed + public (preferred API)
-        Ed25519KeyPair::from_seed_and_public_key(seed_bytes, &pub_bytes)
+        Ed25519KeyPair::from_seed_and_public_key(priv_bytes, &pub_bytes)
             .map_err(|e| DlcError::CryptoError(format!("keypair validation failed: {:?}", e)))?;
 
         Ok(DlcKey::Private {
-            privkey: seed,
+            privkey,
             pubkey: PublicKey::from(pub_bytes),
         })
     }
@@ -139,54 +139,53 @@ impl DlcKey {
         Self::from_priv_and_pub(seed, publickey).expect("generate keypair")
     }
 
-    /// Generate a new `DlcKey::Private` **and** return its derived public key
-    /// bytes. The caller must provide the `PublicKey` that will be associated
-    /// with the private key.
-    pub fn generate_complete() -> (Self, PublicKey) {
+    /// Generate a new `DlcKey::Private` with a random seed and derived public key.
+    ///
+    /// The public key is derived from the generated seed so the keypair is valid.
+    pub fn generate_random() -> Self {
+        // generate a random seed and derive the matching public key from it
         let privkey: PrivateKey = PrivateKey::generate_random();
-        let pubkey: PublicKey = PublicKey::generate_random();
-        let kp = Ed25519KeyPair::from_seed_and_public_key(privkey.expose_secret(), pubkey.expose_secret()).expect("valid pubkey");
-        let key = Self::from_priv_and_pub(privkey, pubkey.clone())
-            .unwrap_or_else(|e| panic!("generate_complete failed: {:?}", e));
-        (key, pubkey)
+        let priv_bytes = privkey.expose_secret();
+        // derive public bytes from the seed using ring
+        let pair = Ed25519KeyPair::from_seed_unchecked(priv_bytes)
+            .expect("derive public key from seed");
+        let mut pub_bytes = [0u8; 32];
+        pub_bytes.copy_from_slice(pair.public_key().as_ref());
+
+        Self::from_priv_and_pub(privkey, PublicKey::from(pub_bytes))
+            .unwrap_or_else(|e| panic!("generate_complete failed: {:?}", e))
     }
 
     /// Return the raw public key bytes (32 bytes) for either variant.
-    pub fn public_key_bytes(&self) -> [u8; 32] {
+    pub fn public_key_bytes(&self) -> &[u8; 32] {
         match self {
             DlcKey::Private { pubkey: public, .. } => {
-                let b = public.expose_secret();
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(b);
-                arr
+                public.expose_secret()
             }
             DlcKey::Public { pubkey: public } => {
-                let b = public.expose_secret();
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(b);
-                arr
+                public.expose_secret()
             }
         }
     }
 
     pub fn get_public_key(&self) -> &PublicKey {
         match self {
-            DlcKey::Private { privkey, pubkey } => pubkey,
+            DlcKey::Private { pubkey, .. } => pubkey,
             DlcKey::Public { pubkey: public } => public,
         }
     }
 
     /// Create a compact offline-signed token that can be verified by this key's public key.
     ///
-    /// Returns a `PrivateToken` (zeroized on drop). The token payload includes
+    /// Returns a `SignedLicense` (zeroized on drop). The license payload includes
     /// the provided DLC ids and optional product binding.
-    pub fn create_private_token<D>(
+    pub fn create_signed_license<D>(
         &self,
         dlcs: impl IntoIterator<Item = D>,
         product: Option<Product>, // optional product binding (uses `Product` dynamic alias)
         content_key: Option<&[u8]>,
         exp: Option<u64>,
-    ) -> Result<PrivateToken, DlcError>
+    ) -> Result<SignedLicense, DlcError>
     where
         D: std::fmt::Display,
     {
@@ -235,7 +234,7 @@ impl DlcKey {
                 )
                 .map_err(|e| DlcError::CryptoError(format!("keypair: {:?}", e)))?;
                 let sig = pair.sign(&payload_bytes);
-                Ok(PrivateToken::from(format!(
+                Ok(SignedLicense::from(format!(
                     "{}.{}",
                     URL_SAFE_NO_PAD.encode(&payload_bytes),
                     URL_SAFE_NO_PAD.encode(sig.as_ref())
@@ -245,15 +244,15 @@ impl DlcKey {
         }
     }
 
-    /// Verify a compact privatekey (signature + payload) using this key's public key
-    /// and return a typed `VerifiedToken`. This only checks signature + parsing;
-    /// expiry/product/installation checks are performed by `DlcManager::unlock_verified_token`.
-    pub fn verify_token(&self, token: &PrivateToken) -> Result<VerifiedToken, DlcError> {
-        let full_token = token.expose_secret();
+    /// Verify a compact signed-license (signature + payload) using this key's public key
+    /// and return a typed `VerifiedLicense`. This only checks signature + parsing;
+    /// expiry/product/installation checks are performed by `DlcManager::unlock_verified_license`.
+    pub fn verify_signed_license(&self, license: &SignedLicense) -> Result<VerifiedLicense, DlcError> {
+        let full_token = license.expose_secret();
         let parts: Vec<&str> = full_token.split('.').collect();
         if parts.len() != 2 {
             return Err(DlcError::MalformedToken(
-                "expected privatekey with two dot-separated parts".into(),
+                "expected signed-license with two dot-separated parts".into(),
             ));
         }
 
@@ -289,7 +288,7 @@ impl DlcKey {
             None
         };
 
-        Ok(VerifiedToken {
+        Ok(VerifiedLicense {
             dlcs: lic.dlcs,
             exp: lic.exp,
             iat: lic.iat,
@@ -392,10 +391,10 @@ impl Default for DlcManager {
 }
 
 impl DlcManager {
-    /// Unlock DLC IDs from a previously-verified `VerifiedToken`.
+    /// Unlock DLC IDs from a previously-verified `VerifiedLicense`.
     ///
     /// Performs expiry/product/installation checks and populates content keys.
-    pub fn unlock_verified_token(&mut self, vt: VerifiedToken) -> Result<Vec<DlcId>, DlcError> {
+    pub fn unlock_verified_license(&mut self, vt: VerifiedLicense) -> Result<Vec<DlcId>, DlcError> {
         // expiry check
         if let Some(exp) = vt.exp {
             let now = SystemTime::now()
@@ -505,10 +504,10 @@ struct LicensePayload {
     pub content_key: Option<String>,
 }
 
-/// Typed, verified privatekey returned by `DlcKey::verify_token`.
+/// Typed, verified privatekey returned by `DlcKey::verify_signed_license`.
 /// `content_key` is decoded to raw bytes when present.
 #[derive(Debug, Clone)]
-pub struct VerifiedToken {
+pub struct VerifiedLicense {
     pub dlcs: Vec<String>,
     pub exp: Option<u64>,
     pub iat: Option<u64>,
@@ -1019,7 +1018,7 @@ pub enum DlcError {
     #[error("dlc locked: {0}")]
     DlcLocked(String),
     #[error(
-        "no content key for dlc: {0} (hint: call DlcManager::unlock_verified_token with a privatekey containing a content_key)"
+        "no content key for dlc: {0} (hint: call DlcManager::unlock_verified_license with a privatekey containing a content_key)"
     )]
     NoContentKey(String),
 
@@ -1037,7 +1036,7 @@ pub enum DlcError {
 /// - Ship DLC assets with the main binary and tag them with `DlcHandle`.
 /// - Deliver an offline-signed privatekey to the user. When they provide the privatekey
 ///   the game verifies it with a `DlcKey` and passes the typed result to
-///   `DlcManager::unlock_verified_token` to enable access.
+///   `DlcManager::unlock_verified_license` to enable access.
 ///
 /// ```ignore
 /// use bevy::prelude::*;
@@ -1051,9 +1050,9 @@ pub enum DlcError {
 ///     // when privatekey is entered / verified:
 ///     // Warning: Never actually use any unwrap().  Always handle errors.
 ///     let vk = DlcKey::from_public_key_bytes(pubkey_bytes).unwrap();
-///     let verified = vk.verify_token(token_str).unwrap();
+///     let verified = vk.verify_signed_license(token_str).unwrap();
 ///     let mut dlc = world.resource_mut::<DlcManager>();
-///     dlc.unlock_verified_token(verified).unwrap();
+///     dlc.unlock_verified_license(verified).unwrap();
 /// }
 /// ```
 
@@ -1064,10 +1063,10 @@ mod tests {
     #[test]
     fn verify_and_unlock_token_roundtrip() {
         // generate a matching keypair for the test
-        let (key, pass) = DlcKey::generate_complete();
+        let key = DlcKey::generate_random();
 
         let token = key
-            .create_private_token(
+            .create_signed_license(
                 &[String::from("expansion_1")],
                 None,
                 None,
@@ -1077,9 +1076,9 @@ mod tests {
 
         let mut manager = DlcManager::new();
         let vt = key
-            .verify_token(&token)
+            .verify_signed_license(&token)
             .expect("verify privatekey");
-        let unlocked = manager.unlock_verified_token(vt).expect("should verify");
+        let unlocked = manager.unlock_verified_license(vt).expect("should verify");
         assert_eq!(unlocked, vec![DlcId::from("expansion_1")]);
         assert!(manager.is_unlocked_id(&DlcId::from("expansion_1")));
     }
@@ -1087,12 +1086,12 @@ mod tests {
     #[test]
     fn dlc_key_from_protected_seed() {
         // create a matching protected seed + public key pair
-        let (orig_key, pubkey) = DlcKey::generate_complete();
-        let protected = match orig_key { DlcKey::Private { privkey, .. } => privkey, _ => unreachable!() };
-        let key = DlcKey::from_priv_and_pub(protected, pubkey.clone()).expect("from_seed");
+        let orig_key = DlcKey::generate_random();
+        let protected = match orig_key { DlcKey::Private { ref privkey, .. } => privkey.clone(), _ => unreachable!() };
+        let key = DlcKey::from_priv_and_pub(protected, orig_key.get_public_key().clone()).expect("from_seed");
 
         let privatekey = key
-            .create_private_token(
+            .create_signed_license(
                 &[String::from("expansion_1")],
                 None,
                 None,
@@ -1101,16 +1100,16 @@ mod tests {
             .expect("create privatekey");
 
         let mut manager = DlcManager::new();
-        let vt = key.verify_token(&privatekey).expect("verify privatekey");
-        let unlocked = manager.unlock_verified_token(vt).expect("verify");
+        let vt = key.verify_signed_license(&privatekey).expect("verify privatekey");
+        let unlocked = manager.unlock_verified_license(vt).expect("verify");
         assert_eq!(unlocked, vec![DlcId::from("expansion_1")]);
     }
 
     #[test]
     fn dlc_key_generate_and_verify() {
-        let (key, _pubkey) = DlcKey::generate_complete();
+        let key = DlcKey::generate_random();
         let privatekey = key
-            .create_private_token(
+            .create_signed_license(
                 &[String::from("expansion_1")],
                 None,
                 None,
@@ -1119,8 +1118,8 @@ mod tests {
             .expect("create privatekey");
 
         let mut manager = DlcManager::new();
-        let vt = key.verify_token(&privatekey).expect("verify privatekey");
-        let unlocked = manager.unlock_verified_token(vt).expect("verify");
+        let vt = key.verify_signed_license(&privatekey).expect("verify privatekey");
+        let unlocked = manager.unlock_verified_license(vt).expect("verify");
         assert_eq!(unlocked, vec![DlcId::from("expansion_1")]);
         assert!(manager.is_unlocked_id(&DlcId::from("expansion_1")));
     }
@@ -1129,10 +1128,10 @@ mod tests {
     fn verify_inserts_content_key_into_registry() {
         crate::content_key_registry::clear_all();
 
-        let (key, _pub) = DlcKey::generate_complete();
+        let key = DlcKey::generate_random();
         let sym_key: [u8; 32] = rand::random();
         let privatekey = key
-            .create_private_token(
+            .create_signed_license(
                 &[String::from("expansion_encrypted")],
                 None,
                 Some(&sym_key),
@@ -1141,8 +1140,8 @@ mod tests {
             .expect("create privatekey with content_key");
 
         let mut manager = DlcManager::new();
-        let vt = key.verify_token(&privatekey).expect("verify privatekey");
-        let _ = manager.unlock_verified_token(vt).expect("verify");
+        let vt = key.verify_signed_license(&privatekey).expect("verify privatekey");
+        let _ = manager.unlock_verified_license(vt).expect("verify");
 
         let stored = crate::content_key_registry::get("expansion_encrypted").expect("key present");
         assert_eq!(stored, sym_key.to_vec());
@@ -1205,9 +1204,9 @@ mod tests {
 
     #[test]
     fn verify_and_unlock_token_with_dlc_key_param() {
-        let (key, _pub) = DlcKey::generate_complete();
+        let key = DlcKey::generate_random();
         let token = key
-            .create_private_token(
+            .create_signed_license(
                 &[String::from("expansion_1")],
                 None,
                 None,
@@ -1215,11 +1214,11 @@ mod tests {
             )
             .expect("create privatekey");
 
-        let vt = key.verify_token(&token).expect("verify privatekey");
+        let vt = key.verify_signed_license(&token).expect("verify privatekey");
         let mut manager = DlcManager::new();
         // unlock using the previously-verified privatekey
         let unlocked = manager
-            .unlock_verified_token(vt)
+            .unlock_verified_license(vt)
             .expect("verify with dlckey");
         assert_eq!(unlocked, vec![DlcId::from("expansion_1")]);
     }

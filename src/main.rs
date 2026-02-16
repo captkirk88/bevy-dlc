@@ -525,7 +525,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // create signed privatekey carrying the symmetric key so client can decrypt
                 let pass = PublicKey::generate_random();
                 let dlc_key = DlcKey::generate(pass.clone());
-                let privatekey = dlc_key.create_private_token(
+                let privatekey = dlc_key.create_signed_license(
                     &[dlc_id],
                     product.map(Product::from),
                     Some(&sym_key),
@@ -613,7 +613,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // single privatekey for the whole DLC
                 let pass = PublicKey::generate_random();
                 let dlc_key = DlcKey::generate(pass.clone());
-                let privatekey = dlc_key.create_private_token(
+                let privatekey = dlc_key.create_signed_license(
                     &[DlcId::from(dlc_id_str.clone())],
                     product.map(Product::from),
                     Some(&sym_key),
@@ -649,7 +649,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // create signed privatekey carrying the symmetric key so client can decrypt
             let pass = PublicKey::generate_random();
             let dlc_key = DlcKey::generate(pass.clone());
-            let privatekey = dlc_key.create_private_token(
+            let privatekey = dlc_key.create_signed_license(
                 &[dlc_id.clone()],
                 product.map(Product::from),
                 Some(&sym_key),
@@ -793,10 +793,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let pubkey_alias = PublicKey::from_slice(&pub_arr);
             let pub_dlc_key = DlcKey::Public { pubkey: pubkey_alias };
 
-            let private_token = PrivateToken::from(priv_str.to_string());
-            let vt = pub_dlc_key.verify_token(&private_token)?;
+            let private_token = SignedLicense::from(priv_str.to_string());
+            let vt = pub_dlc_key.verify_signed_license(&private_token)?;
             let mut manager = DlcManager::new();
-            let _ = manager.unlock_verified_token(vt)?; // populates content keys
+            let _ = manager.unlock_verified_license(vt)?; // populates content keys
             let sym_key_vec = manager
                 .content_key_for_id(&DlcId::from(enc.dlc_id.clone()))
                 .ok_or("content key not found in privatekey")?;

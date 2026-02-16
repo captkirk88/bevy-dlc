@@ -55,10 +55,10 @@ fn startup(
     let pass = PublicKey::from_base64url(EXAMPLE_PUBKEY).expect("invalid pubkey");
     let private = DlcKey::from_priv_and_pub(EXAMPLE_TOKEN, pass.clone()).expect("from seed");
     let privatekey = private
-        .create_private_token(&["expansionA"], None, None, None)
+        .create_signed_license(&["expansionA"], None, None, None)
         .expect("create privatekey");
-    let vt = pub_dlc_key.verify_token(&privatekey).expect("verify privatekey");
-    dlc.unlock_verified_token(vt).expect("unlock privatekey");
+    let vt = pub_dlc_key.verify_signed_license(&privatekey).expect("verify privatekey");
+    dlc.unlock_verified_license(vt).expect("unlock privatekey");
 
     // diagnostic: ensure content key was inserted into the manager
     if dlc

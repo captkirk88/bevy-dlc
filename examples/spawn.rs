@@ -16,13 +16,13 @@ use bevy_dlc::example_util::*;
 
 fn main() {
     // demo keypair (server would sign tokens in real usage)
-    let (dlc_key, _pubkey) = DlcKey::generate_complete();
+    let dlc_key = DlcKey::generate_random();
 
     // build a compact privatekey that unlocks `expansion_1` and is bound to a
     // product (demonstrates anti-reuse binding)
     let product = Product::from("demo_product".to_string());
     let privatekey = dlc_key
-        .create_private_token(
+        .create_signed_license(
             &["expansion_1"],
             Some(product.clone()),
             None,
@@ -48,7 +48,7 @@ fn main() {
 }
 
 #[derive(Resource)]
-struct ExampleToken(PrivateToken);
+struct ExampleToken(SignedLicense);
 
 #[derive(Resource)]
 struct DemoDlcKey(DlcKey);
@@ -79,8 +79,8 @@ fn apply_example_token(
     mut dlc: ResMut<DlcManager>,
     demo_key: Res<DemoDlcKey>,
 ) {
-    match demo_key.0.verify_token(&privatekey.0) {
-        Ok(vt) => match dlc.unlock_verified_token(vt) {
+    match demo_key.0.verify_signed_license(&privatekey.0) {
+        Ok(vt) => match dlc.unlock_verified_license(vt) {
             Ok(list) => info!("unlocked DLCs: {:?}", list),
             Err(e) => warn!("failed to unlock privatekey: {e}"),
         },
