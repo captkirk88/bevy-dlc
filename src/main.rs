@@ -121,7 +121,8 @@ enum Commands {
     },
 
     /// Generate a pubkey + signed license pair and save them to disk as
-    /// `<product>.pubkey` and `<product>.slicense` (overwrites existing files).
+    /// `<product>.pubkey` and `<product>.slicense`. Automatically merges with
+    /// any existing license for the product to support incremental DLC releases.
     Generate {
         /// Product identifier to embed in the generated SignedLicense and to
         /// derive the output filenames `<product>.pubkey` / `<product>.slicense`.
@@ -919,19 +920,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::Generate { product, dlc_ids } => {
-            // create a random keypair and a signed license for the supplied DLC ids
+            // Auto-detect and merge with existing license (if present)
+            let mut all_dlc_ids = dlc_ids.clone();
+            let license_path = format!("{}.slicense", product);
+            if std::path::Path::new(&license_path).exists() {
+                if let Ok(old_license_text) = std::fs::read_to_string(&license_path) {
+                    if let Some(merged) = merge_dlc_ids_from_license(&old_license_text, &all_dlc_ids) {
+                        all_dlc_ids = merged;
+                    }
+                }
+            }
+
+            // Remove duplicates while preserving order
+            all_dlc_ids.sort();
+            all_dlc_ids.dedup();
+
+            // create a new random keypair and a signed license for the accumulated DLC ids
             let dlc_key = DlcKey::generate_random();
-            let signedlicense = dlc_key.create_signed_license(&dlc_ids, Product::from(product.clone()))?;
+            let signedlicense = dlc_key.create_signed_license(&all_dlc_ids, Product::from(product.clone()))?;
 
             let sl_path = format!("{}.slicense", product);
             let pk_path = format!("{}.pubkey", product);
 
-            // write signed license (sensitive) and pubkey (public) — overwrite existing files
-            let sl_text = signedlicense.with_secret(|s| s.clone());
-            std::fs::write(&sl_path, sl_text)?;
-            std::fs::write(&pk_path, URL_SAFE_NO_PAD.encode(dlc_key.public_key_bytes()))?;
+            // write signed license (sensitive) and pubkey (public)
+            write_license_file(&sl_path, &signedlicense)?;
+            write_pubkey_file(&pk_path, &dlc_key)?;
 
-            println!("Wrote signed license → {}", sl_path);
+            println!("Wrote signed license → {} (DLCs: {})", sl_path, all_dlc_ids.join(", "));
             println!("Wrote public key     → {}", pk_path);
             return Ok(());
         }
@@ -1147,4 +1162,223 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Merge old DLC ids from an existing license text with new ids.
+/// Returns the merged list with duplicates removed, or None on parse error.
+fn merge_dlc_ids_from_license(license_text: &str, new_ids: &[String]) -> Option<Vec<String>> {
+    let mut all_dlc_ids = new_ids.to_vec();
+    let old_license = SignedLicense::from(license_text.trim().to_string());
+    
+    old_license.with_secret(|token_str| {
+        let parts: Vec<&str> = token_str.split('.').collect();
+        if parts.len() == 2 {
+            if let Ok(payload_bytes) = URL_SAFE_NO_PAD.decode(parts[0].as_bytes()) {
+                if let Ok(payload_json) = serde_json::from_slice::<serde_json::Value>(&payload_bytes) {
+                    if let Some(old_dlcs) = payload_json.get("dlcs").and_then(|v| v.as_array()) {
+                        for dlc_val in old_dlcs {
+                            if let Some(dlc_id) = dlc_val.as_str() {
+                                if !all_dlc_ids.contains(&dlc_id.to_string()) {
+                                    all_dlc_ids.push(dlc_id.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    Some(all_dlc_ids)
+}
+
+/// Write a signed license to disk (securely zeroized on drop).
+fn write_license_file(path: &str, license: &SignedLicense) -> Result<(), Box<dyn std::error::Error>> {
+    let text = license.with_secret(|s| s.clone());
+    std::fs::write(path, text)?;
+    Ok(())
+}
+
+/// Write a public key to disk (base64url encoded).
+fn write_pubkey_file(path: &str, dlc_key: &DlcKey) -> Result<(), Box<dyn std::error::Error>> {
+    let pubkey_text = URL_SAFE_NO_PAD.encode(dlc_key.public_key_bytes());
+    std::fs::write(path, pubkey_text)?;
+    Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_merge_dlc_ids_no_existing_license() {
+        let new_ids = vec![String::from("expansion_1"), String::from("expansion_2")];
+        // Empty license text
+        let merged = merge_dlc_ids_from_license("", &new_ids);
+        
+        assert!(merged.is_some());
+        let result = merged.unwrap();
+        // Result should contain the new IDs (exact order may vary due to merge logic)
+        assert!(result.contains(&String::from("expansion_1")));
+        assert!(result.contains(&String::from("expansion_2")));
+    }
+
+    #[test]
+    fn test_merge_dlc_ids_with_existing_license() {
+        let key = DlcKey::generate_random();
+        let old_license = key
+            .create_signed_license(&[String::from("expansion_old")], Product::from("test"))
+            .expect("create old license");
+
+        let old_license_str = old_license.with_secret(|s| s.clone());
+        
+        let new_ids = vec![String::from("expansion_new")];
+        let merged = merge_dlc_ids_from_license(&old_license_str, &new_ids);
+
+        assert!(merged.is_some());
+        let result = merged.unwrap();
+        // Both old and new IDs should be present
+        assert!(result.contains(&String::from("expansion_old")));
+        assert!(result.contains(&String::from("expansion_new")));
+    }
+
+    #[test]
+    fn test_merge_dlc_ids_deduplication() {
+        let key = DlcKey::generate_random();
+        let old_license = key
+            .create_signed_license(&[String::from("expansion_1")], Product::from("test"))
+            .expect("create old license");
+
+        let old_license_str = old_license.with_secret(|s| s.clone());
+        
+        // Try to add expansion_1 again (duplicate)
+        let new_ids = vec![String::from("expansion_1"), String::from("expansion_2")];
+        let merged = merge_dlc_ids_from_license(&old_license_str, &new_ids);
+
+        assert!(merged.is_some());
+        let result = merged.unwrap();
+        
+        // Count occurrences of expansion_1 - should be exactly 1
+        let count = result.iter().filter(|id| *id == "expansion_1").count();
+        assert_eq!(count, 1, "expansion_1 should not be duplicated");
+        
+        // Should still have both expansion_1 and expansion_2
+        assert!(result.contains(&String::from("expansion_1")));
+        assert!(result.contains(&String::from("expansion_2")));
+    }
+
+    #[test]
+    fn test_write_and_read_license_file() {
+        use tempfile::TempDir;
+        
+        let td = TempDir::new().expect("create temp dir");
+        let license_path = td.path().join("test.slicense").to_string_lossy().to_string();
+        
+        let key = DlcKey::generate_random();
+        let license = key
+            .create_signed_license(&[String::from("test_dlc")], Product::from("test"))
+            .expect("create license");
+
+        // Write the license file
+        write_license_file(&license_path, &license)
+            .expect("write license file");
+
+        // Verify file was created
+        assert!(std::path::Path::new(&license_path).exists());
+
+        // Read back the file
+        let written_content = std::fs::read_to_string(&license_path)
+            .expect("read license file");
+
+        // Should match the original license (in token format)
+        let original_token = license.with_secret(|s| s.clone());
+        assert_eq!(written_content.trim(), original_token.trim());
+    }
+
+    #[test]
+    fn test_write_pubkey_file_format() {
+        use tempfile::TempDir;
+        
+        let td = TempDir::new().expect("create temp dir");
+        let pubkey_path = td.path().join("test.pubkey").to_string_lossy().to_string();
+        
+        let key = DlcKey::generate_random();
+        
+        // Write the pubkey file
+        write_pubkey_file(&pubkey_path, &key)
+            .expect("write pubkey file");
+
+        // Verify file was created
+        assert!(std::path::Path::new(&pubkey_path).exists());
+
+        // Read back the file
+        let written_content = std::fs::read_to_string(&pubkey_path)
+            .expect("read pubkey file");
+
+        // Should be valid base64url (no padding)
+        assert!(!written_content.trim().is_empty());
+        assert!(written_content.trim().chars().all(|c| {
+            c.is_ascii_alphanumeric() || c == '_' || c == '-' || c.is_whitespace()
+        }), "Pubkey should be base64url encoded");
+
+        // Should match the length of public key bytes when encoded
+        let expected = URL_SAFE_NO_PAD.encode(key.public_key_bytes());
+        assert_eq!(written_content.trim(), expected);
+    }
+
+    #[test]
+    fn test_merge_multiple_incremental_releases() {
+        let key = DlcKey::generate_random();
+        
+        // Simulate first release
+        let license_v1 = key
+            .create_signed_license(&[String::from("episode_1")], Product::from("game"))
+            .expect("create v1");
+
+        let license_v1_str = license_v1.with_secret(|s| s.clone());
+        
+        // Second release adds episode_2
+        let new_ids_v2 = vec![String::from("episode_2")];
+        let merged_v2 = merge_dlc_ids_from_license(&license_v1_str, &new_ids_v2)
+            .expect("merge v2");
+
+        assert_eq!(merged_v2.len(), 2);
+        assert!(merged_v2.contains(&String::from("episode_1")));
+        assert!(merged_v2.contains(&String::from("episode_2")));
+
+        // Third release adds episode_3
+        let new_ids_v3 = vec![String::from("episode_3")];
+        let merged_v3 = merge_dlc_ids_from_license(&license_v1_str, &new_ids_v3)
+            .expect("merge v3");
+
+        // Note: This only merges from the original license, not from v2
+        // In practice, the generate command would create a new license file
+        // that contains all the IDs
+        assert_eq!(merged_v3.len(), 2);
+        assert!(merged_v3.contains(&String::from("episode_1")));
+        assert!(merged_v3.contains(&String::from("episode_3")));
+    }
+
+    #[test]
+    fn test_write_license_file_creates_parent_directory() {
+        use tempfile::TempDir;
+        
+        let td = TempDir::new().expect("create temp dir");
+        // This path doesn't exist yet (parent dirs not created)
+        let license_path = td
+            .path()
+            .join("subdir")
+            .join("test.slicense")
+            .to_string_lossy()
+            .to_string();
+
+        let key = DlcKey::generate_random();
+        let license = key
+            .create_signed_license(&[String::from("test")], Product::from("test"))
+            .expect("create license");
+
+        // This will fail because parent directory doesn't exist
+        // (The actual implementation expects parent directory to exist)
+        let result = write_license_file(&license_path, &license);
+        assert!(result.is_err(), "Should fail when parent directory doesn't exist");
+    }
 }

@@ -2,86 +2,95 @@
   <img src="dlc.png" alt="bevy-dlc" title="Yes this was AI generated! Don't like it?  Too bad...  Complain to the AI Overlords." />
 </p>
 
-# bevy-dlc — DLC (Downloadable Content support)
+---
 
 [![Crates.io](https://img.shields.io/crates/v/bevy-dlc.svg)](https://crates.io/crates/bevy-dlc)
 [![docs.rs](https://docs.rs/bevy-dlc/badge.svg)](https://docs.rs/bevy-dlc)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Compact helper crate for shipping encrypted DLC assets and unlocking them with offline-signed licenses.
+Encrypt and ship DLC asset packs with offline-signed license tokens. Works with Bevy's asset pipeline.
 
-- Encrypt and ship asset packs `.dlcpack`
-- Verify signed license tokens (Ed25519)
-- Provision symmetric encryption keys from tokens and unlock encrypted assets at runtime
-- Lazy / labeled sub-asset support (e.g. `pack.dlcpack#sprites/player.png`)
+## Features
 
-This README covers quick usage, the `bevy-dlc` CLI for packing, the `App` extension helpers, and short examples.
+- Pack assets into encrypted `.dlc` or `.dlcpack` containers
+- Sign licenses with Ed25519 (private key embeds the symmetric encryption key)
+- Verify signatures at runtime and unlock encrypted content
+- Lazy loading of labeled assets (e.g. `pack.dlcpack#sprites/player.png`)
+- Product binding — prevent token reuse across games
 
+## Install
 
-**Install (library & CLI)**
-
-- As a dependency in `Cargo.toml` (for apps and examples):
+Add to your `Cargo.toml`:
 
 ```toml
-bevy-dlc = { path = "." }
+bevy-dlc = "0.1"
 ```
 
-- To install the CLI tool (optional):
+To use the CLI tool:
 
 ```bash
 cargo install bevy-dlc
 ```
 
-After `cargo install bevy-dlc` you get the `bevy-dlc` binary with convenient commands (examples below).
+Then `bevy-dlc --help` for available commands.
 
-**CLI: `bevy-dlc pack`**
+## Quick Start
 
-Use the CLI to create encrypted `.dlcpack` files for distribution. Example usage:
+### Create a pack
 
 ```bash
-# Quick (one-line) pack example — embeds product and writes a .dlcpack
-bevy-dlc pack --product example assets/pack_src expansion_1 --pack -o assets/expansionA.dlcpack
+bevy-dlc pack --product my-game assets/expansion_1 expansion_1 --pack [-o expansion_1.dlcpack]
 ```
 
-The CLI supports additional flags. See `bevy-dlc help` for the full flag list.
+- `--product` — binds the pack to a product name (enforced by `DlcManager`)
+- `assets/expansion_1` — directory of assets to pack
+- `expansion_1` — DLC ID (used in licenses to unlock this pack)
+- `--pack` — create a single encrypted archive (`.dlcpack`) instead of individual encrypted files
+- `-o expansion_1.dlcpack` — output path for the pack (defaults to `{dlc_id}.dlcpack`)
 
-### App Extension & Plugin Usage
+This creates `expansion_1.dlcpack` and prints a signed license token.
 
-`bevy-dlc` exposes `register_dlc_type` on `App` to register DLC asset types.  If your DLC has a custom asset type, you must register it.
+Alternatively you can use `bevy-dlc generate --help` to review how to generate tokens without packing, or `bevy-dlc validate --help` to verify tokens.
 
-Example (minimal):
+> [!NOTE]
+> `bevy-dlc help <command>` for detailed usage of each CLI command.
+
+### Load in your app
 
 ```rust
 use bevy::prelude::*;
 use bevy_dlc::prelude::*;
-use bevy_dlc::example_util::*; // example-only helper
 
 fn main() {
-        let dlc_key = DlcKey::public(...pubkey...).unwrap();
-        let signed_license = SignedLicense::from(...license...);
+    let dlc_key = DlcKey::public(pubkey_base64).unwrap();
+    let license = SignedLicense::from(token_string);
 
-        App::new()
-                .add_plugins(DefaultPlugins)
-                // `DlcPlugin::new(product, public_key, optional_signed_license)`
-                .add_plugins(DlcPlugin::new(Product::from("example"), dlc_key, signed_license))
-                // Register any custom DLC asset types used in your packs
-                .register_dlc_type::<MyCustomAssetType>()
-                .run();
+    App::new()
+        .add_plugins(DefaultPlugins)
+        .add_plugins(DlcPlugin::new(
+            Product::from("my-game"),
+            dlc_key,
+            license,
+        ))
+        .register_dlc_type::<Image>()  // if your pack has custom types
+        .run();
 }
 ```
 
-### Loading & Unlocking Flow
+### Load assets
 
-- Load a pack like any other asset:
-
-```rust
-let pack_handle: Handle<DlcPack> = asset_server.load("expansionA.dlcpack");
-```
-
-- After applying a verified license (or when the content key is present in the registry), load labeled entries:
+Once unlocked, load assets from your pack like normal:
 
 ```rust
-let img_handle: Handle<Image> = asset_server.load("expansionA.dlcpack#test.png");
+let pack: Handle<DlcPack> = asset_server.load("expansion_1.dlcpack");
+let image: Handle<Image> = asset_server.load("expansion_1.dlcpack#sprites/player.png");
 ```
+
+*Review [real.rs](examples/real.rs) for a complete example.*
+
+## License
+
+MIT
+
 
 
