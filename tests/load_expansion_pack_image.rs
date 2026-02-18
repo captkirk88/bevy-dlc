@@ -31,14 +31,14 @@ fn load_generated_expansiona_dlcpack_and_decode_image() {
     let product = Product::from("example");
 
     // create a private DlcKey and a SignedLicense — the private seed is used
-    // as the symmetric content key embedded into the token by
-    // `create_signed_license`.
+    // as the symmetric encrypt_key embedded into the token by
+    // `create_signed_license`. 
     let private = DlcKey::generate_random();
     let signedlicense = private
         .create_signed_license(&[dlc_id.clone()], product.clone())
         .expect("create signed license");
 
-    // extract the `content_key` that the token carries and use it to encrypt
+    // extract the `encrypt_key` that the token carries and use it to encrypt
     // the on-disk pack so token <-> pack agree.
     let key_bytes = signedlicense.with_secret(|s| {
         let parts: Vec<&str> = s.split('.').collect();
@@ -49,21 +49,21 @@ fn load_generated_expansiona_dlcpack_and_decode_image() {
         let payload_json = String::from_utf8(payload_bytes).expect("payload utf8");
         let v: serde_json::Value = serde_json::from_str(&payload_json).expect("json");
         let content_key_b64 = v
-            .get("content_key")
-            .expect("content_key present")
+            .get("encrypt_key")
+            .expect("encrypt_key present")
             .as_str()
-            .expect("content_key str");
+            .expect("encrypt_key str");
         URL_SAFE_NO_PAD
             .decode(content_key_b64.as_bytes())
-            .expect("content_key decode")
+            .expect("encrypt_key decode")
     });
     assert_eq!(key_bytes.len(), 32);
 
-    let content_key = bevy_dlc::ContentKey::from(key_bytes);
+    let encrypt_key = bevy_dlc::EncryptionKey::from(key_bytes);
 
     // create container bytes and write into `assets/` so AssetServer can load it
     let container =
-        bevy_dlc::pack_encrypted_pack(&dlc_id, &items, &content_key).expect("pack container");
+        bevy_dlc::pack_encrypted_pack(&dlc_id, &items, &encrypt_key).expect("pack container");
     let tmp_path = "assets/test_generated_expansionA.dlcpack";
     std::fs::write(tmp_path, &container).expect("write pack to assets");
     
@@ -84,8 +84,17 @@ fn load_generated_expansiona_dlcpack_and_decode_image() {
     app.init_asset_loader::<DlcPackLoader>();
     app.init_asset::<DlcPack>();
 
+    // ImagePlugin::build only *pre-registers* ImageLoader (Pending). The
+    // actual registration normally happens in bevy_render::RenderPlugin::finish.
+    // Since we run without RenderPlugin here, we must promote ImageLoader from
+    // Pending → Ready manually so that DlcPackLoader's immediate() sub-loads
+    // can resolve the loader without blocking forever.
+    app.register_asset_loader(bevy::image::ImageLoader::new(
+        bevy::image::CompressedImageFormats::empty(),
+    ));
+
     // insert an empty DlcManager and *apply* the signed key token from the
-    // test so the content_key registry is populated (mirrors runtime flow).
+    // test so the encrypt_key registry is populated (mirrors runtime flow).
     app.insert_resource(DlcManager::new(product));
     app.update();
 
@@ -116,8 +125,9 @@ fn load_generated_expansiona_dlcpack_and_decode_image() {
     ) {
         app.update();
         if start.elapsed() > timeout {
+            let state = asset_server.get_load_state(&pack_handle);
             let _ = std::fs::remove_file(tmp_path);
-            panic!("timed out waiting for DlcPack to load");
+            panic!("timed out waiting for DlcPack to load (state={:?})", state);
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -130,12 +140,12 @@ fn load_generated_expansiona_dlcpack_and_decode_image() {
         assert!(!pack.entries().is_empty());
 
         let first_entry = pack.entries().first().expect("at least one entry").clone();
-        assert!(first_entry.path().ends_with("test.png"));
-        assert_eq!(first_entry.original_extension, "png");
+        assert!(first_entry.path().to_string().ends_with("test.png"));
+        assert_eq!(first_entry.original_extension(), "png");
 
         // decrypt raw bytes from the pack while we still have `pack` available
         let raw_png = pack
-            .decrypt_entry_bytes(&first_entry.path())
+            .decrypt_entry_bytes(&first_entry.path().to_string())
             .expect("decrypt raw entry");
         assert!(
             raw_png.starts_with(b"\x89PNG\r\n\x1a\n"),
@@ -152,8 +162,8 @@ fn load_generated_expansiona_dlcpack_and_decode_image() {
     // Force a reload of the labeled entry path so AssetServer will queue the
     // nested loader for the `pack#entry` label (this mirrors runtime reloads
     // performed by `reload_assets_on_unlock_system`).
-    let entry_path = first_entry.path().clone();
-    asset_server.reload(&entry_path);
+    let entry_path = first_entry.path();
+    asset_server.reload(entry_path);
 
     // Instead of relying on the async AssetServer pipeline for the labeled
     // entry (covered by other tests), validate the decrypted PNG bytes are

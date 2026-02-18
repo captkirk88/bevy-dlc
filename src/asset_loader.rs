@@ -1,5 +1,5 @@
 use bevy::asset::io::Reader;
-use bevy::asset::{Asset, AssetLoader, Handle, LoadContext};
+use bevy::asset::{Asset, AssetLoader, AssetPath, ErasedLoadedAsset, Handle, LoadContext, LoadedUntypedAsset};
 use bevy::ecs::reflect::AppTypeRegistry;
 use std::io;
 use std::sync::Arc;
@@ -7,6 +7,55 @@ use bevy::reflect::TypePath;
 use thiserror::Error;
 
 use crate::DlcId;
+
+// ---------------------------------------------------------------------------
+// Trait for inserting an `ErasedLoadedAsset` as a typed labeled sub-asset.
+//
+// Bevy's public `LoadContext` API only exposes `add_loaded_labeled_asset::<A>`
+// which requires a compile-time type. We work around this by implementing this
+// trait for every concrete asset type we support and storing boxed instances
+// in `DlcPackLoader`. The loader tries each registrar in turn; the first one
+// that successfully downcasts the `ErasedLoadedAsset` wins.
+// ---------------------------------------------------------------------------
+
+/// Attempts to downcast an `ErasedLoadedAsset` to `A` and, if successful,
+/// registers it as a labeled sub-asset in `load_context`.
+///
+/// Returns `true` when the asset was successfully registered.
+pub trait ErasedSubAssetRegistrar: Send + Sync + 'static {
+    fn try_register(
+        &self,
+        label: String,
+        erased: ErasedLoadedAsset,
+        load_context: &mut LoadContext<'_>,
+    ) -> Result<(), ErasedLoadedAsset>;
+}
+
+/// Concrete implementation for asset type `A`.
+pub struct TypedSubAssetRegistrar<A: Asset>(std::marker::PhantomData<A>);
+
+impl<A: Asset> Default for TypedSubAssetRegistrar<A> {
+    fn default() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl<A: Asset> ErasedSubAssetRegistrar for TypedSubAssetRegistrar<A> {
+    fn try_register(
+        &self,
+        label: String,
+        erased: ErasedLoadedAsset,
+        load_context: &mut LoadContext<'_>,
+    ) -> Result<(), ErasedLoadedAsset> {
+        match erased.downcast::<A>() {
+            Ok(loaded) => {
+                load_context.add_loaded_labeled_asset(label, loaded);
+                Ok(())
+            }
+            Err(back) => Err(back),
+        }
+    }
+}
 
 /// Represents a single encrypted file loaded from a `.dlc` container. The contained bytes are still encrypted and will be decrypted by the `DlcLoader` when the asset is loaded.
 #[derive(Clone, Debug)]
@@ -109,7 +158,7 @@ pub fn parse_encrypted(bytes: &[u8]) -> Result<EncryptedAsset, io::Error> {
     })
 }
 
-// --- Generic AssetLoader that decrypts `.dlc` -> `A` using the global registry ---
+/// A loader for individual encrypted files inside a `.dlcpack`.
 #[derive(TypePath)]
 pub struct DlcLoader<A: bevy::asset::Asset + 'static> {
     /// Stored for potential future use (e.g., validating type_path matches `A`).
@@ -137,32 +186,40 @@ where
 #[derive(TypePath, Clone, Debug)]
 pub struct DlcPackEntry {
     /// Relative path inside the pack (as authored when packing)
-    pub path: String,
+    path: String,
     /// Optional original extension stored by the pack producer
-    pub original_extension: String,
+    original_extension: String,
     /// Optional serialized TypePath
-    pub type_path: Option<String>,
+    type_path: Option<String>,
 }
 
 impl DlcPackEntry {
     /// Convenience: load this entry's registered path via `AssetServer::load`.
-    pub fn load<A: bevy::asset::Asset>(
+    pub fn load_untyped(
         &self,
         asset_server: &bevy::prelude::AssetServer,
-    ) -> Handle<A> {
-        asset_server.load::<A>(&self.path)
+    ) -> Handle<LoadedUntypedAsset> {
+        asset_server.load_untyped(&self.path)
     }
 
     /// Decrypt and return the plaintext bytes for this entry using the
-    /// `DlcPack` container that owns it. This consults the global content-key
-    /// registry and will return `DlcLoaderError::DlcLocked` when the content
+    /// `DlcPack` container that owns it. This consults the global encrypt-key
+    /// registry and will return `DlcLoaderError::DlcLocked` when the encrypt
     /// key is not present.
     pub fn decrypt_bytes(&self, pack: &DlcPack) -> Result<Vec<u8>, DlcLoaderError> {
         pack.decrypt_entry_bytes(&self.path)
     }
 
-    pub fn path(&self) -> &String {
-        &self.path
+    pub fn path(&self) -> AssetPath<'_> {
+        bevy::asset::AssetPath::parse(&self.path)
+    }
+
+    pub fn original_extension(&self) -> &String {
+        &self.original_extension
+    }
+
+    pub fn type_path(&self) -> Option<&String> {
+        self.type_path.as_ref()
     }
 
 }
@@ -196,10 +253,11 @@ impl DlcPack {
         &self.container_bytes
     }
 
-    /// Find an entry by its registered path (the value produced by the
-    /// pack loader, e.g. `expansion_A.dlcpack#test.png`).
+    /// Find an entry by its registered path
     pub fn find_entry(&self, path: &str) -> Option<&DlcPackEntry> {
-        self.entries.iter().find(|e| e.path().ends_with(path))
+        self.entries
+            .iter()
+            .find(|e| e.path().to_string().ends_with(path) || e.path().path().ends_with(path))
     }
 
     /// Decrypt an entry (accepts either `name` or `packfile.dlcpack#name`) by
@@ -208,7 +266,7 @@ impl DlcPack {
         &self,
         entry_path: &str,
     ) -> Result<Vec<u8>, crate::asset_loader::DlcLoaderError> {
-        // Decrypt the pack once (checks global content-key registry) and
+        // Decrypt the pack once (checks global encrypt-key registry) and
         // extract the requested entry.
         let (_dlc_id, items) = crate::asset_loader::decrypt_pack_entries(&self.container_bytes)
             .map_err(|e| e)?;
@@ -240,13 +298,33 @@ impl DlcPack {
                 Some(e) => e,
                 None => return None,
             };
-        Some(entry.load(asset_server))
+        Some(asset_server.load::<A>(entry.path()))
     }
 }
 
 /// `AssetLoader` for `.dlcpack` bundles (contains multiple encrypted entries).
+///
+/// When the encrypt key is available in the registry at load time (i.e. the
+/// DLC is already unlocked), each entry is immediately decrypted and registered
+/// as a typed labeled sub-asset so `asset_server.load("pack.dlcpack#entry.png")`
+/// returns the correct `Handle<T>` for the extension's loader (e.g. `Handle<Image>`
+/// for `.png`). No asset type is hardcoded here — the correct type is determined
+/// purely by extension dispatch via Bevy's `immediate()` loader, and the result
+/// is downcast + registered using the list of `ErasedSubAssetRegistrar`s that
+/// `DlcPlugin::build` populates.
+///
+/// When the encrypt key is *not* yet available the pack is still loaded
+/// successfully (entries list is populated from the manifest) but the labeled
+/// sub-assets are not added — `reload_assets_on_unlock_system` will reload the
+/// pack once the key arrives, and the second load will succeed.
 #[derive(TypePath, Default)]
-pub struct DlcPackLoader;
+pub struct DlcPackLoader {
+    /// Ordered list of per-type registrars. `DlcPlugin::build` pushes one
+    /// `TypedSubAssetRegistrar<A>` for every `A` it also registers via
+    /// `init_asset_loader::<DlcLoader<A>>()`. The loader tries each in turn
+    /// and uses the first successful downcast.
+    pub registrars: Vec<Box<dyn ErasedSubAssetRegistrar>>,
+}
 
 impl AssetLoader for DlcPackLoader {
     type Asset = DlcPack;
@@ -263,8 +341,7 @@ impl AssetLoader for DlcPackLoader {
         _settings: &Self::Settings,
         load_context: &mut LoadContext<'_>,
     ) -> Result<Self::Asset, Self::Error> {
-        // capture the original requested path (for registry/bookkeeping)
-        let path_string = Some(load_context.path().path().to_string_lossy().to_string());
+        let path_string = load_context.path().path().to_string_lossy().to_string();
 
         let mut bytes = Vec::new();
         reader
@@ -272,45 +349,89 @@ impl AssetLoader for DlcPackLoader {
             .await
             .map_err(|e| DlcLoaderError::Io(e))?;
 
-        // parse manifest only — do NOT decrypt archive entries here. The
-        // returned `entries` contain `EncryptedAsset` records that reference
-        // the encrypted archive (v2) or per-entry ciphertexts (v1).
         let (dlc_id, _version, manifest_entries) = crate::parse_encrypted_pack(&bytes)
             .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
 
         // register this asset path for the dlc id so it can be reloaded on unlock
-        if let Some(p) = &path_string {
-            crate::content_key_registry::register_asset_path(&dlc_id, p);
-        }
+        crate::encrypt_key_registry::register_asset_path(&dlc_id, &path_string);
 
-        // convert manifest into `DlcPackEntry` values and register labeled
-        // handles (deferred typed-loading by consumers).
+        // Try to decrypt all entries immediately when the encrypt key is present.
+        // If the key is missing we still populate the manifest so callers can
+        // inspect entries; a reload after unlock will add the typed sub-assets.
+        let decrypted_items: Option<Vec<(String, String, Option<String>, Vec<u8>)>> =
+            match decrypt_pack_entries(&bytes) {
+                Ok((_id, items)) => Some(items),
+                Err(DlcLoaderError::DlcLocked(_)) => None, // not yet unlocked — ok
+                Err(e) => return Err(e),
+            };
+
         let mut out_entries = Vec::with_capacity(manifest_entries.len());
+
         for (path, enc) in manifest_entries.into_iter() {
-            // normalized entry path (preserve forward-slashes)
-            let fake_path = format!("{}", path.replace('\\', "/"));
+            let entry_label = path.replace('\\', "/");
 
-            // register an untyped label handle so callers can `load("pack#label")`
-            let untyped_handle = load_context.get_label_handle::<bevy::asset::LoadedUntypedAsset>(&fake_path);
+            // Try to load this entry as a typed sub-asset when plaintext is available.
+            if let Some(ref items) = decrypted_items {
+                if let Some((_, ext, _type_path, plaintext)) =
+                    items.iter().find(|(p, _, _, _)| p == &path)
+                {
+                    // Build a fake path with the correct extension so
+                    // `load_context.loader()` selects the right concrete loader
+                    // by extension (e.g. `.png` → ImageLoader, `.json` → JsonLoader).
+                    let stem = std::path::Path::new(&entry_label)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("entry");
+                    let fake_path = format!("{}.{}", stem, ext);
 
-            // expose the labeled asset immediately so `AssetServer::load("pack#label")`
-            // and `AssetServer::load_folder("pack")` work the same as real files.
-            load_context.add_labeled_asset(
-                fake_path.clone(),
-                bevy::asset::LoadedUntypedAsset { handle: untyped_handle.clone().into() },
-            );
+                    let mut vec_reader = bevy::asset::io::VecReader::new(plaintext.clone());
 
-            // store the *registered* lookup path (pack-file + `#` + entry path)
-            let _pack_file = load_context
-                .path()
-                .path()
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("<dlcpack>");
-            let registered_path = untyped_handle.path().ok_or(DlcLoaderError::InvalidFormat(format!(
-                "invalid entry path for registration: {}",
-                fake_path
-            )))?.to_string();
+                    // Use extension dispatch — Bevy picks the right loader (e.g. ImageLoader
+                    // for .png). Returns an ErasedLoadedAsset (type-erased). We then try each
+                    // registered TypedSubAssetRegistrar in turn until one successfully downcasts
+                    // and registers the asset.
+                    let result = load_context
+                        .loader()
+                        .immediate()
+                        .with_reader(&mut vec_reader)
+                        .with_unknown_type()
+                        .load(fake_path)
+                        .await;
+
+                    match result {
+                        Ok(erased) => {
+                            let mut remaining = Some(erased);
+                            for registrar in &self.registrars {
+                                match registrar.try_register(
+                                    entry_label.clone(),
+                                    remaining.take().unwrap(),
+                                    load_context,
+                                ) {
+                                    Ok(()) => { remaining = None; break; }
+                                    Err(back) => { remaining = Some(back); }
+                                }
+                            }
+                            if let Some(_) = remaining {
+                                bevy::log::warn!(
+                                    "DlcPackLoader: no registrar matched type for entry '{}' (extension='{}').",
+                                    entry_label,
+                                    ext
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            bevy::log::warn!(
+                                "DlcPackLoader: failed to load entry '{}': {}",
+                                entry_label,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Build the labeled registered path for the DlcPackEntry.
+            let registered_path = format!("{}#{}", path_string, entry_label);
 
             out_entries.push(DlcPackEntry {
                 path: registered_path,
@@ -319,13 +440,11 @@ impl AssetLoader for DlcPackLoader {
             });
         }
 
-        let pack = DlcPack {
+        Ok(DlcPack {
             dlc_id: DlcId::from(dlc_id),
             entries: out_entries,
             container_bytes: bytes,
-        };
-
-        Ok(pack)
+        })
     }
 }
 
@@ -337,8 +456,8 @@ pub fn decrypt_pack_entries(
     let (dlc_id, version, entries) = crate::parse_encrypted_pack(pack_bytes)
         .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
 
-    // lookup content key in global registry
-    let content_key = crate::content_key_registry::get(&dlc_id)
+    // lookup encrypt key in global registry
+    let encrypt_key = crate::encrypt_key_registry::get(&dlc_id)
         .ok_or_else(|| DlcLoaderError::DlcLocked(dlc_id.clone()))?;
 
     // Version 1: each entry encrypted individually
@@ -346,18 +465,16 @@ pub fn decrypt_pack_entries(
         let mut out = Vec::with_capacity(entries.len());
         for (path, enc) in entries.into_iter() {
             let plaintext =
-                crate::decrypt_with_key(&content_key, &enc.ciphertext, &enc.nonce).map_err(|e| {
+                crate::decrypt_with_key(&encrypt_key, &enc.ciphertext, &enc.nonce).map_err(|e| {
                     let inner_error = e.to_string();
-                    DlcLoaderError::DecryptionFailed(format!(
+                    let msg = format!(
                         "dlc='{}' entry='{}' {}",
                         dlc_id,
                         path,
-                        if inner_error.is_empty() {
-                            "".to_string()
-                        } else {
-                            format!("decryption failed: {}", inner_error)
-                        }
-                    ))
+                        if inner_error.is_empty() { "".to_string() } else { format!("{}", inner_error) }
+                    );
+
+                    DlcLoaderError::DecryptionFailed(msg)
                 })?;
             out.push((path, enc.original_extension, enc.type_path, plaintext));
         }
@@ -375,15 +492,17 @@ pub fn decrypt_pack_entries(
 
     // decrypt the entire archive once
     let archive_plain =
-        crate::decrypt_with_key(&content_key, archive_ciphertext, &archive_nonce).map_err(|e| {
+        crate::decrypt_with_key(&encrypt_key, archive_ciphertext, &archive_nonce).map_err(|e| {
             // report which DLC failed; include an example entry for context
             let example_entry = &entries[0].0;
-            DlcLoaderError::DecryptionFailed(format!(
-                "dlc='{}' entry='{}' decryption failed: {}",
+            let msg = format!(
+                "dlc='{}' entry='{}' {}",
                 dlc_id,
                 example_entry,
                 e.to_string()
-            ))
+            );
+
+            DlcLoaderError::DecryptionFailed(msg)
         })?;
 
     // decompress tar.gz and extract files
@@ -435,7 +554,7 @@ pub fn decrypt_pack_entries(
 pub enum DlcLoaderError {
     #[error("IO error: {0}")]
     Io(io::Error),
-    #[error("DLC locked: content key not found for DLC id: {0}")]
+    #[error("DLC locked: encrypt key not found for DLC id: {0}")]
     DlcLocked(String),
     #[error("Decryption failed: {0}")]
     DecryptionFailed(String),
@@ -445,7 +564,7 @@ pub enum DlcLoaderError {
 
 #[cfg(test)]
 mod tests {
-    use crate::ContentKey;
+    use crate::EncryptionKey;
 use secure_gate::ExposeSecret;
 
     use super::*;
@@ -476,7 +595,7 @@ use secure_gate::ExposeSecret;
 
     #[test]
     fn decrypt_pack_entries_without_key_returns_locked_error() {
-        crate::content_key_registry::clear_all();
+        crate::encrypt_key_registry::clear_all();
         let dlc_id = crate::DlcId::from("locked_dlc");
         let items = vec![(
             "a.txt".to_string(),
@@ -484,7 +603,7 @@ use secure_gate::ExposeSecret;
             None,
             b"hello".to_vec(),
         )];
-        let key = ContentKey::from_random(32);
+        let key = EncryptionKey::from_random(32);
         let container = crate::pack_encrypted_pack(&dlc_id, &items, &key).expect("pack");
 
         let err = decrypt_pack_entries(&container).expect_err("should be locked");
@@ -496,7 +615,7 @@ use secure_gate::ExposeSecret;
 
     #[test]
     fn decrypt_pack_entries_with_wrong_key_reports_entry_and_dlc() {
-        crate::content_key_registry::clear_all();
+        crate::encrypt_key_registry::clear_all();
         let dlc_id = crate::DlcId::from("badkey_dlc");
         let items = vec![(
             "b.txt".to_string(),
@@ -504,18 +623,20 @@ use secure_gate::ExposeSecret;
             None,
             b"world".to_vec(),
         )];
-        let real_key = ContentKey::from_random(32);
+        let real_key = EncryptionKey::from_random(32);
         let container = crate::pack_encrypted_pack(&dlc_id, &items, &real_key).expect("pack");
 
         // insert an incorrect key for this DLC
         let wrong_key: [u8; 32] = rand::random();
-        crate::content_key_registry::insert(&dlc_id.to_string(), crate::ContentKey::from(wrong_key.to_vec()));
+        crate::encrypt_key_registry::insert(&dlc_id.to_string(), crate::EncryptionKey::from(wrong_key.to_vec()));
 
         let err = decrypt_pack_entries(&container).expect_err("should fail decryption");
         match err {
             DlcLoaderError::DecryptionFailed(msg) => {
                 assert!(msg.contains("dlc='badkey_dlc'"));
                 assert!(msg.contains("entry='b.txt'"));
+                // ensure inner cause is propagated (auth failed for wrong key)
+                assert!(msg.contains("authentication failed") || msg.contains("incorrect key"));
             }
             _ => panic!("expected DecryptionFailed, got {:?}", err),
         }
@@ -523,8 +644,8 @@ use secure_gate::ExposeSecret;
 
     #[test]
     fn integration_load_expansiona_pack_and_decode_image() {
-        // generate a dlcpack on-the-fly using a SignedLicense's embedded content_key
-        crate::content_key_registry::clear_all();
+        // generate a dlcpack on-the-fly using a SignedLicense's embedded encrypt_key
+        crate::encrypt_key_registry::clear_all();
 
         use base64::Engine as _;
 
@@ -537,13 +658,13 @@ use secure_gate::ExposeSecret;
             img_bytes,
         )];
 
-        // create a private key + signed license (private seed == symmetric content_key)
+        // create a private key + signed license (private seed == symmetric encrypt_key)
         let private = crate::DlcKey::generate_random();
         let signedlicense = private
             .create_signed_license(&[dlc_id.clone()], crate::Product::from("example"))
             .expect("create signed license");
 
-        // decode the embedded content_key from the token payload and insert it
+        // decode the embedded encrypt_key from the token payload and insert it
         let key_bytes = signedlicense.with_secret(|s| {
             let parts: Vec<&str> = s.split('.').collect();
             assert_eq!(parts.len(), 2);
@@ -551,18 +672,18 @@ use secure_gate::ExposeSecret;
                 .decode(parts[0].as_bytes())
                 .expect("payload base64 decode");
             let v: serde_json::Value = serde_json::from_slice(&payload_bytes).expect("json");
-            let content_key_b64 = v.get("content_key").expect("content_key present").as_str().expect("str");
+            let content_key_b64 = v.get("encrypt_key").expect("encrypt_key present").as_str().expect("str");
             base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .decode(content_key_b64.as_bytes())
-                .expect("content_key decode")
+                .expect("encrypt_key decode")
         });
         assert_eq!(key_bytes.len(), 32);
 
-        let content_key = ContentKey::from(key_bytes.clone());
-        crate::content_key_registry::insert(&dlc_id.to_string(), content_key.with_secret(|b| ContentKey::from(b.to_vec())));
+        let encrypt_key = EncryptionKey::from(key_bytes.clone());
+        crate::encrypt_key_registry::insert(&dlc_id.to_string(), encrypt_key.with_secret(|b| EncryptionKey::from(b.to_vec())));
 
         // pack using the same symmetric key and validate decrypt_pack_entries
-        let container = crate::pack_encrypted_pack(&dlc_id, &items, &content_key).expect("pack container");
+        let container = crate::pack_encrypted_pack(&dlc_id, &items, &encrypt_key).expect("pack container");
         let (did, _v, entries) = crate::parse_encrypted_pack(&container).expect("parse pack");
         assert_eq!(did, "expansionA");
         assert!(!entries.is_empty());
@@ -610,16 +731,26 @@ where
 
         // register this asset path for the dlc id so it can be reloaded on unlock
         if let Some(p) = &path_string {
-            crate::content_key_registry::register_asset_path(&enc.dlc_id, p);
+            crate::encrypt_key_registry::register_asset_path(&enc.dlc_id, p);
         }
 
-        // lookup content key in global registry (loader-executed outside ECS)
-        let content_key = crate::content_key_registry::get(&enc.dlc_id)
+        // lookup encrypt key in global registry (loader-executed outside ECS)
+        let encrypt_key = crate::encrypt_key_registry::get(&enc.dlc_id)
             .ok_or_else(|| DlcLoaderError::DlcLocked(enc.dlc_id.clone()))?;
 
         // decrypt bytes
-        let plaintext = crate::decrypt_with_key(&content_key, &enc.ciphertext, &enc.nonce)
-            .map_err(|e| DlcLoaderError::DecryptionFailed(e.to_string()))?;
+        let plaintext = crate::decrypt_with_key(&encrypt_key, &enc.ciphertext, &enc.nonce)
+            .map_err(|e| {
+                let inner_error = e.to_string();
+                let msg = format!(
+                    "dlc='{}' path='{}' {}",
+                    enc.dlc_id,
+                    path_string.unwrap_or_else(|| "<unknown>".to_string()),
+                    if inner_error.is_empty() { "".to_string() } else { format!("{}", inner_error) }
+                );
+
+                DlcLoaderError::DecryptionFailed(msg)
+            })?;
 
         // Choose an extension for the nested load so Bevy selects the correct
         // concrete loader (use container ext or fallback to original path ext).

@@ -2,7 +2,15 @@
 name = "bevy-dlc"
 version = "0.1.0"
 edition = "2024"
-authors = []
+authors = ["Kirk <github.com/captkirk88>"]
+description = "DLC (downloadable content) management for Bevy games"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/captkirk88/bevy-dlc"
+categories = ["game-development"]
+keywords = ["bevy", "dlc", "downloadable content"]
+exclude = ["tests/*", "benches/*"]
+
 
 [dependencies]
 bevy = "0.18"
@@ -24,17 +32,22 @@ ring = "0.17"
 # async runtime for CLI helpers (used for safe AssetServer lookups)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 secure = { version = "0.3.0", features = ["compression", "encryption"], optional = true }
-secure-gate = { version = "0.7.0-rc.14", features = ["secure", "rand", "cloneable", "no-alloc"] }
+secure-gate = { version = "0.7.0-rc.14", features = ["secure", "rand", "cloneable", "ct-eq"] }
 byte-aes = "0.2.2"
 
 [features]
 default = []
 example = ["secure"]
 
+[dev-dependencies]
+assert_cmd = "2.1"
+predicates = "3.1"
+tempfile = "3.6"
+
 [profile.release]
 opt-level = "z"
 strip = "symbols"
-lto = "fat"
+lto = "thin"
 codegen-units = 1
 panic = 'abort'
 
@@ -51,4 +64,9 @@ required-features = ["example"]
 [[example]]
 name = "spawn"
 path = "examples/spawn.rs"
+required-features = ["example"]
+
+[[example]]
+name = "regenerate"
+path = "examples/regenerate_example_pack.rs"
 required-features = ["example"]

@@ -5,9 +5,9 @@ use bevy::{asset::*, prelude::*};
 // returns `SignedLicense` (zeroized wrapper). Uses the `secure` crate's
 // `secure_str_aes!` under the hood via the `secure!` helper macro.
 #[cfg(feature = "example")]
-secure::secure_str_aes!("ABCDEFGHIJKLMNOPQRSTUVWXYZ012345", "EXAMPLE_LICENSE", "eyJjb250ZW50X2tleSI6InVNenJEX1pVWkRMUTZydWtueGdidE15NThncWJ5QWVETmM1MTBHamRVZ0EiLCJkbGNzIjpbImV4cGFuc2lvbkEiXSwicHJvZHVjdCI6ImV4YW1wbGUifQ.q5RO5s1f4w-ly4vGAfmomF8_q8amP9kbXUAp92_KjTiKSlyzlnPuqdIz4tWswniG2k42M3ENvpk83tk3NbRGCg");
+secure::secure_str_aes!("ABCDEFGHIJKLMNOPQRSTUVWXYZ012345", "EXAMPLE_LICENSE", "eyJkbGNzIjpbImV4cGFuc2lvbkEiXSwiZW5jcnlwdF9rZXkiOiIzZ1pRekU5Y1IxQTQ5cFlTZ1FTYkhVMldjTVpNWWdZbVpRS1AxdWFJcnZFIiwicHJvZHVjdCI6ImV4YW1wbGUifQ.vitSR1ZjTT6dzzujTtmHnAE8w-JmBssu7H7Mr43M1luN-fafS3dqQ-g3SFw83PU7kDoXNAL29jaVMoKz_ttsAA");
 
-pub const EXAMPLE_PUBKEY: &str = "Sl0gvAG5n0DSEF941YiPKDNFJ1z4pcHOzyhY-NO3jKw";
+pub const EXAMPLE_PUBKEY: &str = "Df4bDHFR_Fx0I6QZajTK6IGRRG0sOlsv0qUeNITCn9w";
 
 #[derive(Debug, Clone, TypePath, Asset)]
 pub struct TextAsset(pub String);
