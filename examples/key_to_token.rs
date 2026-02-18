@@ -1,6 +1,7 @@
 use bevy_dlc::prelude::*;
 use secure_gate::ExposeSecret;
 
+/// This example shows how to generate a SignedLicense token from a DlcKey, and how to extract the encrypt_key from the token (for example, to encrypt a pack on disk that matches the token).
 fn main() {
     // generate a demo keypair
     let dlc_key = DlcKey::generate_random();

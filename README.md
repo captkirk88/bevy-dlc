@@ -1,4 +1,8 @@
-# bevy-dlc — DLC gating for Bevy 0.18 🚀
+<p align="center">
+  <img src="dlc.png" alt="bevy-dlc" title="Yes this was AI generated! Don't like it?  Too bad...  Complain to the AI Overlords." />
+</p>
+
+# bevy-dlc — DLC (Downloadable Content support)
 
 [![Crates.io](https://img.shields.io/crates/v/bevy-dlc.svg)](https://crates.io/crates/bevy-dlc)
 [![docs.rs](https://docs.rs/bevy-dlc/badge.svg)](https://docs.rs/bevy-dlc)
