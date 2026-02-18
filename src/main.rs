@@ -6,20 +6,21 @@ use std::path::PathBuf;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use bevy::{asset::AssetServer, log::LogPlugin};
 use bevy::prelude::*;
+use bevy::{asset::AssetServer, log::LogPlugin};
 
 use clap::{Parser, Subcommand};
 use hex::FromHex;
 
-use bevy_dlc::{DLC_ASSET_MAGIC, DLC_PACK_MAGIC, prelude::*};
+use bevy_dlc::{ContentKey, DLC_ASSET_MAGIC, DLC_PACK_MAGIC, pack_encrypted_asset, pack_encrypted_pack, parse_encrypted, parse_encrypted_pack, prelude::*};
+use secure_gate::ExposeSecret;
 
 #[derive(Parser)]
 #[command(
     author,
     version,
     about = "bevy-dlc helper: pack and unpack .dlc containers",
-    long_about = "Utility for creating, inspecting and extracting bevy-dlc encrypted containers.\n\nPACK: encrypt an input asset and emit a .dlc container plus a signed privatekey (useful for testing).\nUNPACK: inspect or decrypt a container using a symmetric key or an offline-signed privatekey verified with a public key."
+    long_about = "Utility for creating, inspecting and extracting bevy-dlc encrypted containers.\n\nPACK: encrypt an input asset and emit a .dlc container and print a symmetric content key.\nUNPACK: inspect or decrypt a container using a symmetric content key supplied via --content-key."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -80,7 +81,7 @@ enum Commands {
             long_help = "Embeds a product identifier in the privatekey. When the DlcManager has a product binding set, tokens must include a matching product value to be accepted. Use this to restrict tokens to a specific game or application.",
             value_name = "PRODUCT"
         )]
-        product: Option<String>,
+        product: String,
 
         /// Manual type overrides (ext=TypePath pairs)
         #[arg(
@@ -105,7 +106,7 @@ enum Commands {
 
     #[command(
         about = "Inspect or decrypt a .dlc container",
-        long_about = "Read a bevy-dlc container and optionally decrypt it using a public key or an offline-signed privatekey. Use --list to display container metadata without extracting the asset."
+        long_about = "Read a bevy-dlc container and optionally decrypt it using a symmetric content key supplied via --content-key. Use --list to display container metadata without extracting the asset."
     )]
     Unpack {
         /// path to the .dlc container file or a directory containing .dlc files
@@ -129,18 +130,12 @@ enum Commands {
             value_name = "OUT"
         )]
         out: Option<PathBuf>,
-        /// offline-signed privatekey containing the content_key (base64url.payload)
+        /// symmetric content key (hex or base64url, 32 bytes)
         #[arg(
             long,
-            help = "Offline-signed privatekey carrying a content_key; verify with --pubkey to obtain the symmetric key."
+            help = "Symmetric content key used to decrypt the container (hex or base64url)."
         )]
-        privatekey: Option<String>,
-        /// public key (base64url) or path to a file containing the key (raw 32 bytes or base64url)
-        #[arg(
-            long,
-            help = "Base64url public key string or a path to a file containing the key (raw 32 bytes or base64url)"
-        )]
-        pubkey: Option<String>,
+        content_key: Option<String>,
     },
 }
 
@@ -218,29 +213,18 @@ fn parse_type_overrides(overrides: &[String]) -> HashMap<String, String> {
     map
 }
 
-/// Print privatekey and public-key information.
+/// Print `SignedLicense` and public-key information.
 ///
-/// Shows the compact privatekey string, the *private seed* as a Rust `[u8; 32]` array
-/// when available (for developer convenience), and the public key (base64url).
-fn print_token_and_pubkey(privatekey: &str, dlc_key: &DlcKey) {
-    println!("privatekey:\n{}", privatekey);
+/// - Prints the compact `SignedLicense` token (format: `payload_base64url.signature_base64url`).
+/// - DOES NOT print private seeds or raw symmetric keys; treat the token as
+///   sensitive and provision it securely.
+fn print_signed_license_and_pubkey(signedlicense: &str, dlc_key: &DlcKey) {
+    println!("SIGNED LICENSE:\n{}", signedlicense);
 
-    match dlc_key {
-        DlcKey::Private { privkey: seed, .. } => {
-            let seed_bytes = seed.expose_secret();
-            let elems = seed_bytes
-                .iter()
-                .map(|b| format!("0x{:02x}", b))
-                .collect::<Vec<_>>()
-                .join(", ");
-            println!("seed (raw u8) [32]: [{}]", elems);
-        }
-        DlcKey::Public { .. } => {
-            println!("seed (raw u8) [32]: <public-only key>");
-        }
-    }
-
-    println!("pubkey (base64url): {}", URL_SAFE_NO_PAD.encode(dlc_key.public_key_bytes()));
+    println!(
+        "PUB KEY: {}",
+        URL_SAFE_NO_PAD.encode(dlc_key.public_key_bytes())
+    );
 }
 
 /// Resolve TypePath for file paths using Bevy's `AssetServer`.
@@ -367,13 +351,17 @@ fn decrypt_with_key_local(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create headless Bevy app to set up asset loaders
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: None,
-        ..default()
-    }).set(LogPlugin {
-        level: bevy::log::Level::ERROR,
-        ..Default::default()
-    }));
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: None,
+                ..default()
+            })
+            .set(LogPlugin {
+                level: bevy::log::Level::ERROR,
+                ..Default::default()
+            }),
+    );
 
     app.finish();
     app.cleanup();
@@ -489,7 +477,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     f.read_to_end(&mut bytes)?;
 
                     // refuse inputs that already look like a BDLC/BDLP container
-                    if bytes.len() >= 4 && (&bytes[0..4] == DLC_ASSET_MAGIC || &bytes[0..4] == DLC_PACK_MAGIC) {
+                    if bytes.len() >= 4
+                        && (&bytes[0..4] == DLC_ASSET_MAGIC || &bytes[0..4] == DLC_PACK_MAGIC)
+                    {
                         return Err(format!(
                             "refusing to pack '{}' — input appears to be an existing container (BDLC/BDLP)",
                             file.display()
@@ -518,19 +508,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let dlc_id = DlcId::from(dlc_id_str.clone());
                 // generate a random content key for encrypting the whole pack (all entries are encrypted with the same key so one privatekey can unlock the whole pack)
-                let sym_key: [u8; 32] = rand::random();
+                let content_key = ContentKey::from_random(32);
 
-                let container = pack_encrypted_pack(&dlc_id, &items, &sym_key)?;
+                let container = pack_encrypted_pack(&dlc_id, &items, &content_key)?;
 
-                // create signed privatekey carrying the symmetric key so client can decrypt
-                let pass = PublicKey::generate_random();
-                let dlc_key = DlcKey::generate(pass.clone());
-                let privatekey = dlc_key.create_signed_license(
-                    &[dlc_id],
-                    product.map(Product::from),
-                    Some(&sym_key),
-                    None,
-                )?;
+                // create signed token for logical gating (dlcs/product).
+                let dlc_key = DlcKey::generate_random();
+                let signedlicense =
+                    dlc_key.create_signed_license(&[dlc_id], Product::from(product.clone()))?;
 
                 if list {
                     let (did, _v, ents) = parse_encrypted_pack(&container)?;
@@ -559,7 +544,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::fs::write(&out_path, &container)?;
 
                 println!("created dlcpack: {}", out_path.display());
-                print_token_and_pubkey(privatekey.expose_secret().as_str(), &dlc_key);
+                signedlicense.with_secret(|s| print_signed_license_and_pubkey(s.as_str(), &dlc_key));
+
                 return Ok(());
             }
 
@@ -584,7 +570,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let dlc_id = DlcId::from(dlc_id_str.clone());
                 // generate a random content key for encrypting all files (one privatekey can unlock the whole DLC)
-                let sym_key: [u8; 32] = rand::random();
+                let content_key = ContentKey::from_random(32);
 
                 for file in &files {
                     let mut f = File::open(file)?;
@@ -598,7 +584,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &dlc_id,
                         if ext.is_empty() { None } else { Some(ext) },
                         None,
-                        &sym_key,
+                        &content_key,
                     )?;
 
                     let mut out_path = out_dir.join(rel);
@@ -611,13 +597,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 // single privatekey for the whole DLC
-                let pass = PublicKey::generate_random();
-                let dlc_key = DlcKey::generate(pass.clone());
-                let privatekey = dlc_key.create_signed_license(
+                let dlc_key = DlcKey::generate_random();
+                let signedlicense = dlc_key.create_signed_license(
                     &[DlcId::from(dlc_id_str.clone())],
-                    product.map(Product::from),
-                    Some(&sym_key),
-                    None,
+                    Product::from(product.clone()),
                 )?;
 
                 println!(
@@ -625,7 +608,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     files.len(),
                     out_dir.display()
                 );
-                print_token_and_pubkey(privatekey.expose_secret().as_str(), &dlc_key);
+                signedlicense.with_secret(|s| print_signed_license_and_pubkey(s.as_str(), &dlc_key));
+
                 return Ok(());
             }
 
@@ -637,33 +621,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("");
 
             let dlc_id = DlcId::from(dlc_id_str.clone());
-            let sym_key: [u8; 32] = rand::random();
+            let content_key = ContentKey::from_random(32);
             let (container, _nonce) = pack_encrypted_asset(
                 &bytes,
                 &dlc_id,
                 if ext.is_empty() { None } else { Some(ext) },
                 None,
-                &sym_key,
+                &content_key,
             )?;
 
-            // create signed privatekey carrying the symmetric key so client can decrypt
-            let pass = PublicKey::generate_random();
-            let dlc_key = DlcKey::generate(pass.clone());
-            let privatekey = dlc_key.create_signed_license(
-                &[dlc_id.clone()],
-                product.map(Product::from),
-                Some(&sym_key),
-                None,
-            )?;
+            // create signed token for logical gating (dlcs/product).
+            let dlc_key = DlcKey::generate_random();
+            let signedlicense =
+                dlc_key.create_signed_license(&[dlc_id.clone()], Product::from(product.clone()))?;
 
             if list {
                 // produce a sample container to show metadata
                 let enc = parse_encrypted(&container)?;
                 println!("dlc_id: {}", enc.dlc_id);
-                println!(
-                    "original_extension: {}",
-                    enc.original_extension
-                );
+                println!("original_extension: {}", enc.original_extension);
                 println!("ciphertext_len: {}", enc.ciphertext.len());
                 println!("nonce: {}", hex::encode(enc.nonce));
             }
@@ -676,7 +652,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::write(&out_path, &container)?;
 
             println!("created encrypted asset: {}", out_path.display());
-            print_token_and_pubkey(privatekey.expose_secret().as_str(), &dlc_key);
+            signedlicense.with_secret(|s| print_signed_license_and_pubkey(s.as_str(), &dlc_key));
         }
 
         Commands::List { dlc } => {
@@ -743,13 +719,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
 
-            if ext.eq_ignore_ascii_case("dlc") || (bytes.len() >= 4 && bytes.starts_with(DLC_ASSET_MAGIC)) {
+            if ext.eq_ignore_ascii_case("dlc")
+                || (bytes.len() >= 4 && bytes.starts_with(DLC_ASSET_MAGIC))
+            {
                 let enc = parse_encrypted(&bytes)?;
                 println!("dlc_id: {}", enc.dlc_id);
-                println!(
-                    "original_extension: {}",
-                    enc.original_extension
-                );
+                println!("original_extension: {}", enc.original_extension);
                 println!("ciphertext_len: {}", enc.ciphertext.len());
                 println!("nonce: {}", hex::encode(enc.nonce));
                 return Ok(());
@@ -762,8 +737,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dlc,
             list,
             out,
-            privatekey,
-            pubkey,
+            content_key,
         } => {
             // single-file mode (existing behavior)
             let bytes = std::fs::read(&dlc)?;
@@ -771,35 +745,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if list {
                 println!("dlc_id: {}", enc.dlc_id);
-                println!(
-                    "original_extension: {}",
-                    enc.original_extension
-                );
+                println!("original_extension: {}", enc.original_extension);
                 println!("ciphertext_len: {}", enc.ciphertext.len());
                 println!("nonce: {}", hex::encode(enc.nonce));
                 return Ok(());
             }
 
-            // obtain the symmetric key by verifying the provided privatekey token with pubkey
-            let (priv_str, pk_str) = match (privatekey.as_deref(), pubkey.as_deref()) {
-                (Some(t), Some(p)) => (t, p),
-                _ => return Err("both --privatekey and --pubkey must be provided".into()),
+            // obtain the symmetric key from the provided --content-key
+            let sym_key_vec = match content_key.as_deref() {
+                Some(s) => {
+                    let bytes = read_pubkey_bytes(s)?;
+                    if bytes.len() != 32 {
+                        return Err("content key must be 32 bytes".into());
+                    }
+                    bytes
+                }
+                None => return Err("missing --content-key".into()),
             };
-            let pub_bytes = read_pubkey_bytes(pk_str)?;
-            let pub_arr: [u8; 32] = pub_bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| "public key must be 32 bytes")?;
-            let pubkey_alias = PublicKey::from_slice(&pub_arr);
-            let pub_dlc_key = DlcKey::Public { pubkey: pubkey_alias };
-
-            let private_token = SignedLicense::from(priv_str.to_string());
-            let vt = pub_dlc_key.verify_signed_license(&private_token)?;
-            let mut manager = DlcManager::new();
-            let _ = manager.unlock_verified_license(vt)?; // populates content keys
-            let sym_key_vec = manager
-                .content_key_for_id(&DlcId::from(enc.dlc_id.clone()))
-                .ok_or("content key not found in privatekey")?;
 
             let plaintext = decrypt_with_key_local(&sym_key_vec, &enc.ciphertext, &enc.nonce)?;
 

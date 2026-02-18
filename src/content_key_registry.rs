@@ -1,15 +1,13 @@
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
+use crate::ContentKey;
+use secure_gate::ExposeSecret;
 
-/// Global registry mapping DLC id -> symmetric content-key bytes and
-/// tracking asset paths associated with each DLC id (used for reload-on-unlock).
-/// Minimal API consumed by the asset loaders and `DlcManager`.
-
-static KEY_REGISTRY: Lazy<DashMap<String, Vec<u8>>> = Lazy::new(|| DashMap::new());
+static KEY_REGISTRY: Lazy<DashMap<String, ContentKey>> = Lazy::new(|| DashMap::new());
 static PATH_REGISTRY: Lazy<DashMap<String, Vec<String>>> = Lazy::new(|| DashMap::new());
 
 /// Insert or replace the content key for `dlc_id`.
-pub(crate) fn insert(dlc_id: &str, key: Vec<u8>) {
+pub(crate) fn insert(dlc_id: &str, key: ContentKey) {
     KEY_REGISTRY.insert(dlc_id.to_owned(), key);
 }
 
@@ -20,9 +18,9 @@ pub(crate) fn remove(dlc_id: &str) {
     PATH_REGISTRY.remove(dlc_id);
 }
 
-/// Return a clone of the content key bytes if present.
-pub(crate) fn get(dlc_id: &str) -> Option<Vec<u8>> {
-    KEY_REGISTRY.get(dlc_id).map(|v| v.value().clone())
+/// Return an owned `ContentKey` (cloned) if present.
+pub(crate) fn get(dlc_id: &str) -> Option<ContentKey> {
+    KEY_REGISTRY.get(dlc_id).map(|v| v.value().with_secret(|b| ContentKey::from(b.to_vec())))
 }
 
 /// Register an asset path for a given `dlc_id`. The path is stored so that

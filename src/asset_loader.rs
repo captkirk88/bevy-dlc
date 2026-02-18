@@ -3,12 +3,13 @@ use bevy::asset::{Asset, AssetLoader, Handle, LoadContext};
 use bevy::ecs::reflect::AppTypeRegistry;
 use std::io;
 use std::sync::Arc;
-
 use bevy::reflect::TypePath;
 use thiserror::Error;
 
+use crate::DlcId;
+
 /// Represents a single encrypted file loaded from a `.dlc` container. The contained bytes are still encrypted and will be decrypted by the `DlcLoader` when the asset is loaded.
-#[derive(Clone, Debug, bevy::prelude::Resource)]
+#[derive(Clone, Debug)]
 pub struct EncryptedAsset {
     pub dlc_id: String,
     pub original_extension: String,
@@ -160,9 +161,10 @@ impl DlcPackEntry {
         pack.decrypt_entry_bytes(&self.path)
     }
 
-    pub fn path(&self) -> &str {
+    pub fn path(&self) -> &String {
         &self.path
     }
+
 }
 
 /// Represents a `.dlcpack` bundle (multiple encrypted entries).
@@ -170,7 +172,7 @@ impl DlcPackEntry {
 /// decrypted on demand (e.g. after unlock).
 #[derive(Asset, TypePath, Clone, Debug)]
 pub struct DlcPack {
-    dlc_id: String,
+    dlc_id: DlcId,
     entries: Vec<DlcPackEntry>,
     /// Original `.dlcpack` container bytes (still encrypted). Kept so
     /// callers can decrypt individual entries on-demand without the pack
@@ -180,7 +182,7 @@ pub struct DlcPack {
 
 impl DlcPack {
     /// Return the DLC identifier for this pack.
-    pub fn id(&self) -> &str {
+    pub fn id(&self) -> &DlcId {
         &self.dlc_id
     }
 
@@ -318,7 +320,7 @@ impl AssetLoader for DlcPackLoader {
         }
 
         let pack = DlcPack {
-            dlc_id,
+            dlc_id: DlcId::from(dlc_id),
             entries: out_entries,
             container_bytes: bytes,
         };
@@ -336,7 +338,7 @@ pub fn decrypt_pack_entries(
         .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
 
     // lookup content key in global registry
-    let sym = crate::content_key_registry::get(&dlc_id)
+    let content_key = crate::content_key_registry::get(&dlc_id)
         .ok_or_else(|| DlcLoaderError::DlcLocked(dlc_id.clone()))?;
 
     // Version 1: each entry encrypted individually
@@ -344,7 +346,7 @@ pub fn decrypt_pack_entries(
         let mut out = Vec::with_capacity(entries.len());
         for (path, enc) in entries.into_iter() {
             let plaintext =
-                crate::decrypt_with_key(&sym, &enc.ciphertext, &enc.nonce).map_err(|e| {
+                crate::decrypt_with_key(&content_key, &enc.ciphertext, &enc.nonce).map_err(|e| {
                     let inner_error = e.to_string();
                     DlcLoaderError::DecryptionFailed(format!(
                         "dlc='{}' entry='{}' {}",
@@ -373,7 +375,7 @@ pub fn decrypt_pack_entries(
 
     // decrypt the entire archive once
     let archive_plain =
-        crate::decrypt_with_key(&sym, archive_ciphertext, &archive_nonce).map_err(|e| {
+        crate::decrypt_with_key(&content_key, archive_ciphertext, &archive_nonce).map_err(|e| {
             // report which DLC failed; include an example entry for context
             let example_entry = &entries[0].0;
             DlcLoaderError::DecryptionFailed(format!(
@@ -443,6 +445,9 @@ pub enum DlcLoaderError {
 
 #[cfg(test)]
 mod tests {
+    use crate::ContentKey;
+use secure_gate::ExposeSecret;
+
     use super::*;
 
     #[test]
@@ -453,13 +458,13 @@ mod tests {
             type_path: None,
         };
         let pack = DlcPack {
-            dlc_id: "example_dlc".to_string(),
+            dlc_id: DlcId::from("example_dlc"),
             entries: vec![entry.clone()],
             container_bytes: Vec::new(),
         };
 
         // exercise getters (reads `dlc_id` + `entries` fields)
-        assert_eq!(pack.id(), "example_dlc");
+        assert_eq!(*pack.id(), DlcId::from("example_dlc"));
         assert_eq!(pack.entries().len(), 1);
 
         // inspect an entry (reads `path`, `original_extension`)
@@ -479,7 +484,7 @@ mod tests {
             None,
             b"hello".to_vec(),
         )];
-        let key: [u8; 32] = rand::random();
+        let key = ContentKey::from_random(32);
         let container = crate::pack_encrypted_pack(&dlc_id, &items, &key).expect("pack");
 
         let err = decrypt_pack_entries(&container).expect_err("should be locked");
@@ -499,12 +504,12 @@ mod tests {
             None,
             b"world".to_vec(),
         )];
-        let real_key: [u8; 32] = rand::random();
+        let real_key = ContentKey::from_random(32);
         let container = crate::pack_encrypted_pack(&dlc_id, &items, &real_key).expect("pack");
 
         // insert an incorrect key for this DLC
         let wrong_key: [u8; 32] = rand::random();
-        crate::content_key_registry::insert(&dlc_id.to_string(), wrong_key.to_vec());
+        crate::content_key_registry::insert(&dlc_id.to_string(), crate::ContentKey::from(wrong_key.to_vec()));
 
         let err = decrypt_pack_entries(&container).expect_err("should fail decryption");
         match err {
@@ -515,7 +520,63 @@ mod tests {
             _ => panic!("expected DecryptionFailed, got {:?}", err),
         }
     }
-}
+
+    #[test]
+    fn integration_load_expansiona_pack_and_decode_image() {
+        // generate a dlcpack on-the-fly using a SignedLicense's embedded content_key
+        crate::content_key_registry::clear_all();
+
+        use base64::Engine as _;
+
+        let dlc_id = crate::DlcId::from("expansionA");
+        let img_bytes = std::fs::read("test_assets/test.png").expect("read test png");
+        let items = vec![(
+            "test.png".to_string(),
+            Some("png".to_string()),
+            Some("bevy_image::image::Image".to_string()),
+            img_bytes,
+        )];
+
+        // create a private key + signed license (private seed == symmetric content_key)
+        let private = crate::DlcKey::generate_random();
+        let signedlicense = private
+            .create_signed_license(&[dlc_id.clone()], crate::Product::from("example"))
+            .expect("create signed license");
+
+        // decode the embedded content_key from the token payload and insert it
+        let key_bytes = signedlicense.with_secret(|s| {
+            let parts: Vec<&str> = s.split('.').collect();
+            assert_eq!(parts.len(), 2);
+            let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(parts[0].as_bytes())
+                .expect("payload base64 decode");
+            let v: serde_json::Value = serde_json::from_slice(&payload_bytes).expect("json");
+            let content_key_b64 = v.get("content_key").expect("content_key present").as_str().expect("str");
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(content_key_b64.as_bytes())
+                .expect("content_key decode")
+        });
+        assert_eq!(key_bytes.len(), 32);
+
+        let content_key = ContentKey::from(key_bytes.clone());
+        crate::content_key_registry::insert(&dlc_id.to_string(), content_key.with_secret(|b| ContentKey::from(b.to_vec())));
+
+        // pack using the same symmetric key and validate decrypt_pack_entries
+        let container = crate::pack_encrypted_pack(&dlc_id, &items, &content_key).expect("pack container");
+        let (did, _v, entries) = crate::parse_encrypted_pack(&container).expect("parse pack");
+        assert_eq!(did, "expansionA");
+        assert!(!entries.is_empty());
+
+        let (_dlc, out_items) = crate::asset_loader::decrypt_pack_entries(&container).expect("decrypt_pack_entries");
+        let first = out_items.first().expect("entry");
+        assert!(first.3.starts_with(b"\x89PNG\r\n\x1a\n"), "decrypted entry is PNG");
+
+        // basic IHDR sanity check (width/height > 0)
+        let raw = &first.3;
+        let width = u32::from_be_bytes([raw[16], raw[17], raw[18], raw[19]]);
+        let height = u32::from_be_bytes([raw[20], raw[21], raw[22], raw[23]]);
+        assert!(width > 0 && height > 0);
+    }}
 
 impl<A> AssetLoader for DlcLoader<A>
 where
@@ -553,11 +614,11 @@ where
         }
 
         // lookup content key in global registry (loader-executed outside ECS)
-        let key = crate::content_key_registry::get(&enc.dlc_id)
-            .ok_or_else(|| DlcLoaderError::DlcLocked(enc.dlc_id))?;
+        let content_key = crate::content_key_registry::get(&enc.dlc_id)
+            .ok_or_else(|| DlcLoaderError::DlcLocked(enc.dlc_id.clone()))?;
 
         // decrypt bytes
-        let plaintext = crate::decrypt_with_key(&key, &enc.ciphertext, &enc.nonce)
+        let plaintext = crate::decrypt_with_key(&content_key, &enc.ciphertext, &enc.nonce)
             .map_err(|e| DlcLoaderError::DecryptionFailed(e.to_string()))?;
 
         // Choose an extension for the nested load so Bevy selects the correct
