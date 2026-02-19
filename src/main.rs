@@ -25,7 +25,7 @@ const FORBIDDEN_EXTENSIONS: [&str; 3] = ["dlcpack", "pubkey", "slicense"];
     author,
     version,
     about = "bevy-dlc helper: pack and unpack .dlcpack containers",
-    long_about = "Utility for creating, inspecting and extracting bevy-dlc encrypted containers.\n\nPACK: encrypt assets and emit a .dlcpack bundle and print a symmetric encrypt key.\nVALIDATE: verify a .dlcpack container using a signed license.\nLIST: inspect contents of a .dlcpack container.\nGENERATE: create new signed licenses."
+    long_about = "Utility for creating, inspecting and extracting bevy-dlc encrypted containers."
 )]
 struct Cli {
     #[command(subcommand)]
