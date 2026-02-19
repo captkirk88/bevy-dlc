@@ -1,6 +1,6 @@
 [package]
 name = "bevy-dlc"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 authors = ["Kirk <github.com/captkirk88>"]
 description = "DLC (downloadable content) management for Bevy games"
