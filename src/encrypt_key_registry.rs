@@ -1,9 +1,9 @@
 //! Registry for encrypt keys and DLC asset paths. This is used by `DlcManager` to
 //! track which encrypt key is associated with which DLC id, and which asset paths are associated with which DLC id (so that they can be reloaded when the DLC is unlocked).
 
+use crate::EncryptionKey;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
-use crate::EncryptionKey;
 use secure_gate::ExposeSecret;
 
 static KEY_REGISTRY: Lazy<DashMap<String, EncryptionKey>> = Lazy::new(|| DashMap::new());

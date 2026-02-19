@@ -8,7 +8,9 @@
 [![docs.rs](https://docs.rs/bevy-dlc/badge.svg)](https://docs.rs/bevy-dlc)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Encrypt and ship DLC asset packs with offline-signed license tokens. Works with Bevy's asset pipeline.
+Encrypt and ship your DLC!  Create your DLC logic and assets and securely unlock it at runtime with signed licenses (generated using `bevy-dlc` CLI).
+
+Works with Bevy's asset pipeline.
 
 ## Features
 
@@ -17,6 +19,10 @@ Encrypt and ship DLC asset packs with offline-signed license tokens. Works with 
 - Verify signatures at runtime and unlock encrypted content
 - Lazy loading of labeled assets (e.g. `pack.dlcpack#sprites/player.png`)
 - Product binding — prevent token reuse across games
+
+> [!NOTE]
+> `.dlc` will likely be removed in 1.1 in favor of the simpler `.dlcpack` format, which is a single encrypted archive instead of individual encrypted files.  This will be a breaking change but simplifies the format and loading logic significantly.  If you want to use the current `.dlc` format, lock to version 0.1.0. (`.dlc` was experimental anyways)
+
 
 ## Install
 
@@ -50,7 +56,7 @@ bevy-dlc pack --product my-game assets/expansion_1 expansion_1 --pack [-o expans
 
 This creates `expansion_1.dlcpack` and prints a signed license token.
 
-Alternatively you can use `bevy-dlc generate --help` to review how to generate tokens without packing, or `bevy-dlc validate --help` to verify tokens.
+Alternatively you can use `bevy-dlc generate --help` to review how to generate a signed license without packing, or `bevy-dlc validate --help` to verify it.
 
 > [!NOTE]
 > `bevy-dlc help <command>` for detailed usage of each CLI command.
@@ -63,7 +69,7 @@ use bevy_dlc::prelude::*;
 
 fn main() {
     let dlc_key = DlcKey::public(pubkey_base64).unwrap();
-    let license = SignedLicense::from(token_string);
+    let license = SignedLicense::from(secure_token_str);  // from CLI output or other secure source
 
     App::new()
         .add_plugins(DefaultPlugins)
@@ -86,7 +92,7 @@ let pack: Handle<DlcPack> = asset_server.load("expansion_1.dlcpack");
 let image: Handle<Image> = asset_server.load("expansion_1.dlcpack#sprites/player.png");
 ```
 
-*Review [real.rs](examples/real.rs) for a complete example.*
+*Review the [examples](examples/) for a complete example (run with `cargo run --manifest-path bevy-dlc-examples/Cargo.toml`).*
 
 ## License
 

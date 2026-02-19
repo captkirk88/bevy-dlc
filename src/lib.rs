@@ -11,9 +11,6 @@ use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 
 use secure_gate::{ExposeSecret, dynamic_alias, fixed_alias};
 
-#[cfg(feature = "example")]
-pub use secure as secure_crate;
-
 mod asset_loader;
 mod encrypt_key_registry;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
@@ -23,9 +20,6 @@ pub use asset_loader::{DlcLoader, DlcPack, DlcPackLoader, EncryptedAsset, parse_
 use serde::{Deserialize, Serialize};
 
 use thiserror::Error;
-
-#[cfg(any(test, feature = "example"))]
-pub mod example_util;
 
 pub mod prelude {
     pub use super::AppExt;
