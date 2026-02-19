@@ -62,6 +62,7 @@ pub(crate) fn path_exists_for(dlc_id: &str, path: &str) -> bool {
 }
 
 /// Check if a DLC id is already registered with a different path, which indicates a conflict (for example, two different .dlcpack files claiming the same DLC id). This is used by the asset loader to detect and reject conflicting DLC packs. Returns true if there is a conflict, false otherwise.
+#[allow(unused)]
 pub(crate) fn check(dlc_id: &str, path: &str) -> bool {
     if let Some(registered_path) = PATH_REGISTRY.get(dlc_id) {
         // Conflict if the registered path is different from the incoming path
