@@ -17,6 +17,7 @@ use bevy_dlc::{
     parse_encrypted_pack, prelude::*,
 };
 use secure_gate::ExposeSecret;
+use owo_colors::{AnsiColors, OwoColorize};
 
 const FORBIDDEN_EXTENSIONS: [&str; 3] = ["dlcpack", "pubkey", "slicense"];
 
@@ -114,7 +115,7 @@ enum Commands {
         dlc: PathBuf,
     },
 
-    /// Validate a `.dlcpack` against a SignedLicense / public key.
+    /// Validate a `.dlcpack` against a signed license / public key.
     /// If the license carries an embedded `encrypt_key `, the command will
     /// attempt to decrypt the container and report success or the failure
     /// reason (useful for CI or debugging packaging tokens).
@@ -134,7 +135,7 @@ enum Commands {
     },
 
     #[command(
-        about = "Generate a product .slicense and .pubkey (for testing/CI)",
+        about = "Generate a product .slicense and .pubkey.",
         long_about = "Create a signed-license token and write <product>.slicense and <product>.pubkey; these files are used as defaults by other commands when present."
     )]
     Generate {
@@ -204,7 +205,7 @@ fn parse_type_overrides(overrides: &[String]) -> HashMap<String, String> {
     map
 }
 
-/// Print `SignedLicense` and public-key information, and optionally write
+/// Print signed license and public-key information, and optionally write
 /// `<product>.slicense` and `<product>.pubkey` when `write_files` is true and
 /// `product` is provided.
 ///
@@ -342,29 +343,32 @@ fn resolve_pubkey_and_license(
     signed_license: Option<String>,
     product: &str,
 ) -> (Option<String>, Option<String>) {
-    let default_pubkey_file = format!("{}.pubkey", product);
-    let default_slicense_file = format!("{}.slicense", product);
-    
-    let resolved_pubkey = pubkey.or_else(|| {
-        if std::path::Path::new(&default_pubkey_file).exists() {
-            std::fs::read_to_string(&default_pubkey_file)
-                .ok()
-                .map(|s| s.trim().to_string())
-        } else {
-            None
+    // Priority: explicit CLI args → product files in CWD → product files anywhere under CWD (recursive)
+
+    // Helper to search recursively for a product file with given extension
+    fn find_product_file_recursive(product: &str, ext: &str) -> Option<String> {
+        let file_name = format!("{}.{}", product, ext);
+        // check CWD first
+        if std::path::Path::new(&file_name).exists() {
+            return std::fs::read_to_string(&file_name).ok().map(|s| s.trim().to_string());
         }
-    });
-    
-    let resolved_license = signed_license.or_else(|| {
-        if std::path::Path::new(&default_slicense_file).exists() {
-            std::fs::read_to_string(&default_slicense_file)
-                .ok()
-                .map(|s| s.trim().to_string())
-        } else {
-            None
+        // recurse and look for matching filename
+        let mut matches = Vec::new();
+        if collect_files_recursive(std::path::Path::new("."), &mut matches, Some(ext)).is_ok() {
+            for p in matches {
+                if let Some(fname) = p.file_name().and_then(|s| s.to_str()) {
+                    if fname.eq_ignore_ascii_case(&file_name) {
+                        return std::fs::read_to_string(&p).ok().map(|s| s.trim().to_string());
+                    }
+                }
+            }
         }
-    });
-    
+        None
+    }
+
+    let resolved_pubkey = pubkey.or_else(|| find_product_file_recursive(product, "pubkey"));
+    let resolved_license = signed_license.or_else(|| find_product_file_recursive(product, "slicense"));
+
     (resolved_pubkey, resolved_license)
 }
 
@@ -434,42 +438,49 @@ fn handle_license_output(
 }
 
 /// Helper: Resolve pubkey/license for Validate, with fallback to embedded product
-fn resolve_validate_keys(
+fn resolve_keys(
     pubkey: Option<String>,
     signed_license: Option<String>,
     product: Option<String>,
     embedded_product: Option<String>,
 ) -> (Option<String>, Option<String>) {
-    let resolved_pubkey = pubkey.or_else(|| {
-        product
-            .as_ref()
-            .or_else(|| embedded_product.as_ref())
-            .and_then(|p| {
-                let path = format!("{}.pubkey", p);
-                if std::path::Path::new(&path).exists() {
-                    std::fs::read_to_string(&path)
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                } else {
-                    None
+    // Priority: explicit args → product/embedded_product files in CWD → recursive search for product files
+
+    fn find_product_file_recursive_opt(name: &str, ext: &str) -> Option<String> {
+        let file_name = format!("{}.{}", name, ext);
+        if std::path::Path::new(&file_name).exists() {
+            return std::fs::read_to_string(&file_name).ok().map(|s| s.trim().to_string());
+        }
+        let mut matches = Vec::new();
+        if collect_files_recursive(std::path::Path::new("."), &mut matches, Some(ext)).is_ok() {
+            for p in matches {
+                if let Some(fname) = p.file_name().and_then(|s| s.to_str()) {
+                    if fname.eq_ignore_ascii_case(&file_name) {
+                        return std::fs::read_to_string(&p).ok().map(|s| s.trim().to_string());
+                    }
                 }
-            })
+            }
+        }
+        None
+    }
+
+    let resolved_pubkey = pubkey.or_else(|| {
+        // try product / embedded_product first
+        if let Some(prod) = product.as_ref().or_else(|| embedded_product.as_ref()) {
+            if let Some(found) = find_product_file_recursive_opt(prod, "pubkey") {
+                return Some(found);
+            }
+        }
+        None
     });
 
     let resolved_license = signed_license.or_else(|| {
-        product
-            .as_ref()
-            .or_else(|| embedded_product.as_ref())
-            .and_then(|p| {
-                let path = format!("{}.slicense", p);
-                if std::path::Path::new(&path).exists() {
-                    std::fs::read_to_string(&path)
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                } else {
-                    None
-                }
-            })
+        if let Some(prod) = product.as_ref().or_else(|| embedded_product.as_ref()) {
+            if let Some(found) = find_product_file_recursive_opt(prod, "slicense") {
+                return Some(found);
+            }
+        }
+        None
     });
 
     (resolved_pubkey, resolved_license)
@@ -498,9 +509,15 @@ fn extract_encrypt_key_from_token(
     }
 }
 
+fn print_error_and_exit(message: &str) -> ! {
+    eprintln!("{} {}", "error:".red().bold(), message.white());
+    std::process::exit(0);
+}
+
 // Helper: attempt to decrypt the first archive entry using the provided symmetric key.
 // Returns Ok(()) on success; Err(...) on any failure (decryption or archive extraction).
 fn test_decrypt_archive_with_key(
+    dlc_pack_file: &str,
     container_bytes: &[u8],
     key_bytes: &[u8],
     signature_verified: bool,
@@ -520,17 +537,82 @@ fn test_decrypt_archive_with_key(
             match ar.entries() {
                 Ok(_) => {
                     if signature_verified {
-                        println!("SUCCESS: .dlcpack archive decrypts with embedded encrypt key (signature verified)");
+                        println!("{} -> {}","GOOD".green().bold(),dlc_pack_file);
                     } else {
-                        println!("SUCCESS: .dlcpack archive decrypts with embedded encrypt key (signature NOT verified)");
+                        println!("{} -> {}\n{}","OKAY:".yellow().bold(),dlc_pack_file,".dlcpack archive decrypts with embedded encrypt key (signature NOT verified).\nTry providing the corresponding public key and signed license to verify the signature.");
                     }
                     Ok(())
                 }
-                Err(e) => Err(format!("DECRYPT FAILURE (archive extract): {}", e).into()),
+                Err(e) => Err(format!("(archive extract): {}", e).into()),
             }
         }
-        Err(e) => Err(format!("DECRYPT FAILURE: {}", e).into()),
+        Err(e) => Err(format!("{}", e).into()),
     }
+}
+
+fn validate_dlc_file(
+    path: &std::path::Path,
+    product_arg: Option<&str>,
+    signed_license_arg: Option<&str>,
+    pubkey_arg: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // read container bytes
+    let bytes = std::fs::read(path)?;
+
+    // Parse and get embedded product/dlc id
+    let (prod, dlc_id, _v, _ents) = parse_encrypted_pack(&bytes)?;
+    let embedded_product = Some(prod.to_string());
+
+    // resolve pubkey and signed license with fallback to embedded product (recursively)
+    let (supplied_pubkey, supplied_license) = resolve_keys(
+        pubkey_arg.map(|s| s.to_string()),
+        signed_license_arg.map(|s| s.to_string()),
+        product_arg.map(|s| s.to_string()),
+        embedded_product,
+    );
+
+    // Verify signature if pubkey provided
+    if let Some(pk) = supplied_pubkey.as_deref() {
+        match bevy_dlc::verify_pack_signature(&bytes, pk) {
+            Ok(true) => {},
+            Ok(false) => return Err("Pack signature verification: FAILED (invalid signature)".into()),
+            Err(e) => return Err(format!("Pack signature verification: ERROR ({})", e).into()),
+        }
+    }
+
+    if supplied_license.is_none() {
+        return Err("no signed license supplied or found (use --signed-license or --product <name> to pick <product>.slicense)".into());
+    }
+    let supplied_license = supplied_license.unwrap();
+
+    // when a pubkey is supplied, verify the signed-license and check DLC coverage
+    if let Some(pk) = supplied_pubkey.as_deref() {
+        let verifier = DlcKey::public(pk).map_err(|e| format!("invalid pubkey: {:?}", e))?;
+        let verified = verifier
+            .verify_signed_license(&SignedLicense::from(supplied_license.clone()))
+            .map_err(|e| format!("signed-license verification failed: {:?}", e))?;
+
+        if !verified.dlcs.iter().any(|d| d == &dlc_id) {
+            return Err(format!("license does not include DLC id '{}'", dlc_id).into());
+        }
+    }
+
+    // extract embedded encrypt_key (common code path)
+    match extract_encrypt_key_from_token(&supplied_license) {
+        Ok(Some(key_bytes)) => {
+            test_decrypt_archive_with_key(path.to_str().unwrap(),&bytes, &key_bytes, supplied_pubkey.is_some())?;
+        }
+        Ok(None) => {
+            if supplied_pubkey.is_some() {
+                println!("{}","License verified but does not carry an embedded encrypt key — cannot test decrypt".yellow());
+            } else {
+                println!("{}","Token payload does not contain a encrypt key; cannot test decrypt".yellow());
+            }
+        }
+        Err(e) => return Err(e),
+    }
+
+    Ok(())
 }
 
 async fn pack_command(
@@ -658,7 +740,7 @@ async fn pack_command(
 
         if list {
             let (_prod, did, _v, ents) = parse_encrypted_pack(&container)?;
-            println!("dlc_id: {} entries: {}", did, ents.len());
+            println!("{} {} entries: {}","dlc_id".blue(), did, ents.len());
             for (p, enc) in ents.iter() {
                 println!(
                     " - {} (ext={}) ciphertext_len={} nonce={}",
@@ -744,11 +826,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let ext = file.extension().and_then(|s| s.to_str()).unwrap_or("");
                     if ext.eq_ignore_ascii_case("dlcpack") {
                         let bytes = std::fs::read(file)?;
-                        let (_prod, did, _v, ents) = parse_encrypted_pack(&bytes)?;
+                        let (_prod, did, version, ents) = parse_encrypted_pack(&bytes)?;
                         println!(
-                            "{} -> dlcpack: {} entries: {}",
+                            "{} -> {} {} (v{}) entries: {}",
+                            "dlcpack:".color(AnsiColors::Blue),
                             file.display(),
                             did,
+                            version,
                             ents.len()
                         );
                         for (p, enc) in ents.iter() {
@@ -767,8 +851,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // single-file mode
             let bytes = std::fs::read(&dlc)?;
-            let (_prod, did, _v, ents) = parse_encrypted_pack(&bytes)?;
-            println!("dlcpack: {} entries: {}", did, ents.len());
+            let (_prod, did, version, ents) = parse_encrypted_pack(&bytes)?;
+            println!("{} {} (v{}) entries: {}","dlcpack".color(AnsiColors::Blue), did, version, ents.len());
             for (p, enc) in ents.iter() {
                 println!(
                     " - {} (ext={}) ciphertext_len={} nonce={} type={}",
@@ -788,64 +872,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             signed_license,
             pubkey,
         } => {
-            // read container bytes
-            let bytes = std::fs::read(&dlc)?;
-
-            // Parse the .dlcpack and get the embedded product and first dlc_id
-            let (prod, dlc_id, _v, _ents) = parse_encrypted_pack(&bytes)?;
-            let embedded_product = Some(prod.to_string());
-
-            // resolve pubkey and signed license with fallback to embedded product
-            let (supplied_pubkey, supplied_license) = resolve_validate_keys(pubkey, signed_license, product, embedded_product);
-
-            // Verify the embedded signature if pubkey is available
-            if let Some(pk) = supplied_pubkey.as_deref() {
-
-                match bevy_dlc::verify_pack_signature(&bytes, pk) {
-                    Ok(true) => println!("Pack signature verification: SUCCESS"),
-                    Ok(false) => return Err("Pack signature verification: FAILED (invalid signature)".into()),
-                    Err(e) => return Err(format!("Pack signature verification: ERROR ({})", e).into()),
+            // directory mode: validate every .dlcpack inside recursively
+            if dlc.is_dir() {
+                let mut files = Vec::new();
+                collect_files_recursive(&dlc, &mut files, Some("dlcpack"))?;
+                if files.is_empty() {
+                    print_error_and_exit("no .dlcpack files found in directory");
                 }
-            }
 
-            if supplied_license.is_none() {
-                return Err("no signed license supplied or found (use --signed-license or --product <name> to pick <product>.slicense)".into());
-            }
-            let supplied_license = supplied_license.unwrap();
-
-
-            // when a pubkey is supplied, verify the signed-license and check DLC coverage
-            if let Some(pk) = supplied_pubkey.as_deref() {
-                let verifier = DlcKey::public(pk).map_err(|e| format!("invalid pubkey: {:?}", e))?;
-                let verified = verifier
-                    .verify_signed_license(&SignedLicense::from(supplied_license.clone()))
-                    .map_err(|e| format!("signed-license verification failed: {:?}", e))?;
-
-                if !verified.dlcs.iter().any(|d| d == &dlc_id) {
-                    return Err(format!("license does not include DLC id '{}'", dlc_id).into());
-                }
-            }
-
-            // extract embedded encrypt_key (common code path)
-            match extract_encrypt_key_from_token(&supplied_license) {
-                Ok(Some(key_bytes)) => {
-                    println!(
-                        "Found embedded encrypt_key (base64): {}",
-                        URL_SAFE_NO_PAD.encode(&key_bytes)
-                    );
-                    test_decrypt_archive_with_key(&bytes, &key_bytes, supplied_pubkey.is_some())?;
-                }
-                Ok(None) => {
-                    if supplied_pubkey.is_some() {
-                        println!("License verified but does not carry an embedded encrypt key — cannot test decrypt");
-                    } else {
-                        println!("Token payload does not contain a encrypt key; cannot test decrypt");
+                let mut failures = 0usize;
+                for file in &files {
+                    match validate_dlc_file(file.as_path(), product.as_deref(), signed_license.as_deref(), pubkey.as_deref()) {
+                        Ok(()) => {},
+                        Err(e) => {
+                            eprintln!("{} {}: {}", "error:".red().bold(), file.display(), e);
+                            failures += 1;
+                        }
                     }
                 }
-                Err(e) => return Err(e),
+
+                if failures > 0 {
+                    print_error_and_exit(&format!("{} file(s) failed validation", failures));
+                }
+                return Ok(());
             }
 
-            return Ok(());
+            // single-file mode
+            match validate_dlc_file(&dlc, product.as_deref(), signed_license.as_deref(), pubkey.as_deref()) {
+                Ok(()) => return Ok(()),
+                Err(e) => print_error_and_exit(&e.to_string()),
+            }
         }
 
         Commands::Generate {
@@ -892,7 +948,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if emit_encrypt_key {
                 let ek = EncryptionKey::from_random(32);
                 ek.with_secret(|kb| {
-                    println!("ENCRYPT KEY (base64url): {}", URL_SAFE_NO_PAD.encode(kb));
+                    println!("{} {}","ENCRYPT KEY (base64url):".color(AnsiColors::Cyan).bold(), URL_SAFE_NO_PAD.encode(kb));
                 });
             }
 
