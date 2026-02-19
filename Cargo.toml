@@ -60,13 +60,3 @@ codegen-units = 1
 name = "real"
 path = "examples/real.rs"
 required-features = ["example"]
-
-[[example]]
-name = "spawn"
-path = "examples/spawn.rs"
-required-features = ["example"]
-
-[[example]]
-name = "regenerate"
-path = "examples/regenerate_example_pack.rs"
-required-features = ["example"]
