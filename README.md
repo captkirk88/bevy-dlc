@@ -42,10 +42,20 @@ Then `bevy-dlc --help` for available commands.
 
 ## Quick Start
 
+### Generate a license and pack DLC content
+
+```bash
+bevy-dlc generate -o keys/ my-game expansion_1
+```
+
+This will generate two files in `keys/`:
+- `expansion_1.slicense` — a secure license token that can be safely embedded in your game binary (e.g. with `secure::include_secure_str_aes!()`) or stored securely on disk.  This token contains the encrypted symmetric key needed to unlock the DLC, but can't be decrypted without the private key.
+- `expansion_1.pubkey` — the public key that your game uses to verify the license and extract the symmetric key to unlock the DLC.
+
 ### Create a pack
 
 ```bash
-bevy-dlc pack --product my-game assets/expansion_1 expansion_1 --pack [-o expansion_1.dlcpack]
+bevy-dlc pack --product my-game --pack [-o dlc/expansion_1.dlcpack] expansionA -- assets/expansionA
 ```
 
 - `--product` — binds the pack to a product name (enforced by `DlcManager`)
@@ -93,6 +103,10 @@ let image: Handle<Image> = asset_server.load("expansion_1.dlcpack#sprites/player
 ```
 
 *Review the [examples](examples/) for a complete example (run with `cargo run --manifest-path bevy-dlc-examples/Cargo.toml`).*
+
+### Suggestions and Contributions
+
+Contributions are very welcome!  Please open an issue or submit a pull request with any improvements, bug fixes, PERFORMANCE IMPROVEMENTS, or new features.
 
 ## License
 

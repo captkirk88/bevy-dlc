@@ -316,33 +316,19 @@ async fn resolve_type_paths_from_bevy(
             .ok_or("AssetServer resource not found")?;
         let asset_server = asset_server_ref.clone();
 
-        // per-extension deadline — give Bevy a short window to register loaders
-        const DEADLINE_MS: u64 = 2000;
-
         for ext in &extensions_to_query {
             // run one frame so plugins/systems can perform registrations
             app.update();
 
-            match tokio::time::timeout(
-                std::time::Duration::from_millis(DEADLINE_MS),
-                asset_server.get_asset_loader_with_extension(ext),
-            )
-            .await
-            {
-                Ok(Ok(loader)) => {
+            match asset_server.get_asset_loader_with_extension(ext).await {
+                Ok(loader) => {
                     let type_name = loader.asset_type_name();
                     ext_map.insert(ext.clone(), type_name.to_string());
                 }
-                Ok(Err(_)) => {
+                Err(_) => {
                     return Err(format!(
                         "no AssetLoader registered for extension '{}'; either add the plugin that provides the loader or pass --types {}=TypePath",
                         ext, ext
-                    ).into());
-                }
-                Err(_) => {
-                    return Err(format!(
-                        "timed out waiting for AssetServer loader for extension '{}' ({}ms); try `--types {}` or increase warm-up",
-                        ext, DEADLINE_MS, ext
                     ).into());
                 }
             }
