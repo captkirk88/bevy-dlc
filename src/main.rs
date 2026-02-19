@@ -384,6 +384,135 @@ fn decrypt_with_key_local(
     Ok(pt)
 }
 
+// Helper: Resolve pubkey and signed license from CLI args or defaults files
+fn resolve_pubkey_and_license(
+    pubkey: Option<String>,
+    signed_license: Option<String>,
+    product: &str,
+) -> (Option<String>, Option<String>) {
+    let default_pubkey_file = format!("{}.pubkey", product);
+    let default_slicense_file = format!("{}.slicense", product);
+    
+    let resolved_pubkey = pubkey.or_else(|| {
+        if std::path::Path::new(&default_pubkey_file).exists() {
+            std::fs::read_to_string(&default_pubkey_file)
+                .ok()
+                .map(|s| s.trim().to_string())
+        } else {
+            None
+        }
+    });
+    
+    let resolved_license = signed_license.or_else(|| {
+        if std::path::Path::new(&default_slicense_file).exists() {
+            std::fs::read_to_string(&default_slicense_file)
+                .ok()
+                .map(|s| s.trim().to_string())
+        } else {
+            None
+        }
+    });
+    
+    (resolved_pubkey, resolved_license)
+}
+
+// Helper: Derive encryption key from signed license or generate new one
+fn derive_encrypt_key(signed_license: Option<&str>) -> Result<EncryptionKey, Box<dyn std::error::Error>> {
+    Ok(if let Some(lic_str) = signed_license {
+        if let Some(key_bytes) = bevy_dlc::extract_encrypt_key_from_license(
+            &bevy_dlc::SignedLicense::from(lic_str.to_string()),
+        ) {
+            if key_bytes.len() != 32 {
+                return Err("embedded encrypt key has invalid length".into());
+            }
+            EncryptionKey::from(key_bytes)
+        } else {
+            EncryptionKey::from_random(32)
+        }
+    } else {
+        EncryptionKey::from_random(32)
+    })
+}
+
+// Helper: Handle license verification/generation and output
+fn handle_license_output(
+    signed_license: Option<&str>,
+    pubkey: Option<&str>,
+    product: &str,
+    dlc_id_str: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(sup_license) = signed_license {
+        if let Some(pubkey_str) = pubkey {
+            let verifier = DlcKey::public(pubkey_str)
+                .map_err(|e| format!("invalid provided pubkey: {:?}", e))?;
+            let verified = verifier
+                .verify_signed_license(&SignedLicense::from(sup_license.to_string()))
+                .map_err(|e| format!("supplied signed-license verification failed: {:?}", e))?;
+            if verified.product != product {
+                return Err("supplied signed-license product does not match --product".into());
+            }
+            if !verified.dlcs.iter().any(|d| d == &dlc_id_str) {
+                return Err("supplied signed-license does not include the requested DLC id".into());
+            }
+            println!("SIGNED LICENSE:\n{}", sup_license);
+            println!("PUB KEY: {}", pubkey_str);
+        } else {
+            eprintln!("warning: supplied signed-license not verified (no --pubkey supplied)");
+            println!("SIGNED LICENSE:\n{}", sup_license);
+        }
+    } else {
+        let dlc_key = DlcKey::generate_random();
+        let signedlicense = dlc_key.create_signed_license(
+            &[DlcId::from(dlc_id_str.to_string())],
+            Product::from(product.to_string()),
+        )?;
+        signedlicense.with_secret(|s| print_signed_license_and_pubkey(s.as_str(), &dlc_key));
+    }
+    Ok(())
+}
+
+// Helper: Resolve pubkey/license for Validate, with fallback to embedded product
+fn resolve_validate_keys(
+    pubkey: Option<String>,
+    signed_license: Option<String>,
+    product: Option<String>,
+    embedded_product: Option<String>,
+) -> (Option<String>, Option<String>) {
+    let resolved_pubkey = pubkey.or_else(|| {
+        product
+            .as_ref()
+            .or_else(|| embedded_product.as_ref())
+            .and_then(|p| {
+                let path = format!("{}.pubkey", p);
+                if std::path::Path::new(&path).exists() {
+                    std::fs::read_to_string(&path)
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                } else {
+                    None
+                }
+            })
+    });
+
+    let resolved_license = signed_license.or_else(|| {
+        product
+            .as_ref()
+            .or_else(|| embedded_product.as_ref())
+            .and_then(|p| {
+                let path = format!("{}.slicense", p);
+                if std::path::Path::new(&path).exists() {
+                    std::fs::read_to_string(&path)
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                } else {
+                    None
+                }
+            })
+    });
+
+    (resolved_pubkey, resolved_license)
+}
+
 async fn pack_command(
     app: &mut App,
     dlc_id_str: String,
@@ -397,27 +526,7 @@ async fn pack_command(
     signed_license: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // extracted from main::Commands::Pack
-    // prefer product-named helper files when present
-    let default_pubkey_file = format!("{}.pubkey", product);
-    let default_slicense_file = format!("{}.slicense", product);
-    let pubkey = pubkey.or_else(|| {
-        if std::path::Path::new(&default_pubkey_file).exists() {
-            std::fs::read_to_string(&default_pubkey_file)
-                .ok()
-                .map(|s| s.trim().to_string())
-        } else {
-            None
-        }
-    });
-    let signed_license = signed_license.or_else(|| {
-        if std::path::Path::new(&default_slicense_file).exists() {
-            std::fs::read_to_string(&default_slicense_file)
-                .ok()
-                .map(|s| s.trim().to_string())
-        } else {
-            None
-        }
-    });
+    let (pubkey, signed_license) = resolve_pubkey_and_license(pubkey, signed_license, &product);
 
     // `.dlcpack` mode
     if pack {
@@ -498,20 +607,7 @@ async fn pack_command(
 
         let dlc_id = DlcId::from(dlc_id_str.clone());
         let dlc_key = DlcKey::generate_random();
-        let encrypt_key = if let Some(lic_str) = signed_license.as_deref() {
-            if let Some(key_bytes) = bevy_dlc::extract_encrypt_key_from_license(
-                &bevy_dlc::SignedLicense::from(lic_str.to_string()),
-            ) {
-                if key_bytes.len() != 32 {
-                    return Err("embedded encrypt key has invalid length".into());
-                }
-                EncryptionKey::from(key_bytes)
-            } else {
-                EncryptionKey::from_random(32)
-            }
-        } else {
-            EncryptionKey::from_random(32)
-        };
+        let encrypt_key = derive_encrypt_key(signed_license.as_deref())?;
 
         let container = pack_encrypted_pack(
             &dlc_id,
@@ -521,33 +617,12 @@ async fn pack_command(
             &encrypt_key,
         )?;
 
-        if let Some(sup_license) = signed_license.as_deref() {
-            if let Some(pubkey_str) = pubkey.as_deref() {
-                let verifier = DlcKey::public(pubkey_str)
-                    .map_err(|e| format!("invalid provided pubkey: {:?}", e))?;
-                let verified = verifier
-                    .verify_signed_license(&SignedLicense::from(sup_license.to_string()))
-                    .map_err(|e| format!("supplied signed-license verification failed: {:?}", e))?;
-                if verified.product != product {
-                    return Err("supplied signed-license product does not match --product".into());
-                }
-                if !verified.dlcs.iter().any(|d| d == &dlc_id_str) {
-                    return Err(
-                        "supplied signed-license does not include the requested DLC id".into(),
-                    );
-                }
-                println!("SIGNED LICENSE:\n{}", sup_license);
-                println!("PUB KEY: {}", pubkey_str);
-            } else {
-                eprintln!("warning: supplied signed-license not verified (no --pubkey supplied)");
-                println!("SIGNED LICENSE:\n{}", sup_license);
-            }
-        } else {
-            let dlc_key = DlcKey::generate_random();
-            let signedlicense =
-                dlc_key.create_signed_license(&[dlc_id], Product::from(product.clone()))?;
-            signedlicense.with_secret(|s| print_signed_license_and_pubkey(s.as_str(), &dlc_key));
-        }
+        handle_license_output(
+            signed_license.as_deref(),
+            pubkey.as_deref(),
+            &product,
+            &dlc_id_str,
+        )?;
 
         if list {
             let (_prod, did, _v, ents) = parse_encrypted_pack(&container)?;
@@ -584,20 +659,7 @@ async fn pack_command(
         std::fs::create_dir_all(&out_dir)?;
 
         let dlc_id = DlcId::from(dlc_id_str.clone());
-        let encrypt_key = if let Some(lic_str) = signed_license.as_deref() {
-            if let Some(key_bytes) = bevy_dlc::extract_encrypt_key_from_license(
-                &bevy_dlc::SignedLicense::from(lic_str.to_string()),
-            ) {
-                if key_bytes.len() != 32 {
-                    return Err("embedded encrypt key has invalid length".into());
-                }
-                EncryptionKey::from(key_bytes)
-            } else {
-                EncryptionKey::from_random(32)
-            }
-        } else {
-            EncryptionKey::from_random(32)
-        };
+        let encrypt_key = derive_encrypt_key(signed_license.as_deref())?;
 
         for file in &input_files {
             let mut f = File::open(file)?;
@@ -621,40 +683,18 @@ async fn pack_command(
             println!("created encrypted asset: {}", out_path.display());
         }
 
-        if let Some(sup_license) = signed_license.as_deref() {
-            if let Some(pubkey_str) = pubkey.as_deref() {
-                let verifier = DlcKey::public(pubkey_str)
-                    .map_err(|e| format!("invalid provided pubkey: {:?}", e))?;
-                let verified = verifier
-                    .verify_signed_license(&SignedLicense::from(sup_license.to_string()))
-                    .map_err(|e| format!("supplied signed-license verification failed: {:?}", e))?;
-                if verified.product != product {
-                    return Err("supplied signed-license product does not match --product".into());
-                }
-                if !verified.dlcs.iter().any(|d| d == &dlc_id_str) {
-                    return Err(
-                        "supplied signed-license does not include the requested DLC id".into(),
-                    );
-                }
-                println!("SIGNED LICENSE:\n{}", sup_license);
-                println!("PUB KEY: {}", pubkey_str);
-            } else {
-                eprintln!("warning: supplied signed-license not verified (no --pubkey supplied)");
-                println!("SIGNED LICENSE:\n{}", sup_license);
-            }
-        } else {
-            let dlc_key = DlcKey::generate_random();
-            let signedlicense = dlc_key.create_signed_license(
-                &[DlcId::from(dlc_id_str.clone())],
-                Product::from(product.clone()),
-            )?;
-            println!(
-                "created {} encrypted assets to {}",
-                input_files.len(),
-                out_dir.display()
-            );
-            signedlicense.with_secret(|s| print_signed_license_and_pubkey(s.as_str(), &dlc_key));
-        }
+        println!(
+            "created {} encrypted assets to {}",
+            input_files.len(),
+            out_dir.display()
+        );
+
+        handle_license_output(
+            signed_license.as_deref(),
+            pubkey.as_deref(),
+            &product,
+            &dlc_id_str,
+        )?;
 
         return Ok(());
     }
@@ -685,20 +725,7 @@ async fn pack_command(
                 .and_then(|s| s.to_str())
                 .unwrap_or("");
             let dlc_id = DlcId::from(dlc_id_str.clone());
-            let encrypt_key = if let Some(lic_str) = signed_license.as_deref() {
-                if let Some(key_bytes) = bevy_dlc::extract_encrypt_key_from_license(
-                    &bevy_dlc::SignedLicense::from(lic_str.to_string()),
-                ) {
-                    if key_bytes.len() != 32 {
-                        return Err("embedded encrypt key has invalid length".into());
-                    }
-                    EncryptionKey::from(key_bytes)
-                } else {
-                    EncryptionKey::from_random(32)
-                }
-            } else {
-                EncryptionKey::from_random(32)
-            };
+            let encrypt_key = derive_encrypt_key(signed_license.as_deref())?;
             let (container, _nonce) = pack_encrypted_asset(
                 &bytes,
                 &dlc_id,
@@ -706,40 +733,14 @@ async fn pack_command(
                 None,
                 &encrypt_key,
             )?;
-            if let Some(sup_license) = signed_license.as_deref() {
-                if let Some(pubkey_str) = pubkey.as_deref() {
-                    let verifier = DlcKey::public(pubkey_str)
-                        .map_err(|e| format!("invalid provided pubkey: {:?}", e))?;
-                    let verified = verifier
-                        .verify_signed_license(&SignedLicense::from(sup_license.to_string()))
-                        .map_err(|e| {
-                            format!("supplied signed-license verification failed: {:?}", e)
-                        })?;
-                    if verified.product != product {
-                        return Err(
-                            "supplied signed-license product does not match --product".into()
-                        );
-                    }
-                    if !verified.dlcs.iter().any(|d| d == &dlc_id_str) {
-                        return Err(
-                            "supplied signed-license does not include the requested DLC id".into(),
-                        );
-                    }
-                    println!("SIGNED LICENSE:\n{}", sup_license);
-                    println!("PUB KEY: {}", pubkey_str);
-                } else {
-                    eprintln!(
-                        "warning: supplied signed-license not verified (no --pubkey supplied)"
-                    );
-                    println!("SIGNED LICENSE:\n{}", sup_license);
-                }
-            } else {
-                let dlc_key = DlcKey::generate_random();
-                let signedlicense = dlc_key
-                    .create_signed_license(&[dlc_id.clone()], Product::from(product.clone()))?;
-                signedlicense
-                    .with_secret(|s| print_signed_license_and_pubkey(s.as_str(), &dlc_key));
-            }
+
+            handle_license_output(
+                signed_license.as_deref(),
+                pubkey.as_deref(),
+                &product,
+                &dlc_id_str,
+            )?;
+
             if list {
                 let enc = parse_encrypted(&container)?;
                 println!("dlc_id: {}", enc.dlc_id);
@@ -763,20 +764,7 @@ async fn pack_command(
         }
         std::fs::create_dir_all(&out_dir)?;
         let dlc_id = DlcId::from(dlc_id_str.clone());
-        let encrypt_key = if let Some(lic_str) = signed_license.as_deref() {
-            if let Some(key_bytes) = bevy_dlc::extract_encrypt_key_from_license(
-                &bevy_dlc::SignedLicense::from(lic_str.to_string()),
-            ) {
-                if key_bytes.len() != 32 {
-                    return Err("embedded encrypt key has invalid length".into());
-                }
-                EncryptionKey::from(key_bytes)
-            } else {
-                EncryptionKey::from_random(32)
-            }
-        } else {
-            EncryptionKey::from_random(32)
-        };
+        let encrypt_key = derive_encrypt_key(signed_license.as_deref())?;
         for file in &explicit_files {
             let mut f = File::open(file)?;
             let mut bytes = Vec::new();
@@ -809,33 +797,13 @@ async fn pack_command(
             std::fs::write(&out_path, &container)?;
             println!("created encrypted asset: {}", out_path.display());
         }
-        if let Some(sup_license) = signed_license.as_deref() {
-            if let Some(pubkey_str) = pubkey.as_deref() {
-                let verifier = DlcKey::public(pubkey_str)
-                    .map_err(|e| format!("invalid provided pubkey: {:?}", e))?;
-                let verified = verifier
-                    .verify_signed_license(&SignedLicense::from(sup_license.to_string()))
-                    .map_err(|e| format!("supplied signed-license verification failed: {:?}", e))?;
-                if verified.product != product {
-                    return Err("supplied signed-license product does not match --product".into());
-                }
-                if !verified.dlcs.iter().any(|d| d == &dlc_id_str) {
-                    return Err(
-                        "supplied signed-license does not include the requested DLC id".into(),
-                    );
-                }
-                println!("SIGNED LICENSE:\n{}", sup_license);
-                println!("PUB KEY: {}", pubkey_str);
-            } else {
-                eprintln!("warning: supplied signed-license not verified (no --pubkey supplied)");
-                println!("SIGNED LICENSE:\n{}", sup_license);
-            }
-        } else {
-            let dlc_key = DlcKey::generate_random();
-            let signedlicense =
-                dlc_key.create_signed_license(&[dlc_id.clone()], Product::from(product.clone()))?;
-            signedlicense.with_secret(|s| print_signed_license_and_pubkey(s.as_str(), &dlc_key));
-        }
+
+        handle_license_output(
+            signed_license.as_deref(),
+            pubkey.as_deref(),
+            &product,
+            &dlc_id_str,
+        )?;
         return Ok(());
     }
 
@@ -983,28 +951,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (embedded_product, dlc_id) =
                 if bytes.len() >= 4 && bytes.starts_with(DLC_PACK_MAGIC) {
                     let (prod, did, _v, _ents) = parse_encrypted_pack(&bytes)?;
-                    (Some(prod), did)
+                    (Some(prod.to_string()), did)
                 } else {
                     let enc = parse_encrypted(&bytes)?;
                     (None, enc.dlc_id)
                 };
 
-            // resolve pubkey: prefer explicit CLI `--pubkey`, then CLI `--product` files, then embedded pack product (if present)
-            let supplied_pubkey = pubkey.or_else(|| {
-                product
-                    .as_ref()
-                    .or_else(|| embedded_product.as_ref())
-                    .and_then(|p| {
-                        let path = format!("{}.pubkey", p);
-                        if std::path::Path::new(&path).exists() {
-                            std::fs::read_to_string(&path)
-                                .ok()
-                                .map(|s| s.trim().to_string())
-                        } else {
-                            None
-                        }
-                    })
-            });
+            // resolve pubkey and signed license with fallback to embedded product
+            let (supplied_pubkey, supplied_license) = resolve_validate_keys(pubkey, signed_license, product, embedded_product);
 
             // For v3 dlcpack, verify the embedded signature if pubkey is available
             if bytes.len() >= 4 && bytes.starts_with(DLC_PACK_MAGIC) {
@@ -1018,23 +972,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-
-            // resolve signed license string (CLI arg takes precedence, then product.slicense or embedded pack product)
-            let supplied_license = signed_license.or_else(|| {
-                product
-                    .as_ref()
-                    .or_else(|| embedded_product.as_ref())
-                    .and_then(|p| {
-                        let path = format!("{}.slicense", p);
-                        if std::path::Path::new(&path).exists() {
-                            std::fs::read_to_string(&path)
-                                .ok()
-                                .map(|s| s.trim().to_string())
-                        } else {
-                            None
-                        }
-                    })
-            });
 
             if supplied_license.is_none() {
                 return Err("no signed license supplied or found (use --signed-license or --product <name> to pick <product>.slicense)".into());
