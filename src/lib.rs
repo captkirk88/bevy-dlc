@@ -625,106 +625,7 @@ fn decrypt_with_key(
     })
 }
 
-// Encoded format (base64url): salt(16) || nonce(12) || ciphertext
-
-/// Pack plaintext bytes into the crate's encrypted container format and
-/// return the serialized container bytes plus the random nonce used for AES-GCM.
-///
-/// - `original_extension` is the original file extension (e.g. "png" or
-///   "json") and is stored in the container so loaders can prefer the
-///   appropriate nested loader.
-pub fn pack_encrypted_asset(
-    plaintext: &[u8],
-    dlc_id: &DlcId,
-    original_extension: Option<&str>,
-    original_type: Option<&str>,
-    key: &EncryptionKey,
-) -> Result<(Vec<u8>, [u8; 12]), DlcError> {
-    if key.len() != 32 {
-        return Err(DlcError::InvalidEncryptKey(
-            "encrypt key must be 32 bytes (AES-256)".into(),
-        ));
-    }
-
-    let cipher = key.with_secret(|kb| {
-        Aes256Gcm::new_from_slice(kb.as_slice()).map_err(|e| DlcError::CryptoError(e.to_string()))
-    })?;
-    let nonce_bytes: [u8; 12] = rand::random();
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher
-        .encrypt(nonce, plaintext)
-        .map_err(|_| DlcError::EncryptionFailed("encryption failed".into()))?;
-
-    // version 1
-    let version = 1u8;
-
-    let mut out = Vec::new();
-    out.extend_from_slice(DLC_ASSET_MAGIC);
-    out.push(version);
-
-    let id = dlc_id.to_string();
-    let dlc_bytes = id.as_bytes();
-    out.extend_from_slice(&(dlc_bytes.len() as u16).to_be_bytes());
-    out.extend_from_slice(dlc_bytes);
-
-    let ext = original_extension.unwrap_or("");
-    out.push(ext.len() as u8);
-    out.extend_from_slice(ext.as_bytes());
-
-    // version 1 includes the type field (u16 length + utf8 bytes)
-    let t = original_type.unwrap_or("");
-    out.extend_from_slice(&(t.len() as u16).to_be_bytes());
-    out.extend_from_slice(t.as_bytes());
-
-    out.extend_from_slice(&nonce_bytes);
-    out.extend_from_slice(&ciphertext);
-
-    Ok((out, nonce_bytes))
-}
-
-/// Low-level helper that constructs the container bytes from already-encrypted
-/// ciphertext (keeps packing logic in one place). Useful when encryption is
-/// performed externally.
-pub fn build_encrypted_container_bytes(
-    dlc_id: &str,
-    original_extension: Option<&str>,
-    original_type: Option<&str>,
-    nonce: [u8; 12],
-    ciphertext: &[u8],
-) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(DLC_ASSET_MAGIC);
-    out.push(1u8); // version 1
-    let dlc_bytes = dlc_id.as_bytes();
-    out.extend_from_slice(&(dlc_bytes.len() as u16).to_be_bytes());
-    out.extend_from_slice(dlc_bytes);
-
-    let ext = original_extension.unwrap_or("");
-    out.push(ext.len() as u8);
-    out.extend_from_slice(ext.as_bytes());
-
-    // version 1 includes the type field (u16 length + utf8 bytes)
-    let t = original_type.unwrap_or("");
-    out.extend_from_slice(&(t.len() as u16).to_be_bytes());
-    out.extend_from_slice(t.as_bytes());
-
-    out.extend_from_slice(&nonce);
-    out.extend_from_slice(ciphertext);
-    out
-}
-
 /// Pack multiple entries into a single `.dlcpack` container.
-/// New format (version 2):
-/// `magic(4)='BDLP' | version(1) | dlc_len(u16) | dlc_id |
-///    manifest_len(u32) | manifest(json) | nonce(12) | ciphertext_len(u32) | ciphertext`
-///
-/// - The manifest is a JSON array of objects: { path, original_extension?, type_path? } and is stored in the pack header (plaintext) so the CLI / tools can list entries without decrypting.
-/// - The archive is a gzip-compressed tar (`.tar.gz`) of the raw plaintext files (paths preserved) and the entire compressed archive is encrypted as a single AES-GCM ciphertext using `key`.
-///
-/// Approach A (Product-Signed DLC):
-/// - Each pack is signed with the private key indicating which product it belongs to
-/// - The signature proves authorization without requiring an allowlist in the game binary
-/// - When loading, verify the signature matches the authorized product key
 pub fn pack_encrypted_pack(
     dlc_id: &DlcId,
     items: &[(String, Option<String>, Option<String>, Vec<u8>)],
@@ -751,10 +652,10 @@ pub fn pack_encrypted_pack(
     // refuse inputs that already look like BDLC / BDLP containers
     for (path, _ext_opt, _type_opt, plaintext) in items {
         if plaintext.len() >= 4
-            && (plaintext.starts_with(DLC_ASSET_MAGIC) || plaintext.starts_with(DLC_PACK_MAGIC))
+            && (plaintext.starts_with(DLC_PACK_MAGIC))
         {
             return Err(DlcError::Other(format!(
-                "cannot pack existing dlc or dlcpack container as an item: {}",
+                "cannot pack existing dlcpack container as an item: {}",
                 path
             )));
         }
@@ -863,7 +764,7 @@ pub fn pack_encrypted_pack(
 }
 
 /// .dlc container magic header (4 bytes) used to identify encrypted asset containers.
-pub const DLC_ASSET_MAGIC: &[u8; 4] = b"BDLC";
+// pub const DLC_ASSET_MAGIC: &[u8; 4] = b"BDLC";
 /// .dlcpack container magic header (4 bytes) used to identify encrypted pack containers.
 pub const DLC_PACK_MAGIC: &[u8; 4] = b"BDLP";
 
@@ -1277,29 +1178,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pack_and_parse_roundtrip() {
-        let encrypt_key = EncryptionKey::from_random(32);
-        let plaintext = b"hello dlc v2";
-        let (container, _nonce) = pack_encrypted_asset(
-            plaintext,
-            &DlcId::from("my_dlc"),
-            Some("json"),
-            None,
-            &encrypt_key,
-        )
-        .expect("pack");
-
-        let enc = parse_encrypted(&container).expect("parse");
-        assert_eq!(enc.dlc_id, "my_dlc");
-        assert_eq!(enc.original_extension, "json");
-        // type_path is None because None was passed to pack_encrypted_asset
-        assert!(enc.type_path.is_none());
-        let decrypted =
-            decrypt_with_key(&encrypt_key, &enc.ciphertext, &enc.nonce).expect("decrypt");
-        assert_eq!(decrypted, plaintext);
-    }
-
-    #[test]
     fn pack_encrypted_pack_rejects_nested_dlc() {
         let encrypt_key = EncryptionKey::from_random(32);
         let dlc_id = DlcId::from("pack_test");
@@ -1307,7 +1185,7 @@ mod tests {
         let dlc_key = DlcKey::generate_random();
         let items = vec![("a.txt".to_string(), Some("txt".to_string()), None, {
             let mut v = Vec::new();
-            v.extend_from_slice(b"BDLC");
+            v.extend_from_slice(DLC_PACK_MAGIC);
             v.extend_from_slice(b"inner");
             v
         })];

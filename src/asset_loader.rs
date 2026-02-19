@@ -48,7 +48,7 @@ impl<A: Asset> ErasedSubAssetRegistrar for TypedSubAssetRegistrar<A> {
     }
 }
 
-/// Represents a single encrypted file loaded from a `.dlc` container. The contained bytes are still encrypted and will be decrypted by the `DlcLoader` when the asset is loaded.
+/// Represents a single encrypted file inside a `.dlcpack` container, along with its metadata (DLC ID, original extension, optional type path). The ciphertext is not decrypted at this stage; decryption is performed on demand by `DlcPackEntry::decrypt_bytes` using the global encrypt key registry.
 #[derive(Clone, Debug)]
 pub struct EncryptedAsset {
     pub dlc_id: String,
@@ -59,7 +59,7 @@ pub struct EncryptedAsset {
     pub ciphertext: Vec<u8>,
 }
 
-/// Parse the binary encrypted-asset container used by `.dlc` and `.dlcpack`.
+/// Parse the binary encrypted-asset container `.dlcpack`.
 ///
 /// Returns metadata (dlc id, original extension, optional `type_path`) plus
 /// the ciphertext — no decryption is performed here.

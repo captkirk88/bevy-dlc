@@ -102,24 +102,24 @@ enum Commands {
     },
 
     #[command(
-        about = "List contents of a .dlc or .dlcpack (prints entries/metadata)",
-        long_about = "Display detailed metadata for a single .dlc file or the entries inside a .dlcpack. If given a directory, lists all .dlc and .dlcpack files inside."
+        about = "List contents of a .dlcpack (prints entries/metadata)",
+        long_about = "Display detailed metadata for the entries inside a .dlcpack. If given a directory, lists all .dlcpack files inside."
     )]
     List {
-        /// path to a .dlc or .dlcpack file (or directory)
+        /// path to a .dlcpack file (or directory)
         #[arg(
             value_name = "DLC",
-            help = "Path to a .dlc or .dlcpack file, or a directory containing .dlc/.dlcpack files (recursive)"
+            help = "Path to a .dlcpack file, or a directory containing .dlcpack files (recursive)"
         )]
         dlc: PathBuf,
     },
 
-    /// Validate a `.dlc` or `.dlcpack` against a SignedLicense / public key.
+    /// Validate a `.dlcpack` against a SignedLicense / public key.
     /// If the license carries an embedded `encrypt_key `, the command will
     /// attempt to decrypt the container and report success or the failure
     /// reason (useful for CI or debugging packaging tokens).
     Validate {
-        /// path to a .dlc or .dlcpack file
+        /// path to a .dlcpack file
         #[arg(value_name = "DLC")]
         dlc: PathBuf,
         /// Product name (used to read `<product>.slicense` / `<product>.pubkey` if not supplied)

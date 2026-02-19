@@ -24,13 +24,13 @@ fn pack_unpack_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         .arg("pack")
         .arg("--product")
         .arg(prod)
-        .arg(&src_dir)
         .arg(dlc_id)
-        .arg("--pack")
         .arg("--types")
-        .arg("txt=bevy_dlc::example_util::TextAsset")
+        .arg("txt=some_crate::SomeType")
         .arg("-o")
         .arg(&out_pack)
+        .arg("--")
+        .arg(&src_dir)
         .assert()
         .success();
 

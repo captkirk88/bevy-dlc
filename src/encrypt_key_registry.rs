@@ -35,7 +35,7 @@ pub(crate) fn get(dlc_id: &str) -> Option<EncryptionKey> {
 
 /// Register an asset path for a given `dlc_id`. Each DLC ID can only have
 /// ONE associated pack file. This enforces the design constraint that each
-/// DLC release is shipped as a single .dlcpack or .dlc file.
+/// DLC release is shipped as a single .dlcpack.
 /// Calling this with a different path for the same DlcId will replace the
 /// previous entry (which should not happen if the asset loader's conflict check is working).
 pub(crate) fn register_asset_path(dlc_id: &str, path: &str) {
