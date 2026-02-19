@@ -120,18 +120,7 @@ enum Commands {
         dlc: PathBuf,
     },
 
-    /// Generate a pubkey + signed license pair and save them to disk as
-    /// `<product>.pubkey` and `<product>.slicense`. Automatically merges with
-    /// any existing license for the product to support incremental DLC releases.
-    Generate {
-        /// Product identifier to embed in the generated SignedLicense and to
-        /// derive the output filenames `<product>.pubkey` / `<product>.slicense`.
-        #[arg(long, value_name = "PRODUCT")]
-        product: String,
-        /// One or more DLC ids to include in the signed license.
-        #[arg(value_name = "DLC_ID", num_args = 1..)]
-        dlc_ids: Vec<String>,
-    },
+
 
     /// Validate a `.dlc` or `.dlcpack` against a SignedLicense / public key.
     /// If the license carries an embedded `encrypt_key `, the command will
@@ -271,7 +260,7 @@ fn print_signed_license_and_pubkey(signedlicense: &str, dlc_key: &DlcKey) {
 
     println!(
         "PUB KEY: {}",
-        URL_SAFE_NO_PAD.encode(dlc_key.public_key_bytes())
+        URL_SAFE_NO_PAD.encode(dlc_key.get_public_key().get())
     );
 }
 
@@ -441,22 +430,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
 
-            // helper: attempt to extract an embedded `encrypt_key` (or legacy `content_key`)
-            // from a compact `SignedLicense` token (payload_base64url.signature_base64url).
-            let extract_embedded_encrypt_key = |token: &str| -> Option<Vec<u8>> {
-                let parts: Vec<&str> = token.split('.').collect();
-                if parts.len() != 2 {
-                    return None;
-                }
-                let payload = URL_SAFE_NO_PAD.decode(parts[0].as_bytes()).ok()?;
-                let payload_json: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-                let key_b64 = payload_json
-                    .get("encrypt_key")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| payload_json.get("content_key").and_then(|v| v.as_str()));
-                key_b64.and_then(|kb| URL_SAFE_NO_PAD.decode(kb.as_bytes()).ok())
-            };
-
             // `.dlcpack` mode: bundle multiple files into one container when
             // `--pack` is specified (accepts a directory or an explicit list
             // of files supplied with `--files`).
@@ -581,11 +554,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 let dlc_id = DlcId::from(dlc_id_str.clone());
-                // choose encrypt key: if a signed license (or product.slicense) was supplied and it
-                // carries an embedded `encrypt_key` prefer that so the generated package will
-                // decrypt with the provided token. Fall back to a random key otherwise.
+                // For Approach A: DLC packs are self-signed with the product key.
+                // Generate or use a provided key. If a signed-license contains an encrypt_key, we extract it.
+                
+                let dlc_key = if let Some(_) = signed_license.as_deref() {
+                    if let Some(_) = pubkey.as_deref() {
+                        // If both license and pubkey provided, verify (but we still need privkey to sign)
+                        // For now, generate a new one - in practice, the platform would provide the private key
+                        DlcKey::generate_random()
+                    } else {
+                        // generate new key for signing
+                        DlcKey::generate_random()
+                    }
+                } else {
+                    DlcKey::generate_random()
+                };
+                
                 let encrypt_key = if let Some(lic_str) = signed_license.as_deref() {
-                    if let Some(key_bytes) = extract_embedded_encrypt_key(lic_str) {
+                    if let Some(key_bytes) = bevy_dlc::extract_encrypt_key_from_license(&bevy_dlc::SignedLicense::from(lic_str.to_string())) {
                         if key_bytes.len() != 32 {
                             return Err("embedded encrypt key has invalid length".into());
                         }
@@ -597,7 +583,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     EncryptionKey::from_random(32)
                 };
 
-                let container = pack_encrypted_pack(&dlc_id, &items, &encrypt_key )?;
+                let container = pack_encrypted_pack(&dlc_id, &items, &Product::from(product.clone()), &dlc_key, &encrypt_key )?;
 
                 // Determine signed license / pubkey to emit. Prefer a supplied
                 // `--signed-license` (optionally verified with `--pubkey`). If no
@@ -634,7 +620,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if list {
-                    let (did, _v, ents) = parse_encrypted_pack(&container)?;
+                    let (_prod, did, _v, ents) = parse_encrypted_pack(&container)?;
                     println!("dlc_id: {} entries: {}", did, ents.len());
                     for (p, enc) in ents.iter() {
                         println!(
@@ -687,7 +673,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // choose encrypt key: prefer embedded encrypt_key from a supplied/product signed-license
                 // so generated assets will be decryptable by that token; otherwise generate a random key.
                 let encrypt_key = if let Some(lic_str) = signed_license.as_deref() {
-                    if let Some(key_bytes) = extract_embedded_encrypt_key(lic_str) {
+                    if let Some(key_bytes) = bevy_dlc::extract_encrypt_key_from_license(&bevy_dlc::SignedLicense::from(lic_str.to_string())) {
                         if key_bytes.len() != 32 {
                             return Err("embedded encrypt key has invalid length".into());
                         }
@@ -773,7 +759,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let dlc_id = DlcId::from(dlc_id_str.clone());
             // prefer embedded encrypt_key from a supplied/product signed-license when available
             let encrypt_key = if let Some(lic_str) = signed_license.as_deref() {
-                if let Some(key_bytes) = extract_embedded_encrypt_key(lic_str) {
+                if let Some(key_bytes) = bevy_dlc::extract_encrypt_key_from_license(&bevy_dlc::SignedLicense::from(lic_str.to_string())) {
                     if key_bytes.len() != 32 {
                         return Err("embedded encrypt key has invalid length".into());
                     }
@@ -852,7 +838,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let ext = file.extension().and_then(|s| s.to_str()).unwrap_or("");
                     if ext.eq_ignore_ascii_case("dlcpack") {
                         let bytes = std::fs::read(file)?;
-                        let (did, _v, ents) = parse_encrypted_pack(&bytes)?;
+                        let (_prod, did, _v, ents) = parse_encrypted_pack(&bytes)?;
                         println!(
                             "{} -> dlcpack: {} entries: {}",
                             file.display(),
@@ -890,7 +876,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if ext.eq_ignore_ascii_case("dlcpack")
                 || (bytes.len() >= 4 && bytes.starts_with(DLC_PACK_MAGIC))
             {
-                let (did, _v, ents) = parse_encrypted_pack(&bytes)?;
+                let (_prod, did, _v, ents) = parse_encrypted_pack(&bytes)?;
                 println!("dlcpack: {} entries: {}", did, ents.len());
                 for (p, enc) in ents.iter() {
                     println!(
@@ -919,37 +905,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("not a .dlc or .dlcpack container".into());
         }
 
-        Commands::Generate { product, dlc_ids } => {
-            // Auto-detect and merge with existing license (if present)
-            let mut all_dlc_ids = dlc_ids.clone();
-            let license_path = format!("{}.slicense", product);
-            if std::path::Path::new(&license_path).exists() {
-                if let Ok(old_license_text) = std::fs::read_to_string(&license_path) {
-                    if let Some(merged) = merge_dlc_ids_from_license(&old_license_text, &all_dlc_ids) {
-                        all_dlc_ids = merged;
-                    }
-                }
-            }
 
-            // Remove duplicates while preserving order
-            all_dlc_ids.sort();
-            all_dlc_ids.dedup();
-
-            // create a new random keypair and a signed license for the accumulated DLC ids
-            let dlc_key = DlcKey::generate_random();
-            let signedlicense = dlc_key.create_signed_license(&all_dlc_ids, Product::from(product.clone()))?;
-
-            let sl_path = format!("{}.slicense", product);
-            let pk_path = format!("{}.pubkey", product);
-
-            // write signed license (sensitive) and pubkey (public)
-            write_license_file(&sl_path, &signedlicense)?;
-            write_pubkey_file(&pk_path, &dlc_key)?;
-
-            println!("Wrote signed license → {} (DLCs: {})", sl_path, all_dlc_ids.join(", "));
-            println!("Wrote public key     → {}", pk_path);
-            return Ok(());
-        }
 
         Commands::Validate { dlc, product, signed_license, pubkey } => {
             // read container bytes
@@ -957,12 +913,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // determine dlc id from container
             let dlc_id = if bytes.len() >= 4 && bytes.starts_with(DLC_PACK_MAGIC) {
-                let (did, _v, _ents) = parse_encrypted_pack(&bytes)?;
+                let (_prod, did, _v, _ents) = parse_encrypted_pack(&bytes)?;
                 did
             } else {
                 let enc = parse_encrypted(&bytes)?;
                 enc.dlc_id
             };
+
+            // resolve pubkey (optional — we can still decode encrypt key without verification)
+            let supplied_pubkey = pubkey.or_else(|| {
+                product.as_ref().and_then(|p| {
+                    let path = format!("{}.pubkey", p);
+                    if std::path::Path::new(&path).exists() {
+                        std::fs::read_to_string(&path).ok().map(|s| s.trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+            });
+
+            // For v3 dlcpack, verify the embedded signature if pubkey is available
+            if bytes.len() >= 4 && bytes.starts_with(DLC_PACK_MAGIC) {
+                if let Some(pk) = supplied_pubkey.as_deref() {
+                    match bevy_dlc::verify_pack_signature(&bytes, pk) {
+                        Ok(true) => println!("Pack signature verification: SUCCESS"),
+                        Ok(false) => println!("Pack signature verification: FAILED (invalid signature)"),
+                        Err(e) => println!("Pack signature verification: ERROR ({})", e),
+                    }
+                }
+            }
 
             // resolve signed license string (CLI arg takes precedence, then product.slicense)
             let supplied_license = signed_license.or_else(|| {
@@ -980,18 +959,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("no signed license supplied or found (use --signed-license or --product <name> to pick <product>.slicense)".into());
             }
             let supplied_license = supplied_license.unwrap();
-
-            // resolve pubkey (optional — we can still decode encrypt key without verification)
-            let supplied_pubkey = pubkey.or_else(|| {
-                product.as_ref().and_then(|p| {
-                    let path = format!("{}.pubkey", p);
-                    if std::path::Path::new(&path).exists() {
-                        std::fs::read_to_string(&path).ok().map(|s| s.trim().to_string())
-                    } else {
-                        None
-                    }
-                })
-            });
 
             // verify signature if pubkey present
             if let Some(pk) = supplied_pubkey.as_deref() {
@@ -1028,13 +995,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Some(ext) if ext.eq_ignore_ascii_case("dlc") => {
                             let enc = parse_encrypted(&bytes)?;
                             match decrypt_with_key_local(&key_bytes, &enc.ciphertext, &enc.nonce) {
-                                Ok(_) => println!("SUCCESS!"),
-                                Err(e) => println!("FAILURE: {}", e),
+                                Ok(_) => println!("Decryption test: SUCCESS!"),
+                                Err(e) => println!("Decryption test: FAILURE - {}", e),
                             }
                         }
                         _ => {
                             // dlcpack: try parse_encrypted_pack then decrypt archive or entry(s)
-                            let (_did, _v, entries) = parse_encrypted_pack(&bytes)?;
+                            let (_prod, _did, _v, entries) = parse_encrypted_pack(&bytes)?;
                             if entries.is_empty() {
                                 println!("container has no entries");
                             } else {
@@ -1047,11 +1014,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let dec = flate2::read::GzDecoder::new(std::io::Cursor::new(plain));
                                         let mut ar = tar::Archive::new(dec);
                                         match ar.entries() {
-                                            Ok(_) => println!("SUCCESS!"),
-                                            Err(e) => println!("FAILURE: {}", e),
+                                            Ok(_) => println!("Decryption test: SUCCESS!"),
+                                            Err(e) => println!("Decryption test: FAILURE - {}", e),
                                         }
                                     }
-                                    Err(e) => println!("FAILURE: {}", e),
+                                    Err(e) => println!("Decryption test: FAILURE - {}", e),
                                 }
                             }
                         }
@@ -1068,7 +1035,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let payload = URL_SAFE_NO_PAD.decode(parts[0].as_bytes())?;
                 let payload_json: serde_json::Value = serde_json::from_slice(&payload)?;
-                if let Some(ck_b64) = payload_json.get(" encrypt_key ").and_then(|v| v.as_str()) {
+                if let Some(ck_b64) = payload_json.get("encrypt_key").and_then(|v| v.as_str()) {
                     let key_bytes = URL_SAFE_NO_PAD.decode(ck_b64.as_bytes())?;
                     if key_bytes.len() != 32 {
                         return Err("embedded encrypt key has invalid length".into());
@@ -1084,7 +1051,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         _ => {
-                            let (_did, _v, entries) = parse_encrypted_pack(&bytes)?;
+                            let (_prod, _did, _v, entries) = parse_encrypted_pack(&bytes)?;
                             if entries.is_empty() {
                                 println!("container has no entries");
                             } else {
@@ -1164,221 +1131,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Merge old DLC ids from an existing license text with new ids.
-/// Returns the merged list with duplicates removed, or None on parse error.
-fn merge_dlc_ids_from_license(license_text: &str, new_ids: &[String]) -> Option<Vec<String>> {
-    let mut all_dlc_ids = new_ids.to_vec();
-    let old_license = SignedLicense::from(license_text.trim().to_string());
-    
-    old_license.with_secret(|token_str| {
-        let parts: Vec<&str> = token_str.split('.').collect();
-        if parts.len() == 2 {
-            if let Ok(payload_bytes) = URL_SAFE_NO_PAD.decode(parts[0].as_bytes()) {
-                if let Ok(payload_json) = serde_json::from_slice::<serde_json::Value>(&payload_bytes) {
-                    if let Some(old_dlcs) = payload_json.get("dlcs").and_then(|v| v.as_array()) {
-                        for dlc_val in old_dlcs {
-                            if let Some(dlc_id) = dlc_val.as_str() {
-                                if !all_dlc_ids.contains(&dlc_id.to_string()) {
-                                    all_dlc_ids.push(dlc_id.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    });
 
-    Some(all_dlc_ids)
-}
-
-/// Write a signed license to disk (securely zeroized on drop).
-fn write_license_file(path: &str, license: &SignedLicense) -> Result<(), Box<dyn std::error::Error>> {
-    let text = license.with_secret(|s| s.clone());
-    std::fs::write(path, text)?;
-    Ok(())
-}
-
-/// Write a public key to disk (base64url encoded).
-fn write_pubkey_file(path: &str, dlc_key: &DlcKey) -> Result<(), Box<dyn std::error::Error>> {
-    let pubkey_text = URL_SAFE_NO_PAD.encode(dlc_key.public_key_bytes());
-    std::fs::write(path, pubkey_text)?;
-    Ok(())
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_merge_dlc_ids_no_existing_license() {
-        let new_ids = vec![String::from("expansion_1"), String::from("expansion_2")];
-        // Empty license text
-        let merged = merge_dlc_ids_from_license("", &new_ids);
-        
-        assert!(merged.is_some());
-        let result = merged.unwrap();
-        // Result should contain the new IDs (exact order may vary due to merge logic)
-        assert!(result.contains(&String::from("expansion_1")));
-        assert!(result.contains(&String::from("expansion_2")));
-    }
-
-    #[test]
-    fn test_merge_dlc_ids_with_existing_license() {
-        let key = DlcKey::generate_random();
-        let old_license = key
-            .create_signed_license(&[String::from("expansion_old")], Product::from("test"))
-            .expect("create old license");
-
-        let old_license_str = old_license.with_secret(|s| s.clone());
-        
-        let new_ids = vec![String::from("expansion_new")];
-        let merged = merge_dlc_ids_from_license(&old_license_str, &new_ids);
-
-        assert!(merged.is_some());
-        let result = merged.unwrap();
-        // Both old and new IDs should be present
-        assert!(result.contains(&String::from("expansion_old")));
-        assert!(result.contains(&String::from("expansion_new")));
-    }
-
-    #[test]
-    fn test_merge_dlc_ids_deduplication() {
-        let key = DlcKey::generate_random();
-        let old_license = key
-            .create_signed_license(&[String::from("expansion_1")], Product::from("test"))
-            .expect("create old license");
-
-        let old_license_str = old_license.with_secret(|s| s.clone());
-        
-        // Try to add expansion_1 again (duplicate)
-        let new_ids = vec![String::from("expansion_1"), String::from("expansion_2")];
-        let merged = merge_dlc_ids_from_license(&old_license_str, &new_ids);
-
-        assert!(merged.is_some());
-        let result = merged.unwrap();
-        
-        // Count occurrences of expansion_1 - should be exactly 1
-        let count = result.iter().filter(|id| *id == "expansion_1").count();
-        assert_eq!(count, 1, "expansion_1 should not be duplicated");
-        
-        // Should still have both expansion_1 and expansion_2
-        assert!(result.contains(&String::from("expansion_1")));
-        assert!(result.contains(&String::from("expansion_2")));
-    }
-
-    #[test]
-    fn test_write_and_read_license_file() {
-        use tempfile::TempDir;
-        
-        let td = TempDir::new().expect("create temp dir");
-        let license_path = td.path().join("test.slicense").to_string_lossy().to_string();
-        
-        let key = DlcKey::generate_random();
-        let license = key
-            .create_signed_license(&[String::from("test_dlc")], Product::from("test"))
-            .expect("create license");
-
-        // Write the license file
-        write_license_file(&license_path, &license)
-            .expect("write license file");
-
-        // Verify file was created
-        assert!(std::path::Path::new(&license_path).exists());
-
-        // Read back the file
-        let written_content = std::fs::read_to_string(&license_path)
-            .expect("read license file");
-
-        // Should match the original license (in token format)
-        let original_token = license.with_secret(|s| s.clone());
-        assert_eq!(written_content.trim(), original_token.trim());
-    }
-
-    #[test]
-    fn test_write_pubkey_file_format() {
-        use tempfile::TempDir;
-        
-        let td = TempDir::new().expect("create temp dir");
-        let pubkey_path = td.path().join("test.pubkey").to_string_lossy().to_string();
-        
-        let key = DlcKey::generate_random();
-        
-        // Write the pubkey file
-        write_pubkey_file(&pubkey_path, &key)
-            .expect("write pubkey file");
-
-        // Verify file was created
-        assert!(std::path::Path::new(&pubkey_path).exists());
-
-        // Read back the file
-        let written_content = std::fs::read_to_string(&pubkey_path)
-            .expect("read pubkey file");
-
-        // Should be valid base64url (no padding)
-        assert!(!written_content.trim().is_empty());
-        assert!(written_content.trim().chars().all(|c| {
-            c.is_ascii_alphanumeric() || c == '_' || c == '-' || c.is_whitespace()
-        }), "Pubkey should be base64url encoded");
-
-        // Should match the length of public key bytes when encoded
-        let expected = URL_SAFE_NO_PAD.encode(key.public_key_bytes());
-        assert_eq!(written_content.trim(), expected);
-    }
-
-    #[test]
-    fn test_merge_multiple_incremental_releases() {
-        let key = DlcKey::generate_random();
-        
-        // Simulate first release
-        let license_v1 = key
-            .create_signed_license(&[String::from("episode_1")], Product::from("game"))
-            .expect("create v1");
-
-        let license_v1_str = license_v1.with_secret(|s| s.clone());
-        
-        // Second release adds episode_2
-        let new_ids_v2 = vec![String::from("episode_2")];
-        let merged_v2 = merge_dlc_ids_from_license(&license_v1_str, &new_ids_v2)
-            .expect("merge v2");
-
-        assert_eq!(merged_v2.len(), 2);
-        assert!(merged_v2.contains(&String::from("episode_1")));
-        assert!(merged_v2.contains(&String::from("episode_2")));
-
-        // Third release adds episode_3
-        let new_ids_v3 = vec![String::from("episode_3")];
-        let merged_v3 = merge_dlc_ids_from_license(&license_v1_str, &new_ids_v3)
-            .expect("merge v3");
-
-        // Note: This only merges from the original license, not from v2
-        // In practice, the generate command would create a new license file
-        // that contains all the IDs
-        assert_eq!(merged_v3.len(), 2);
-        assert!(merged_v3.contains(&String::from("episode_1")));
-        assert!(merged_v3.contains(&String::from("episode_3")));
-    }
-
-    #[test]
-    fn test_write_license_file_creates_parent_directory() {
-        use tempfile::TempDir;
-        
-        let td = TempDir::new().expect("create temp dir");
-        // This path doesn't exist yet (parent dirs not created)
-        let license_path = td
-            .path()
-            .join("subdir")
-            .join("test.slicense")
-            .to_string_lossy()
-            .to_string();
-
-        let key = DlcKey::generate_random();
-        let license = key
-            .create_signed_license(&[String::from("test")], Product::from("test"))
-            .expect("create license");
-
-        // This will fail because parent directory doesn't exist
-        // (The actual implementation expects parent directory to exist)
-        let result = write_license_file(&license_path, &license);
-        assert!(result.is_err(), "Should fail when parent directory doesn't exist");
-    }
-}

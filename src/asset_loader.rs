@@ -349,8 +349,13 @@ impl AssetLoader for DlcPackLoader {
             .await
             .map_err(|e| DlcLoaderError::Io(e))?;
 
-        let (dlc_id, _version, manifest_entries) = crate::parse_encrypted_pack(&bytes)
+        let (_product, dlc_id, _version, manifest_entries) = crate::parse_encrypted_pack(&bytes)
             .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
+
+        // Check for DLC ID conflicts: if this DLC ID is already loaded, prevent loading another pack with the same ID
+        if !crate::encrypt_key_registry::asset_paths_for(&dlc_id).is_empty() {
+            return Err(DlcLoaderError::DlcIdConflict(dlc_id));
+        }
 
         // register this asset path for the dlc id so it can be reloaded on unlock
         crate::encrypt_key_registry::register_asset_path(&dlc_id, &path_string);
@@ -453,7 +458,7 @@ impl AssetLoader for DlcPackLoader {
 pub fn decrypt_pack_entries(
     pack_bytes: &[u8],
 ) -> Result<(String, Vec<(String, String, Option<String>, Vec<u8>)>), DlcLoaderError> {
-    let (dlc_id, version, entries) = crate::parse_encrypted_pack(pack_bytes)
+    let (_product, dlc_id, version, entries) = crate::parse_encrypted_pack(pack_bytes)
         .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
 
     // lookup encrypt key in global registry
@@ -560,6 +565,8 @@ pub enum DlcLoaderError {
     DecryptionFailed(String),
     #[error("Invalid encrypted asset format: {0}")]
     InvalidFormat(String),
+    #[error("DLC ID conflict: a .dlcpack with DLC id '{0}' is already loaded; cannot load another pack with the same DLC id")]
+    DlcIdConflict(String),
 }
 
 #[cfg(test)]
@@ -604,7 +611,9 @@ use secure_gate::ExposeSecret;
             b"hello".to_vec(),
         )];
         let key = EncryptionKey::from_random(32);
-        let container = crate::pack_encrypted_pack(&dlc_id, &items, &key).expect("pack");
+        let dlc_key = crate::DlcKey::generate_random();
+        let product = crate::Product::from("test");
+        let container = crate::pack_encrypted_pack(&dlc_id, &items, &product, &dlc_key, &key).expect("pack");
 
         let err = decrypt_pack_entries(&container).expect_err("should be locked");
         match err {
@@ -624,7 +633,9 @@ use secure_gate::ExposeSecret;
             b"world".to_vec(),
         )];
         let real_key = EncryptionKey::from_random(32);
-        let container = crate::pack_encrypted_pack(&dlc_id, &items, &real_key).expect("pack");
+        let dlc_key = crate::DlcKey::generate_random();
+        let product = crate::Product::from("test");
+        let container = crate::pack_encrypted_pack(&dlc_id, &items, &product, &dlc_key, &real_key).expect("pack");
 
         // insert an incorrect key for this DLC
         let wrong_key: [u8; 32] = rand::random();
@@ -683,8 +694,10 @@ use secure_gate::ExposeSecret;
         crate::encrypt_key_registry::insert(&dlc_id.to_string(), encrypt_key.with_secret(|b| EncryptionKey::from(b.to_vec())));
 
         // pack using the same symmetric key and validate decrypt_pack_entries
-        let container = crate::pack_encrypted_pack(&dlc_id, &items, &encrypt_key).expect("pack container");
-        let (did, _v, entries) = crate::parse_encrypted_pack(&container).expect("parse pack");
+        let dlc_key = crate::DlcKey::generate_random();
+        let product = crate::Product::from("example");
+        let container = crate::pack_encrypted_pack(&dlc_id, &items, &product, &dlc_key, &encrypt_key).expect("pack container");
+        let (_prod, did, _v, entries) = crate::parse_encrypted_pack(&container).expect("parse pack");
         assert_eq!(did, "expansionA");
         assert!(!entries.is_empty());
 

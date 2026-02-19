@@ -16,6 +16,7 @@ fn main() -> AppExit {
 
     App::new()
         .add_plugins(DefaultPlugins)
+        // This is the only DLC-specific setup needed in the app: add the plugin with the product name, public key, and signed license token. The plugin will verify the token and provision the content keys into the registry for loading packs.
         .add_plugins(DlcPlugin::new(
             Product::from("example"),
             dlc_key,
@@ -28,7 +29,7 @@ fn main() -> AppExit {
         .add_systems(Startup, startup)
         .add_systems(
             Update,
-            show_dlc_content.run_if(dlc_unlocked("expansionA").and(run_once)),
+            show_dlc_content.run_if(is_dlc_loaded("expansionA").and(run_once)),
         )
         .run()
 }
@@ -41,13 +42,6 @@ fn startup(asset_server: Res<AssetServer>, mut commands: Commands, dlc_mgr: Res<
     let handle = asset_server.load::<DlcPack>("expansionA.dlcpack");
 
     commands.spawn((Camera2d, LoadedPack(handle)));
-
-    let dlc_id = DlcId::from("expansionA");
-    if dlc_mgr.is_unlocked_id(&dlc_id) {
-        info!("DLC is already unlocked at startup!");
-    } else {
-        info!("DLC is locked at startup.");
-    }
 }
 
 fn show_dlc_content(

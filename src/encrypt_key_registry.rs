@@ -22,8 +22,14 @@ pub(crate) fn remove(dlc_id: &str) {
 }
 
 /// Return an owned `ContentKey` (cloned) if present.
+/// The clone is performed within the secure closure to minimize exposure time.
 pub(crate) fn get(dlc_id: &str) -> Option<EncryptionKey> {
-    KEY_REGISTRY.get(dlc_id).map(|v| v.value().with_secret(|b| EncryptionKey::from(b.to_vec())))
+    KEY_REGISTRY.get(dlc_id).map(|v| {
+        v.value().with_secret(|b| {
+            // Clone directly into a new EncryptionKey wrapper to ensure it's zeroized
+            EncryptionKey::from(b.to_vec())
+        })
+    })
 }
 
 /// Register an asset path for a given `dlc_id`. The path is stored so that
@@ -38,6 +44,7 @@ pub(crate) fn register_asset_path(dlc_id: &str, path: &str) {
 }
 
 /// Return a list of registered asset paths for the DLC id (clone).
+#[allow(unused)]
 pub(crate) fn asset_paths_for(dlc_id: &str) -> Vec<String> {
     PATH_REGISTRY
         .get(dlc_id)
@@ -46,7 +53,6 @@ pub(crate) fn asset_paths_for(dlc_id: &str) -> Vec<String> {
 }
 
 /// Utility for tests/demo: clear the registry.
-#[cfg(test)]
 pub(crate) fn clear_all() {
     KEY_REGISTRY.clear();
     PATH_REGISTRY.clear();
