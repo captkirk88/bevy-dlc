@@ -1,6 +1,6 @@
 [package]
 name = "bevy-dlc"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2024"
 authors = ["Kirk <github.com/captkirk88>"]
 description = "DLC (downloadable content) management for Bevy games"
@@ -9,7 +9,7 @@ readme = "README.md"
 repository = "https://github.com/captkirk88/bevy-dlc"
 categories = ["game-development"]
 keywords = ["bevy", "dlc"]
-exclude = ["tests/*","examples/*", "benches/*"]
+exclude = ["tests/*","examples/*", "benches/*", "assets/*"]
 
 [features]
 default = []

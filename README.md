@@ -57,7 +57,7 @@ bevy-dlc pack --product my-game expansion_1 assets/expansionA -o dlc/expansion_1
 - `--product` — binds the pack to a product name (enforced by `DlcManager`)
 - `assets/expansionA` — directory or file(s) to pack
 - `expansion_1` — DLC ID (used in licenses to unlock this pack)
-- `-o dlc/expansion_1.dlcpack` — output path for the pack (defaults to `{dlc_id}.dlcpack`)
+- `-o dlc/expansion_1.dlcpack` — output path for the pack, can also just be a directory (defaults to `{dlc_id}.dlcpack`)
 
 This creates `expansion_1.dlcpack` and prints a signed license token.
 
