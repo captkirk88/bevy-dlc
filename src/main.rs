@@ -228,13 +228,13 @@ fn print_signed_license_and_pubkey(
             let slicense_path = format!("{}.slicense", prod);
             let pubkey_path = format!("{}.pubkey", prod);
             if let Err(e) = std::fs::write(&slicense_path, signedlicense) {
-                eprintln!("failed to write {}: {}", slicense_path, e);
+                print_error(&format!("failed to write {}: {}", slicense_path, e));
             }
             if let Err(e) = std::fs::write(&pubkey_path, pubkey_b64) {
-                eprintln!("failed to write {}: {}", pubkey_path, e);
+                print_error(&format!("failed to write {}: {}", pubkey_path, e));
             }
         } else {
-            eprintln!("no product name supplied; skipping file write");
+            print_warning("no product name supplied; skipping file write");
         }
     }
 }
@@ -414,7 +414,7 @@ fn handle_license_output(
             println!("SIGNED LICENSE:\n{}", sup_license);
             println!("PUB KEY: {}", pubkey_str);
         } else {
-            eprintln!("warning: supplied signed-license not verified (no --pubkey supplied)");
+            print_warning("supplied signed-license not verified (no --pubkey supplied)");
             println!("SIGNED LICENSE:\n{}", sup_license);
         }
     } else {
@@ -509,9 +509,17 @@ fn extract_encrypt_key_from_token(
     }
 }
 
+fn print_error(message: &str) {
+    eprintln!("{}: {}", "error".red().bold(), message.white());
+}
+
+fn print_warning(message: &str) {
+    eprintln!("{}: {}", "warning".yellow().bold(), message.white());
+}
+
 fn print_error_and_exit(message: &str) -> ! {
-    eprintln!("{} {}", "error:".red().bold(), message.white());
-    std::process::exit(0);
+    print_error(message);
+    std::process::exit(1);
 }
 
 // Helper: attempt to decrypt the first archive entry using the provided symmetric key.
@@ -604,9 +612,9 @@ fn validate_dlc_file(
         }
         Ok(None) => {
             if supplied_pubkey.is_some() {
-                println!("{}","License verified but does not carry an embedded encrypt key — cannot test decrypt".yellow());
+                print_warning("License verified but does not carry an embedded encrypt key — cannot test decrypt");
             } else {
-                println!("{}","Token payload does not contain a encrypt key; cannot test decrypt".yellow());
+                print_warning("Token payload does not contain an encrypt key; cannot test decrypt");
             }
         }
         Err(e) => return Err(e),
@@ -885,7 +893,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match validate_dlc_file(file.as_path(), product.as_deref(), signed_license.as_deref(), pubkey.as_deref()) {
                         Ok(()) => {},
                         Err(e) => {
-                            eprintln!("{} {}: {}", "error:".red().bold(), file.display(), e);
+                            print_error(&format!("{}: {}", file.display(), e));
                             failures += 1;
                         }
                     }
