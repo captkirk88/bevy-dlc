@@ -14,22 +14,18 @@ Works with Bevy's asset pipeline.
 
 ## Features
 
-- Pack assets into encrypted `.dlc` or `.dlcpack` containers
+- Pack assets into encrypted `.dlcpack` containers
 - Sign licenses with Ed25519 (private key embeds the symmetric encryption key)
 - Verify signatures at runtime and unlock encrypted content
 - Lazy loading of labeled assets (e.g. `pack.dlcpack#sprites/player.png`)
 - Product binding — prevent token reuse across games
-
-> [!NOTE]
-> `.dlc` will likely be removed in 1.1 in favor of the simpler `.dlcpack` format, which is a single encrypted archive instead of individual encrypted files.  This will be a breaking change but simplifies the format and loading logic significantly.  If you want to use the current `.dlc` format, lock to version 0.1.0. (`.dlc` was experimental anyways)
-
 
 ## Install
 
 Add to your `Cargo.toml`:
 
 ```toml
-bevy-dlc = "0.1"
+bevy-dlc = "1.1"
 ```
 
 To use the CLI tool:
@@ -55,14 +51,13 @@ This will generate two files in `keys/`:
 ### Create a pack
 
 ```bash
-bevy-dlc pack --product my-game --pack [-o dlc/expansion_1.dlcpack] expansionA -- assets/expansionA
+bevy-dlc pack --product my-game expansion_1 assets/expansionA -o dlc/expansion_1.dlcpack
 ```
 
 - `--product` — binds the pack to a product name (enforced by `DlcManager`)
-- `assets/expansion_1` — directory of assets to pack
+- `assets/expansionA` — directory or file(s) to pack
 - `expansion_1` — DLC ID (used in licenses to unlock this pack)
-- `--pack` — create a single encrypted archive (`.dlcpack`) instead of individual encrypted files
-- `-o expansion_1.dlcpack` — output path for the pack (defaults to `{dlc_id}.dlcpack`)
+- `-o dlc/expansion_1.dlcpack` — output path for the pack (defaults to `{dlc_id}.dlcpack`)
 
 This creates `expansion_1.dlcpack` and prints a signed license token.
 

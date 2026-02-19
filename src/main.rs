@@ -10,22 +10,21 @@ use bevy::prelude::*;
 use bevy::{asset::AssetServer, log::LogPlugin};
 
 use clap::{Parser, Subcommand};
-use hex::FromHex;
 
 use bevy_dlc::{
-    DLC_ASSET_MAGIC, DLC_PACK_MAGIC, EncryptionKey, pack_encrypted_asset, pack_encrypted_pack,
-    parse_encrypted, parse_encrypted_pack, prelude::*,
+    DLC_PACK_MAGIC, EncryptionKey, pack_encrypted_pack,
+    parse_encrypted_pack, prelude::*,
 };
 use secure_gate::ExposeSecret;
 
-const FORBIDDEN_EXTENSIONS: [&str; 4] = ["dlc", "dlcpack", "pubkey", "slicense"];
+const FORBIDDEN_EXTENSIONS: [&str; 3] = ["dlcpack", "pubkey", "slicense"];
 
 #[derive(Parser)]
 #[command(
     author,
     version,
-    about = "bevy-dlc helper: pack and unpack .dlc containers",
-    long_about = "Utility for creating, inspecting and extracting bevy-dlc encrypted containers.\n\nPACK: encrypt an input asset and emit a .dlc container and print a symmetric encrypt key.\nUNPACK: inspect or decrypt a container using a symmetric encrypt key supplied via --encrypt-key."
+    about = "bevy-dlc helper: pack and unpack .dlcpack containers",
+    long_about = "Utility for creating, inspecting and extracting bevy-dlc encrypted containers.\n\nPACK: encrypt assets and emit a .dlcpack bundle and print a symmetric encrypt key.\nVALIDATE: verify a .dlcpack container using a signed license.\nLIST: inspect contents of a .dlcpack container.\nGENERATE: create new signed licenses."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -35,8 +34,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     #[command(
-        about = "Pack an input asset into a .dlc container (writes .dlc, prints private key + pub key)",
-        long_about = "Encrypts the provided input file into the bevy-dlc container format and prints a signed private key and public key. Use --list to preview container metadata without writing files."
+        about = "Pack assets into a .dlcpack bundle (writes .dlcpack, prints private key + pub key)",
+        long_about = "Encrypts the provided input files into a single bevy-dlc .dlcpack bundle and prints a signed private key and public key. Use --list to preview container metadata without writing files."
     )]
     Pack {
         /// DLC identifier to embed in the container/private key
@@ -45,12 +44,6 @@ enum Commands {
             value_name = "DLC_ID"
         )]
         dlc_id: String,
-        /// Create a single `.dlcpack` bundle instead of individual `.dlc` files
-        #[arg(
-            long,
-            help = "Bundle all files into a single .dlcpack container (encrypts each entry with the same encrypt key)"
-        )]
-        pack: bool,
         /// Supply an explicit list of files to include (overrides directory recursion)
         #[arg(value_name = "FILES...", last = true)]
         files: Vec<PathBuf>,
@@ -61,11 +54,11 @@ enum Commands {
             help = "Show the metadata the container would contain and exit; no file or private key will be produced."
         )]
         list: bool,
-        /// output path (defaults to <input>.dlc or <input>.dlcpack when `--pack`)
+        /// output path (defaults to <dlc_id>.dlcpack)
         #[arg(
             short,
             long,
-            help = "Destination path for the generated file (default: <input>.dlc or .dlcpack when --pack)",
+            help = "Destination path for the generated .dlcpack (default: <dlc_id>.dlcpack)",
             value_name = "OUT"
         )]
         out: Option<PathBuf>,
@@ -164,69 +157,6 @@ enum Commands {
         emit_encrypt_key: bool,
     },
 
-    #[command(
-        about = "Inspect or decrypt a .dlc container",
-        long_about = "Read a bevy-dlc container and optionally decrypt it using a symmetric encrypt key supplied via --encrypt-key. Use --list to display container metadata without extracting the asset."
-    )]
-    Unpack {
-        /// path to the .dlc container file or a directory containing .dlc files
-        #[arg(
-            help = "Path to a .dlc file or a directory containing .dlc files (recursive)",
-            value_name = "DLC"
-        )]
-        dlc: PathBuf,
-        /// print container metadata instead of unpacking
-        #[arg(
-            short,
-            long,
-            help = "Show metadata (dlc_id, extension, ciphertext length, nonce) and exit without decrypting."
-        )]
-        list: bool,
-        /// output path for the decrypted asset (defaults to same-stem + original extension)
-        #[arg(
-            short,
-            long,
-            help = "Where to write the decrypted asset; defaults to <container-stem>.<original_extension>",
-            value_name = "OUT"
-        )]
-        out: Option<PathBuf>,
-        /// symmetric encrypt key (hex or base64url, 32 bytes)
-        #[arg(
-            long,
-            help = "Symmetric encrypt key used to decrypt the container (hex or base64url)."
-        )]
-        encrypt_key: Option<String>,
-    },
-}
-
-fn read_pubkey_bytes(s: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    use std::path::Path;
-
-    // If `s` is a path to an existing file, prefer reading the file.
-    if Path::new(s).exists() {
-        let data = std::fs::read(s)?;
-        // Try to interpret file as UTF-8 containing base64/hex text
-        if let Ok(text) = std::str::from_utf8(&data) {
-            let trimmed = text.trim();
-            if let Ok(decoded) = URL_SAFE_NO_PAD.decode(trimmed.as_bytes()) {
-                return Ok(decoded);
-            }
-            if let Some(rest) = trimmed.strip_prefix("0x") {
-                return Ok(Vec::from_hex(rest)?);
-            }
-            if trimmed.len() % 2 == 0 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Ok(Vec::from_hex(trimmed)?);
-            }
-        }
-        // Fallback: accept raw 32-byte public key file
-        if data.len() == 32 {
-            return Ok(data);
-        }
-        return Err("could not decode public key file as base64, hex, or raw 32 bytes".into());
-    }
-
-    // Otherwise treat `s` as a base64url-encoded public key string.
-    Ok(URL_SAFE_NO_PAD.decode(s.as_bytes())?)
 }
 
 /// Recursively collect files under `dir`. If `ext_filter` is Some(ext), only
@@ -516,7 +446,6 @@ fn resolve_validate_keys(
 async fn pack_command(
     app: &mut App,
     dlc_id_str: String,
-    pack: bool,
     files: Vec<PathBuf>,
     list: bool,
     out: Option<PathBuf>,
@@ -528,10 +457,9 @@ async fn pack_command(
     // extracted from main::Commands::Pack
     let (pubkey, signed_license) = resolve_pubkey_and_license(pubkey, signed_license, &product);
 
-    // `.dlcpack` mode
-    if pack {
-        let mut selected_files: Vec<PathBuf> = Vec::new();
-        for entry in &files {
+    // Collect all input files (from files or directories)
+    let mut selected_files: Vec<PathBuf> = Vec::new();
+    for entry in &files {
             if FORBIDDEN_EXTENSIONS.iter().any(|ext| {
                 entry
                     .extension()
@@ -572,15 +500,13 @@ async fn pack_command(
             let mut bytes = Vec::new();
             f.read_to_end(&mut bytes)?;
 
-            if bytes.len() >= 4
-                && (&bytes[0..4] == DLC_ASSET_MAGIC || &bytes[0..4] == DLC_PACK_MAGIC)
-            {
-                return Err(format!(
-                    "refusing to pack '{}' — input appears to be an existing container (BDLC/BDLP)",
-                    file.display()
-                )
-                .into());
-            }
+        if bytes.len() >= 4 && &bytes[0..4] == DLC_PACK_MAGIC {
+            return Err(format!(
+                "refusing to pack '{}' — input appears to be an existing .dlcpack",
+                file.display()
+            )
+            .into());
+        }
 
             let mut rel = file
                 .file_name()
@@ -638,176 +564,19 @@ async fn pack_command(
             }
         }
 
-        let out_path = out.unwrap_or_else(|| PathBuf::from(format!("{}.dlcpack", dlc_id_str)));
+        let out_path = if let Some(out_val) = out {
+            let path = PathBuf::from(&out_val);
+            if path.is_dir() {
+                path.join(format!("{}.dlcpack", dlc_id_str))
+            } else {
+                path
+            }
+        } else {
+            PathBuf::from(format!("{}.dlcpack", dlc_id_str))
+        };
         std::fs::write(&out_path, &container)?;
         println!("created dlcpack: {}", out_path.display());
-        return Ok(());
-    }
-
-    // directory mode
-    if !pack && files.len() == 1 && files[0].is_dir() {
-        let mut input_files = Vec::new();
-        collect_files_recursive(&files[0], &mut input_files, None)?;
-        if input_files.is_empty() {
-            return Err("no files found in input directory".into());
-        }
-
-        let out_dir = out.unwrap_or_else(|| PathBuf::from("generated"));
-        if out_dir.exists() && !out_dir.is_dir() {
-            return Err("output path must be a directory when packing a directory".into());
-        }
-        std::fs::create_dir_all(&out_dir)?;
-
-        let dlc_id = DlcId::from(dlc_id_str.clone());
-        let encrypt_key = derive_encrypt_key(signed_license.as_deref())?;
-
-        for file in &input_files {
-            let mut f = File::open(file)?;
-            let mut bytes = Vec::new();
-            f.read_to_end(&mut bytes)?;
-            let rel = file.strip_prefix(&files[0]).unwrap();
-            let ext = file.extension().and_then(|s| s.to_str()).unwrap_or("");
-            let (container, _nonce) = pack_encrypted_asset(
-                &bytes,
-                &dlc_id,
-                if ext.is_empty() { None } else { Some(ext) },
-                None,
-                &encrypt_key,
-            )?;
-            let mut out_path = out_dir.join(rel);
-            out_path.set_extension("dlc");
-            if let Some(parent) = out_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&out_path, &container)?;
-            println!("created encrypted asset: {}", out_path.display());
-        }
-
-        println!(
-            "created {} encrypted assets to {}",
-            input_files.len(),
-            out_dir.display()
-        );
-
-        handle_license_output(
-            signed_license.as_deref(),
-            pubkey.as_deref(),
-            &product,
-            &dlc_id_str,
-        )?;
-
-        return Ok(());
-    }
-
-    // Non-pack modes
-    if !pack {
-        let mut explicit_files: Vec<PathBuf> = Vec::new();
-        for entry in &files {
-            if entry.is_dir() {
-                collect_files_recursive(entry, &mut explicit_files, None)?;
-            } else if entry.is_file() {
-                explicit_files.push(entry.clone());
-            } else {
-                return Err(format!("input path not found: {}", entry.display()).into());
-            }
-        }
-        if explicit_files.is_empty() {
-            return Err("no input files provided".into());
-        }
-
-        if explicit_files.len() == 1 {
-            let input_file = &explicit_files[0];
-            let mut f = File::open(input_file)?;
-            let mut bytes = Vec::new();
-            f.read_to_end(&mut bytes)?;
-            let ext = input_file
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
-            let dlc_id = DlcId::from(dlc_id_str.clone());
-            let encrypt_key = derive_encrypt_key(signed_license.as_deref())?;
-            let (container, _nonce) = pack_encrypted_asset(
-                &bytes,
-                &dlc_id,
-                if ext.is_empty() { None } else { Some(ext) },
-                None,
-                &encrypt_key,
-            )?;
-
-            handle_license_output(
-                signed_license.as_deref(),
-                pubkey.as_deref(),
-                &product,
-                &dlc_id_str,
-            )?;
-
-            if list {
-                let enc = parse_encrypted(&container)?;
-                println!("dlc_id: {}", enc.dlc_id);
-                println!("original_extension: {}", enc.original_extension);
-                println!("ciphertext_len: {}", enc.ciphertext.len());
-                println!("nonce: {}", hex::encode(enc.nonce));
-            }
-            let out_path = out.unwrap_or_else(|| {
-                let mut p = input_file.clone();
-                p.set_extension("dlc");
-                p
-            });
-            std::fs::write(&out_path, &container)?;
-            println!("created encrypted asset: {}", out_path.display());
-            return Ok(());
-        }
-
-        let out_dir = out.unwrap_or_else(|| PathBuf::from("generated"));
-        if out_dir.exists() && !out_dir.is_dir() {
-            return Err("output path must be a directory when packing multiple files".into());
-        }
-        std::fs::create_dir_all(&out_dir)?;
-        let dlc_id = DlcId::from(dlc_id_str.clone());
-        let encrypt_key = derive_encrypt_key(signed_license.as_deref())?;
-        for file in &explicit_files {
-            let mut f = File::open(file)?;
-            let mut bytes = Vec::new();
-            f.read_to_end(&mut bytes)?;
-            let mut rel = file
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("file")
-                .to_string();
-            if files.len() == 1 && files[0].is_dir() && file.starts_with(&files[0]) {
-                rel = file
-                    .strip_prefix(&files[0])
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string();
-            }
-            let ext = file.extension().and_then(|s| s.to_str()).unwrap_or("");
-            let (container, _nonce) = pack_encrypted_asset(
-                &bytes,
-                &dlc_id,
-                if ext.is_empty() { None } else { Some(ext) },
-                None,
-                &encrypt_key,
-            )?;
-            let mut out_path = out_dir.join(rel);
-            out_path.set_extension("dlc");
-            if let Some(parent) = out_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&out_path, &container)?;
-            println!("created encrypted asset: {}", out_path.display());
-        }
-
-        handle_license_output(
-            signed_license.as_deref(),
-            pubkey.as_deref(),
-            &product,
-            &dlc_id_str,
-        )?;
-        return Ok(());
-    }
-
-    Ok(())
+        Ok(())
 }
 
 #[tokio::main]
@@ -836,7 +605,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Pack {
             dlc_id: dlc_id_str,
-            pack,
             files,
             list,
             out,
@@ -848,7 +616,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pack_command(
                 &mut app,
                 dlc_id_str,
-                pack,
                 files,
                 list,
                 out,
@@ -865,7 +632,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut files = Vec::new();
                 collect_files_recursive(&dlc, &mut files, None)?;
                 if files.is_empty() {
-                    return Err("no files found in directory".into());
+                    return Err("no .dlcpack files found in directory".into());
                 }
                 for file in &files {
                     let ext = file.extension().and_then(|s| s.to_str()).unwrap_or("");
@@ -887,55 +654,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 hex::encode(enc.nonce)
                             );
                         }
-                    } else if ext.eq_ignore_ascii_case("dlc") {
-                        let bytes = std::fs::read(file)?;
-                        let enc = parse_encrypted(&bytes)?;
-                        println!(
-                            "{} -> dlc: dlc_id={} ext={} ciphertext_len={} nonce={}",
-                            file.display(),
-                            enc.dlc_id,
-                            enc.original_extension,
-                            enc.ciphertext.len(),
-                            hex::encode(enc.nonce)
-                        );
                     }
                 }
                 return Ok(());
             }
 
             // single-file mode
-            let ext = dlc.extension().and_then(|s| s.to_str()).unwrap_or("");
             let bytes = std::fs::read(&dlc)?;
-            if ext.eq_ignore_ascii_case("dlcpack")
-                || (bytes.len() >= 4 && bytes.starts_with(DLC_PACK_MAGIC))
-            {
-                let (_prod, did, _v, ents) = parse_encrypted_pack(&bytes)?;
-                println!("dlcpack: {} entries: {}", did, ents.len());
-                for (p, enc) in ents.iter() {
-                    println!(
-                        " - {} (ext={}) ciphertext_len={} nonce={} type={}",
-                        p,
-                        enc.original_extension,
-                        enc.ciphertext.len(),
-                        hex::encode(enc.nonce),
-                        enc.type_path.clone().unwrap_or("None".to_string())
-                    );
-                }
-                return Ok(());
+            let (_prod, did, _v, ents) = parse_encrypted_pack(&bytes)?;
+            println!("dlcpack: {} entries: {}", did, ents.len());
+            for (p, enc) in ents.iter() {
+                println!(
+                    " - {} (ext={}) ciphertext_len={} nonce={} type={}",
+                    p,
+                    enc.original_extension,
+                    enc.ciphertext.len(),
+                    hex::encode(enc.nonce),
+                    enc.type_path.clone().unwrap_or("None".to_string())
+                );
             }
-
-            if ext.eq_ignore_ascii_case("dlc")
-                || (bytes.len() >= 4 && bytes.starts_with(DLC_ASSET_MAGIC))
-            {
-                let enc = parse_encrypted(&bytes)?;
-                println!("dlc_id: {}", enc.dlc_id);
-                println!("original_extension: {}", enc.original_extension);
-                println!("ciphertext_len: {}", enc.ciphertext.len());
-                println!("nonce: {}", hex::encode(enc.nonce));
-                return Ok(());
-            }
-
-            return Err("not a .dlc or .dlcpack container".into());
+            return Ok(());
         }
 
         Commands::Validate {
@@ -947,29 +685,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // read container bytes
             let bytes = std::fs::read(&dlc)?;
 
-            // determine dlc id and (for v3 .dlcpack) the embedded product from the container
-            let (embedded_product, dlc_id) =
-                if bytes.len() >= 4 && bytes.starts_with(DLC_PACK_MAGIC) {
-                    let (prod, did, _v, _ents) = parse_encrypted_pack(&bytes)?;
-                    (Some(prod.to_string()), did)
-                } else {
-                    let enc = parse_encrypted(&bytes)?;
-                    (None, enc.dlc_id)
-                };
+            // Parse the .dlcpack and get the embedded product and first dlc_id
+            let (prod, dlc_id, _v, _ents) = parse_encrypted_pack(&bytes)?;
+            let embedded_product = Some(prod.to_string());
 
             // resolve pubkey and signed license with fallback to embedded product
             let (supplied_pubkey, supplied_license) = resolve_validate_keys(pubkey, signed_license, product, embedded_product);
 
-            // For v3 dlcpack, verify the embedded signature if pubkey is available
-            if bytes.len() >= 4 && bytes.starts_with(DLC_PACK_MAGIC) {
-                if let Some(pk) = supplied_pubkey.as_deref() {
-                    match bevy_dlc::verify_pack_signature(&bytes, pk) {
-                        Ok(true) => println!("Pack signature verification: SUCCESS"),
-                        Ok(false) => {
-                            println!("Pack signature verification: FAILED (invalid signature)")
-                        }
-                        Err(e) => println!("Pack signature verification: ERROR ({})", e),
+            // Verify the embedded signature if pubkey is available
+            if let Some(pk) = supplied_pubkey.as_deref() {
+                match bevy_dlc::verify_pack_signature(&bytes, pk) {
+                    Ok(true) => println!("Pack signature verification: SUCCESS"),
+                    Ok(false) => {
+                        println!("Pack signature verification: FAILED (invalid signature)")
                     }
+                    Err(e) => println!("Pack signature verification: ERROR ({})", e),
                 }
             }
 
@@ -992,7 +722,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 // try to extract embedded encrypt key from the token payload
-                // (we've already verified the signature above so it's safe to trust)
                 let parts: Vec<&str> = supplied_license.split('.').collect();
                 if parts.len() != 2 {
                     return Err("malformed signed-license token".into());
@@ -1007,46 +736,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return Err("embedded encrypt key has invalid length".into());
                     }
 
-                    // attempt to decrypt container directly using the embedded symmetric key
-                    match std::path::Path::new(&dlc)
-                        .extension()
-                        .and_then(|s| s.to_str())
-                    {
-                        Some(ext) if ext.eq_ignore_ascii_case("dlc") => {
-                            let enc = parse_encrypted(&bytes)?;
-                            match decrypt_with_key_local(&key_bytes, &enc.ciphertext, &enc.nonce) {
-                                Ok(_) => println!("Decryption test: SUCCESS!"),
-                                Err(e) => println!("Decryption test: FAILURE - {}", e),
-                            }
-                        }
-                        _ => {
-                            // dlcpack: try parse_encrypted_pack then decrypt archive or entry(s)
-                            let (_prod, _did, _v, entries) = parse_encrypted_pack(&bytes)?;
-                            if entries.is_empty() {
-                                println!("container has no entries");
-                            } else {
-                                // version >=2 will use shared archive ciphertext; attempt to decrypt archive
-                                let archive_nonce = entries[0].1.nonce;
-                                let archive_ciphertext = &entries[0].1.ciphertext;
-                                match decrypt_with_key_local(
-                                    &key_bytes,
-                                    archive_ciphertext,
-                                    &archive_nonce,
-                                ) {
-                                    Ok(plain) => {
-                                        // verify gzip/tar is readable
-                                        let dec = flate2::read::GzDecoder::new(
-                                            std::io::Cursor::new(plain),
-                                        );
-                                        let mut ar = tar::Archive::new(dec);
-                                        match ar.entries() {
-                                            Ok(_) => println!("Decryption test: SUCCESS!"),
-                                            Err(e) => println!("Decryption test: FAILURE - {}", e),
-                                        }
-                                    }
+                    // attempt to decrypt .dlcpack archive
+                    let (_prod, _did, _v, entries) = parse_encrypted_pack(&bytes)?;
+                    if entries.is_empty() {
+                        println!("container has no entries");
+                    } else {
+                       let archive_nonce = entries[0].1.nonce;
+                        let archive_ciphertext = &entries[0].1.ciphertext;
+                        match decrypt_with_key_local(
+                            &key_bytes,
+                            archive_ciphertext,
+                            &archive_nonce,
+                        ) {
+                            Ok(plain) => {
+                                let dec = flate2::read::GzDecoder::new(
+                                    std::io::Cursor::new(plain),
+                                );
+                                let mut ar = tar::Archive::new(dec);
+                                match ar.entries() {
+                                    Ok(_) => println!("Decryption test: SUCCESS!"),
                                     Err(e) => println!("Decryption test: FAILURE - {}", e),
                                 }
                             }
+                            Err(e) => println!("Decryption test: FAILURE - {}", e),
                         }
                     }
                 } else {
@@ -1055,7 +767,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             } else {
-                // no pubkey supplied — attempt to decode the payload and extract encrypt key without verifying signature
+                // no pubkey supplied
                 println!(
                     "No pubkey supplied; will attempt to extract encrypt key from token payload without verifying signature (not secure)"
                 );
@@ -1071,49 +783,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return Err("embedded encrypt key has invalid length".into());
                     }
 
-                    // test decrypt locally using the helper in this binary
-                    match std::path::Path::new(&dlc)
-                        .extension()
-                        .and_then(|s| s.to_str())
-                    {
-                        Some(ext) if ext.eq_ignore_ascii_case("dlc") => {
-                            let enc = parse_encrypted(&bytes)?;
-                            match decrypt_with_key_local(&key_bytes, &enc.ciphertext, &enc.nonce) {
-                                Ok(_) => println!(
-                                    "SUCCESS: .dlc decrypts with embedded encrypt key (signature NOT verified)"
-                                ),
-                                Err(e) => println!("DECRYPT FAILURE: {}", e),
-                            }
-                        }
-                        _ => {
-                            let (_prod, _did, _v, entries) = parse_encrypted_pack(&bytes)?;
-                            if entries.is_empty() {
-                                println!("container has no entries");
-                            } else {
-                                let archive_nonce = entries[0].1.nonce;
-                                let archive_ciphertext = &entries[0].1.ciphertext;
-                                match decrypt_with_key_local(
-                                    &key_bytes,
-                                    archive_ciphertext,
-                                    &archive_nonce,
-                                ) {
-                                    Ok(plain) => {
-                                        let dec = flate2::read::GzDecoder::new(
-                                            std::io::Cursor::new(plain),
-                                        );
-                                        let mut ar = tar::Archive::new(dec);
-                                        match ar.entries() {
-                                            Ok(_) => println!(
-                                                "SUCCESS: .dlcpack archive decrypts with embedded encrypt key (signature NOT verified)"
-                                            ),
-                                            Err(e) => {
-                                                println!("DECRYPT FAILURE (archive extract): {}", e)
-                                            }
-                                        }
+                    // test decrypt .dlcpack archive
+                    let (_prod, _did, _v, entries) = parse_encrypted_pack(&bytes)?;
+                    if entries.is_empty() {
+                        println!("container has no entries");
+                    } else {
+                        let archive_nonce = entries[0].1.nonce;
+                        let archive_ciphertext = &entries[0].1.ciphertext;
+                        match decrypt_with_key_local(
+                            &key_bytes,
+                            archive_ciphertext,
+                            &archive_nonce,
+                        ) {
+                            Ok(plain) => {
+                                let dec = flate2::read::GzDecoder::new(
+                                    std::io::Cursor::new(plain),
+                                );
+                                let mut ar = tar::Archive::new(dec);
+                                match ar.entries() {
+                                    Ok(_) => println!(
+                                        "SUCCESS: .dlcpack archive decrypts with embedded encrypt key (signature NOT verified)"
+                                    ),
+                                    Err(e) => {
+                                        println!("DECRYPT FAILURE (archive extract): {}", e)
                                     }
-                                    Err(e) => println!("DECRYPT FAILURE: {}", e),
                                 }
                             }
+                            Err(e) => println!("DECRYPT FAILURE: {}", e),
                         }
                     }
                 } else {
@@ -1186,54 +882,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pubkey_path.display()
             );
             return Ok(());
-        }
-
-        Commands::Unpack {
-            dlc,
-            list,
-            out,
-            encrypt_key,
-        } => {
-            // single-file mode (existing behavior)
-            let bytes = std::fs::read(&dlc)?;
-            let enc = parse_encrypted(&bytes)?;
-
-            if list {
-                println!("dlc_id: {}", enc.dlc_id);
-                println!("original_extension: {}", enc.original_extension);
-                println!("ciphertext_len: {}", enc.ciphertext.len());
-                println!("nonce: {}", hex::encode(enc.nonce));
-                return Ok(());
-            }
-
-            // obtain the symmetric key from the provided --encrypt-key
-            let sym_key_vec = match encrypt_key.as_deref() {
-                Some(s) => {
-                    let bytes = read_pubkey_bytes(s)?;
-                    if bytes.len() != 32 {
-                        return Err("encrypt key must be 32 bytes".into());
-                    }
-                    bytes
-                }
-                None => return Err("missing --encrypt-key".into()),
-            };
-
-            let plaintext = decrypt_with_key_local(&sym_key_vec, &enc.ciphertext, &enc.nonce)?;
-
-            let out_path = match out {
-                Some(p) => p,
-                None => {
-                    let stem = dlc
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("decrypted");
-                    let ext = enc.original_extension;
-                    let filename = format!("{}.{}", stem, ext);
-                    dlc.with_file_name(filename)
-                }
-            };
-            std::fs::write(&out_path, &plaintext)?;
-            println!("created decrypted asset to {}", out_path.display());
         }
     }
 
