@@ -30,18 +30,20 @@ fn main() -> AppExit {
         .add_systems(
             Update,
             show_dlc_content.run_if(is_dlc_loaded("expansionA").and(run_once)),
+            // I remember when they used to call "dlc" expansions... those were the days.
         )
         .run()
 }
 
+// A simple component to hold the loaded DLC pack handle so it isn't dropped by bevy.
 #[allow(unused)]
 #[derive(Component)]
-struct LoadedPack(Handle<DlcPack>);
+struct DlcPacks(Vec<Handle<DlcPack>>);
 
 fn startup(asset_server: Res<AssetServer>, mut commands: Commands, dlc_mgr: Res<DlcManager>) {
     let handle = asset_server.load::<DlcPack>("expansionA.dlcpack");
 
-    commands.spawn((Camera2d, LoadedPack(handle)));
+    commands.spawn((Camera2d, DlcPacks(vec![handle])));
 }
 
 fn show_dlc_content(
