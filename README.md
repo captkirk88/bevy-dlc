@@ -42,7 +42,7 @@ Then `bevy-dlc --help` for available commands.
 
 ## Quick Start
 
-### Generate a license and pack DLC content
+### Generate a license
 
 ```bash
 bevy-dlc generate -o keys/ my-game expansion_1
@@ -88,7 +88,7 @@ fn main() {
             dlc_key,
             license,
         ))
-        .register_dlc_type::<Image>()  // if your pack has custom types
+        .register_dlc_type::<MyCustomType>()  // if your pack has custom types
         .run();
 }
 ```
