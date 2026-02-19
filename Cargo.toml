@@ -10,6 +10,7 @@ repository = "https://github.com/captkirk88/bevy-dlc"
 categories = ["game-development"]
 keywords = ["bevy", "dlc"]
 exclude = ["tests/*","examples/*", "benches/*", "assets/*"]
+rust-version = "1.93"
 
 [features]
 default = []
