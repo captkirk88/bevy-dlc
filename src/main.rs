@@ -384,6 +384,464 @@ fn decrypt_with_key_local(
     Ok(pt)
 }
 
+async fn pack_command(
+    app: &mut App,
+    dlc_id_str: String,
+    pack: bool,
+    files: Vec<PathBuf>,
+    list: bool,
+    out: Option<PathBuf>,
+    product: String,
+    types: Option<Vec<String>>,
+    pubkey: Option<String>,
+    signed_license: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // extracted from main::Commands::Pack
+    // prefer product-named helper files when present
+    let default_pubkey_file = format!("{}.pubkey", product);
+    let default_slicense_file = format!("{}.slicense", product);
+    let pubkey = pubkey.or_else(|| {
+        if std::path::Path::new(&default_pubkey_file).exists() {
+            std::fs::read_to_string(&default_pubkey_file)
+                .ok()
+                .map(|s| s.trim().to_string())
+        } else {
+            None
+        }
+    });
+    let signed_license = signed_license.or_else(|| {
+        if std::path::Path::new(&default_slicense_file).exists() {
+            std::fs::read_to_string(&default_slicense_file)
+                .ok()
+                .map(|s| s.trim().to_string())
+        } else {
+            None
+        }
+    });
+
+    // `.dlcpack` mode
+    if pack {
+        let mut selected_files: Vec<PathBuf> = Vec::new();
+        for entry in &files {
+            if FORBIDDEN_EXTENSIONS.iter().any(|ext| {
+                entry
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.eq_ignore_ascii_case(ext))
+                    .unwrap_or(false)
+            }) {
+                return Err(format!(
+                    "input contains forbidden file extension ({}): {}",
+                    FORBIDDEN_EXTENSIONS.join(", "),
+                    entry.display()
+                )
+                .into());
+            }
+            if entry.is_dir() {
+                collect_files_recursive(entry, &mut selected_files, None)?;
+            } else if entry.is_file() {
+                selected_files.push(entry.clone());
+            } else {
+                return Err(format!("input path not found: {}", entry.display()).into());
+            }
+        }
+
+        if selected_files.is_empty() {
+            return Err("no files selected for dlcpack".into());
+        }
+
+        let type_overrides = types
+            .as_ref()
+            .map(|t| parse_type_overrides(t))
+            .unwrap_or_default();
+        let type_path_map =
+            resolve_type_paths_from_bevy(app, &selected_files, &type_overrides).await?;
+
+        let mut items: Vec<(String, Option<String>, Option<String>, Vec<u8>)> = Vec::new();
+        for file in &selected_files {
+            let mut f = File::open(file)?;
+            let mut bytes = Vec::new();
+            f.read_to_end(&mut bytes)?;
+
+            if bytes.len() >= 4
+                && (&bytes[0..4] == DLC_ASSET_MAGIC || &bytes[0..4] == DLC_PACK_MAGIC)
+            {
+                return Err(format!(
+                    "refusing to pack '{}' — input appears to be an existing container (BDLC/BDLP)",
+                    file.display()
+                )
+                .into());
+            }
+
+            let mut rel = file
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("file")
+                .to_string();
+            for base in &files {
+                if base.is_dir() && file.starts_with(base) {
+                    rel = file
+                        .strip_prefix(base)
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string();
+                    break;
+                }
+            }
+            let ext = file
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string());
+            let type_path = type_path_map.get(file).cloned();
+            items.push((rel, ext, type_path, bytes));
+        }
+
+        let dlc_id = DlcId::from(dlc_id_str.clone());
+        let dlc_key = DlcKey::generate_random();
+        let encrypt_key = if let Some(lic_str) = signed_license.as_deref() {
+            if let Some(key_bytes) = bevy_dlc::extract_encrypt_key_from_license(
+                &bevy_dlc::SignedLicense::from(lic_str.to_string()),
+            ) {
+                if key_bytes.len() != 32 {
+                    return Err("embedded encrypt key has invalid length".into());
+                }
+                EncryptionKey::from(key_bytes)
+            } else {
+                EncryptionKey::from_random(32)
+            }
+        } else {
+            EncryptionKey::from_random(32)
+        };
+
+        let container = pack_encrypted_pack(
+            &dlc_id,
+            &items,
+            &Product::from(product.clone()),
+            &dlc_key,
+            &encrypt_key,
+        )?;
+
+        if let Some(sup_license) = signed_license.as_deref() {
+            if let Some(pubkey_str) = pubkey.as_deref() {
+                let verifier = DlcKey::public(pubkey_str)
+                    .map_err(|e| format!("invalid provided pubkey: {:?}", e))?;
+                let verified = verifier
+                    .verify_signed_license(&SignedLicense::from(sup_license.to_string()))
+                    .map_err(|e| format!("supplied signed-license verification failed: {:?}", e))?;
+                if verified.product != product {
+                    return Err("supplied signed-license product does not match --product".into());
+                }
+                if !verified.dlcs.iter().any(|d| d == &dlc_id_str) {
+                    return Err(
+                        "supplied signed-license does not include the requested DLC id".into(),
+                    );
+                }
+                println!("SIGNED LICENSE:\n{}", sup_license);
+                println!("PUB KEY: {}", pubkey_str);
+            } else {
+                eprintln!("warning: supplied signed-license not verified (no --pubkey supplied)");
+                println!("SIGNED LICENSE:\n{}", sup_license);
+            }
+        } else {
+            let dlc_key = DlcKey::generate_random();
+            let signedlicense =
+                dlc_key.create_signed_license(&[dlc_id], Product::from(product.clone()))?;
+            signedlicense.with_secret(|s| print_signed_license_and_pubkey(s.as_str(), &dlc_key));
+        }
+
+        if list {
+            let (_prod, did, _v, ents) = parse_encrypted_pack(&container)?;
+            println!("dlc_id: {} entries: {}", did, ents.len());
+            for (p, enc) in ents.iter() {
+                println!(
+                    " - {} (ext={}) ciphertext_len={} nonce={}",
+                    p,
+                    enc.original_extension,
+                    enc.ciphertext.len(),
+                    hex::encode(enc.nonce)
+                );
+            }
+        }
+
+        let out_path = out.unwrap_or_else(|| PathBuf::from(format!("{}.dlcpack", dlc_id_str)));
+        std::fs::write(&out_path, &container)?;
+        println!("created dlcpack: {}", out_path.display());
+        return Ok(());
+    }
+
+    // directory mode
+    if !pack && files.len() == 1 && files[0].is_dir() {
+        let mut input_files = Vec::new();
+        collect_files_recursive(&files[0], &mut input_files, None)?;
+        if input_files.is_empty() {
+            return Err("no files found in input directory".into());
+        }
+
+        let out_dir = out.unwrap_or_else(|| PathBuf::from("generated"));
+        if out_dir.exists() && !out_dir.is_dir() {
+            return Err("output path must be a directory when packing a directory".into());
+        }
+        std::fs::create_dir_all(&out_dir)?;
+
+        let dlc_id = DlcId::from(dlc_id_str.clone());
+        let encrypt_key = if let Some(lic_str) = signed_license.as_deref() {
+            if let Some(key_bytes) = bevy_dlc::extract_encrypt_key_from_license(
+                &bevy_dlc::SignedLicense::from(lic_str.to_string()),
+            ) {
+                if key_bytes.len() != 32 {
+                    return Err("embedded encrypt key has invalid length".into());
+                }
+                EncryptionKey::from(key_bytes)
+            } else {
+                EncryptionKey::from_random(32)
+            }
+        } else {
+            EncryptionKey::from_random(32)
+        };
+
+        for file in &input_files {
+            let mut f = File::open(file)?;
+            let mut bytes = Vec::new();
+            f.read_to_end(&mut bytes)?;
+            let rel = file.strip_prefix(&files[0]).unwrap();
+            let ext = file.extension().and_then(|s| s.to_str()).unwrap_or("");
+            let (container, _nonce) = pack_encrypted_asset(
+                &bytes,
+                &dlc_id,
+                if ext.is_empty() { None } else { Some(ext) },
+                None,
+                &encrypt_key,
+            )?;
+            let mut out_path = out_dir.join(rel);
+            out_path.set_extension("dlc");
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&out_path, &container)?;
+            println!("created encrypted asset: {}", out_path.display());
+        }
+
+        if let Some(sup_license) = signed_license.as_deref() {
+            if let Some(pubkey_str) = pubkey.as_deref() {
+                let verifier = DlcKey::public(pubkey_str)
+                    .map_err(|e| format!("invalid provided pubkey: {:?}", e))?;
+                let verified = verifier
+                    .verify_signed_license(&SignedLicense::from(sup_license.to_string()))
+                    .map_err(|e| format!("supplied signed-license verification failed: {:?}", e))?;
+                if verified.product != product {
+                    return Err("supplied signed-license product does not match --product".into());
+                }
+                if !verified.dlcs.iter().any(|d| d == &dlc_id_str) {
+                    return Err(
+                        "supplied signed-license does not include the requested DLC id".into(),
+                    );
+                }
+                println!("SIGNED LICENSE:\n{}", sup_license);
+                println!("PUB KEY: {}", pubkey_str);
+            } else {
+                eprintln!("warning: supplied signed-license not verified (no --pubkey supplied)");
+                println!("SIGNED LICENSE:\n{}", sup_license);
+            }
+        } else {
+            let dlc_key = DlcKey::generate_random();
+            let signedlicense = dlc_key.create_signed_license(
+                &[DlcId::from(dlc_id_str.clone())],
+                Product::from(product.clone()),
+            )?;
+            println!(
+                "created {} encrypted assets to {}",
+                input_files.len(),
+                out_dir.display()
+            );
+            signedlicense.with_secret(|s| print_signed_license_and_pubkey(s.as_str(), &dlc_key));
+        }
+
+        return Ok(());
+    }
+
+    // Non-pack modes
+    if !pack {
+        let mut explicit_files: Vec<PathBuf> = Vec::new();
+        for entry in &files {
+            if entry.is_dir() {
+                collect_files_recursive(entry, &mut explicit_files, None)?;
+            } else if entry.is_file() {
+                explicit_files.push(entry.clone());
+            } else {
+                return Err(format!("input path not found: {}", entry.display()).into());
+            }
+        }
+        if explicit_files.is_empty() {
+            return Err("no input files provided".into());
+        }
+
+        if explicit_files.len() == 1 {
+            let input_file = &explicit_files[0];
+            let mut f = File::open(input_file)?;
+            let mut bytes = Vec::new();
+            f.read_to_end(&mut bytes)?;
+            let ext = input_file
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            let dlc_id = DlcId::from(dlc_id_str.clone());
+            let encrypt_key = if let Some(lic_str) = signed_license.as_deref() {
+                if let Some(key_bytes) = bevy_dlc::extract_encrypt_key_from_license(
+                    &bevy_dlc::SignedLicense::from(lic_str.to_string()),
+                ) {
+                    if key_bytes.len() != 32 {
+                        return Err("embedded encrypt key has invalid length".into());
+                    }
+                    EncryptionKey::from(key_bytes)
+                } else {
+                    EncryptionKey::from_random(32)
+                }
+            } else {
+                EncryptionKey::from_random(32)
+            };
+            let (container, _nonce) = pack_encrypted_asset(
+                &bytes,
+                &dlc_id,
+                if ext.is_empty() { None } else { Some(ext) },
+                None,
+                &encrypt_key,
+            )?;
+            if let Some(sup_license) = signed_license.as_deref() {
+                if let Some(pubkey_str) = pubkey.as_deref() {
+                    let verifier = DlcKey::public(pubkey_str)
+                        .map_err(|e| format!("invalid provided pubkey: {:?}", e))?;
+                    let verified = verifier
+                        .verify_signed_license(&SignedLicense::from(sup_license.to_string()))
+                        .map_err(|e| {
+                            format!("supplied signed-license verification failed: {:?}", e)
+                        })?;
+                    if verified.product != product {
+                        return Err(
+                            "supplied signed-license product does not match --product".into()
+                        );
+                    }
+                    if !verified.dlcs.iter().any(|d| d == &dlc_id_str) {
+                        return Err(
+                            "supplied signed-license does not include the requested DLC id".into(),
+                        );
+                    }
+                    println!("SIGNED LICENSE:\n{}", sup_license);
+                    println!("PUB KEY: {}", pubkey_str);
+                } else {
+                    eprintln!(
+                        "warning: supplied signed-license not verified (no --pubkey supplied)"
+                    );
+                    println!("SIGNED LICENSE:\n{}", sup_license);
+                }
+            } else {
+                let dlc_key = DlcKey::generate_random();
+                let signedlicense = dlc_key
+                    .create_signed_license(&[dlc_id.clone()], Product::from(product.clone()))?;
+                signedlicense
+                    .with_secret(|s| print_signed_license_and_pubkey(s.as_str(), &dlc_key));
+            }
+            if list {
+                let enc = parse_encrypted(&container)?;
+                println!("dlc_id: {}", enc.dlc_id);
+                println!("original_extension: {}", enc.original_extension);
+                println!("ciphertext_len: {}", enc.ciphertext.len());
+                println!("nonce: {}", hex::encode(enc.nonce));
+            }
+            let out_path = out.unwrap_or_else(|| {
+                let mut p = input_file.clone();
+                p.set_extension("dlc");
+                p
+            });
+            std::fs::write(&out_path, &container)?;
+            println!("created encrypted asset: {}", out_path.display());
+            return Ok(());
+        }
+
+        let out_dir = out.unwrap_or_else(|| PathBuf::from("generated"));
+        if out_dir.exists() && !out_dir.is_dir() {
+            return Err("output path must be a directory when packing multiple files".into());
+        }
+        std::fs::create_dir_all(&out_dir)?;
+        let dlc_id = DlcId::from(dlc_id_str.clone());
+        let encrypt_key = if let Some(lic_str) = signed_license.as_deref() {
+            if let Some(key_bytes) = bevy_dlc::extract_encrypt_key_from_license(
+                &bevy_dlc::SignedLicense::from(lic_str.to_string()),
+            ) {
+                if key_bytes.len() != 32 {
+                    return Err("embedded encrypt key has invalid length".into());
+                }
+                EncryptionKey::from(key_bytes)
+            } else {
+                EncryptionKey::from_random(32)
+            }
+        } else {
+            EncryptionKey::from_random(32)
+        };
+        for file in &explicit_files {
+            let mut f = File::open(file)?;
+            let mut bytes = Vec::new();
+            f.read_to_end(&mut bytes)?;
+            let mut rel = file
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("file")
+                .to_string();
+            if files.len() == 1 && files[0].is_dir() && file.starts_with(&files[0]) {
+                rel = file
+                    .strip_prefix(&files[0])
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string();
+            }
+            let ext = file.extension().and_then(|s| s.to_str()).unwrap_or("");
+            let (container, _nonce) = pack_encrypted_asset(
+                &bytes,
+                &dlc_id,
+                if ext.is_empty() { None } else { Some(ext) },
+                None,
+                &encrypt_key,
+            )?;
+            let mut out_path = out_dir.join(rel);
+            out_path.set_extension("dlc");
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&out_path, &container)?;
+            println!("created encrypted asset: {}", out_path.display());
+        }
+        if let Some(sup_license) = signed_license.as_deref() {
+            if let Some(pubkey_str) = pubkey.as_deref() {
+                let verifier = DlcKey::public(pubkey_str)
+                    .map_err(|e| format!("invalid provided pubkey: {:?}", e))?;
+                let verified = verifier
+                    .verify_signed_license(&SignedLicense::from(sup_license.to_string()))
+                    .map_err(|e| format!("supplied signed-license verification failed: {:?}", e))?;
+                if verified.product != product {
+                    return Err("supplied signed-license product does not match --product".into());
+                }
+                if !verified.dlcs.iter().any(|d| d == &dlc_id_str) {
+                    return Err(
+                        "supplied signed-license does not include the requested DLC id".into(),
+                    );
+                }
+                println!("SIGNED LICENSE:\n{}", sup_license);
+                println!("PUB KEY: {}", pubkey_str);
+            } else {
+                eprintln!("warning: supplied signed-license not verified (no --pubkey supplied)");
+                println!("SIGNED LICENSE:\n{}", sup_license);
+            }
+        } else {
+            let dlc_key = DlcKey::generate_random();
+            let signedlicense =
+                dlc_key.create_signed_license(&[dlc_id.clone()], Product::from(product.clone()))?;
+            signedlicense.with_secret(|s| print_signed_license_and_pubkey(s.as_str(), &dlc_key));
+        }
+        return Ok(());
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create headless Bevy app to set up asset loaders
@@ -419,547 +877,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pubkey,
             signed_license,
         } => {
-            // If product-named helper files exist, prefer them unless the
-            // explicit CLI args `--pubkey` / `--signed-license` were supplied.
-            let default_pubkey_file = format!("{}.pubkey", product);
-            let default_slicense_file = format!("{}.slicense", product);
-            let pubkey = pubkey.or_else(|| {
-                if std::path::Path::new(&default_pubkey_file).exists() {
-                    std::fs::read_to_string(&default_pubkey_file)
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                } else {
-                    None
-                }
-            });
-            let signed_license = signed_license.or_else(|| {
-                if std::path::Path::new(&default_slicense_file).exists() {
-                    std::fs::read_to_string(&default_slicense_file)
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                } else {
-                    None
-                }
-            });
-
-            // `.dlcpack` mode: bundle multiple files into one container when
-            // `--pack` is specified (accepts a directory or an explicit list
-            // of files supplied with `--files`).
-            if pack {
-                let mut selected_files: Vec<PathBuf> = Vec::new();
-
-                for entry in &files {
-                    if FORBIDDEN_EXTENSIONS.iter().any(|ext| {
-                        entry
-                            .extension()
-                            .and_then(|s| s.to_str())
-                            .map(|s| s.eq_ignore_ascii_case(ext))
-                            .unwrap_or(false)
-                    }) {
-                        return Err(format!(
-                            "input contains forbidden file extension ({}): {}",
-                            FORBIDDEN_EXTENSIONS.join(", "),
-                            entry.display()
-                        )
-                        .into());
-                    }
-                    if entry.is_dir() {
-                        collect_files_recursive(entry, &mut selected_files, None)?;
-                    } else if entry.is_file() {
-                        selected_files.push(entry.clone());
-                    } else {
-                        return Err(format!("input path not found: {}", entry.display()).into());
-                    }
-                }
-
-                if selected_files.is_empty() {
-                    return Err("no files selected for dlcpack".into());
-                }
-
-                // Parse manual type overrides
-                let type_overrides = types
-                    .as_ref()
-                    .map(|t| parse_type_overrides(t))
-                    .unwrap_or_default();
-
-                // Resolve type paths using Bevy's AssetServer (STRICT: fail if AssetServer
-                // cannot provide a loader for an extension).
-                let type_path_map =
-                    resolve_type_paths_from_bevy(&mut app, &selected_files, &type_overrides)
-                        .await?;
-
-                // build the in-memory items (relative path, ext, type_path, bytes)
-                let mut items: Vec<(String, Option<String>, Option<String>, Vec<u8>)> = Vec::new();
-                for file in &selected_files {
-                    let mut f = File::open(file)?;
-                    let mut bytes = Vec::new();
-                    f.read_to_end(&mut bytes)?;
-
-                    // refuse inputs that already look like a BDLC/BDLP container
-                    if bytes.len() >= 4
-                        && (&bytes[0..4] == DLC_ASSET_MAGIC || &bytes[0..4] == DLC_PACK_MAGIC)
-                    {
-                        return Err(format!(
-                            "refusing to pack '{}' — input appears to be an existing container (BDLC/BDLP)",
-                            file.display()
-                        )
-                        .into());
-                    }
-
-                    // compute relative path: prefer directory-relative when possible
-                    let mut rel = file
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("file")
-                        .to_string();
-                    for base in &files {
-                        if base.is_dir() && file.starts_with(base) {
-                            rel = file
-                                .strip_prefix(base)
-                                .unwrap()
-                                .to_string_lossy()
-                                .to_string();
-                            break;
-                        }
-                    }
-                    let ext = file
-                        .extension()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.to_string());
-                    let type_path = type_path_map.get(file).cloned();
-                    items.push((rel, ext, type_path, bytes));
-                }
-
-                let dlc_id = DlcId::from(dlc_id_str.clone());
-                // For Approach A: DLC packs are self-signed with the product key.
-                // Generate or use a provided key. If a signed-license contains an encrypt_key, we extract it.
-
-                let dlc_key = if let Some(_) = signed_license.as_deref() {
-                    if let Some(_) = pubkey.as_deref() {
-                        // If both license and pubkey provided, verify (but we still need privkey to sign)
-                        // For now, generate a new one - in practice, the platform would provide the private key
-                        DlcKey::generate_random()
-                    } else {
-                        // generate new key for signing
-                        DlcKey::generate_random()
-                    }
-                } else {
-                    DlcKey::generate_random()
-                };
-
-                let encrypt_key = if let Some(lic_str) = signed_license.as_deref() {
-                    if let Some(key_bytes) = bevy_dlc::extract_encrypt_key_from_license(
-                        &bevy_dlc::SignedLicense::from(lic_str.to_string()),
-                    ) {
-                        if key_bytes.len() != 32 {
-                            return Err("embedded encrypt key has invalid length".into());
-                        }
-                        EncryptionKey::from(key_bytes)
-                    } else {
-                        EncryptionKey::from_random(32)
-                    }
-                } else {
-                    EncryptionKey::from_random(32)
-                };
-
-                let container = pack_encrypted_pack(
-                    &dlc_id,
-                    &items,
-                    &Product::from(product.clone()),
-                    &dlc_key,
-                    &encrypt_key,
-                )?;
-
-                // Determine signed license / pubkey to emit. Prefer a supplied
-                // `--signed-license` (optionally verified with `--pubkey`). If no
-                // license was supplied, generate a new keypair + token as before.
-                if let Some(sup_license) = signed_license.as_deref() {
-                    if let Some(pubkey_str) = pubkey.as_deref() {
-                        // verify supplied token with provided pubkey
-                        let verifier = DlcKey::public(pubkey_str)
-                            .map_err(|e| format!("invalid provided pubkey: {:?}", e))?;
-                        let verified = verifier
-                            .verify_signed_license(&SignedLicense::from(sup_license.to_string()))
-                            .map_err(|e| {
-                                format!("supplied signed-license verification failed: {:?}", e)
-                            })?;
-                        // product + dlc id sanity checks
-                        if verified.product != product {
-                            return Err(
-                                "supplied signed-license product does not match --product".into()
-                            );
-                        }
-                        if !verified.dlcs.iter().any(|d| d == &dlc_id_str) {
-                            return Err(
-                                "supplied signed-license does not include the requested DLC id"
-                                    .into(),
-                            );
-                        }
-
-                        println!("SIGNED LICENSE:\n{}", sup_license);
-                        println!("PUB KEY: {}", pubkey_str);
-                    } else {
-                        eprintln!(
-                            "warning: supplied signed-license not verified (no --pubkey supplied)"
-                        );
-                        println!("SIGNED LICENSE:\n{}", sup_license);
-                    }
-                } else {
-                    // create signed token for logical gating (dlcs/product).
-                    let dlc_key = DlcKey::generate_random();
-                    let signedlicense =
-                        dlc_key.create_signed_license(&[dlc_id], Product::from(product.clone()))?;
-
-                    signedlicense
-                        .with_secret(|s| print_signed_license_and_pubkey(s.as_str(), &dlc_key));
-                }
-
-                if list {
-                    let (_prod, did, _v, ents) = parse_encrypted_pack(&container)?;
-                    println!("dlc_id: {} entries: {}", did, ents.len());
-                    for (p, enc) in ents.iter() {
-                        println!(
-                            " - {} (ext={}) ciphertext_len={} nonce={}",
-                            p,
-                            enc.original_extension,
-                            enc.ciphertext.len(),
-                            hex::encode(enc.nonce)
-                        );
-                    }
-                    // continue and still emit the generated file + private key below
-                }
-
-                let out_path =
-                    out.unwrap_or_else(|| PathBuf::from(format!("{}.dlcpack", dlc_id_str)));
-                std::fs::write(&out_path, &container)?;
-
-                println!("created dlcpack: {}", out_path.display());
-
-                return Ok(());
-            }
-
-            // directory mode: if the user supplied exactly one directory as the input
-            // entry and `--pack` was not used, create individual .dlc files preserving
-            // directory-relative paths.
-            if !pack && files.len() == 1 && files[0].is_dir() {
-                let mut input_files = Vec::new();
-                collect_files_recursive(&files[0], &mut input_files, None)?;
-                if input_files.is_empty() {
-                    return Err("no files found in input directory".into());
-                }
-
-                let out_dir = out.unwrap_or_else(|| PathBuf::from("generated"));
-                if out_dir.exists() && !out_dir.is_dir() {
-                    return Err("output path must be a directory when packing a directory".into());
-                }
-                std::fs::create_dir_all(&out_dir)?;
-
-                let dlc_id = DlcId::from(dlc_id_str.clone());
-                let encrypt_key = if let Some(lic_str) = signed_license.as_deref() {
-                    if let Some(key_bytes) = bevy_dlc::extract_encrypt_key_from_license(
-                        &bevy_dlc::SignedLicense::from(lic_str.to_string()),
-                    ) {
-                        if key_bytes.len() != 32 {
-                            return Err("embedded encrypt key has invalid length".into());
-                        }
-                        EncryptionKey::from(key_bytes)
-                    } else {
-                        EncryptionKey::from_random(32)
-                    }
-                } else {
-                    EncryptionKey::from_random(32)
-                };
-
-                for file in &input_files {
-                    let mut f = File::open(file)?;
-                    let mut bytes = Vec::new();
-                    f.read_to_end(&mut bytes)?;
-
-                    let rel = file.strip_prefix(&files[0]).unwrap();
-                    let ext = file.extension().and_then(|s| s.to_str()).unwrap_or("");
-                    let (container, _nonce) = pack_encrypted_asset(
-                        &bytes,
-                        &dlc_id,
-                        if ext.is_empty() { None } else { Some(ext) },
-                        None,
-                        &encrypt_key,
-                    )?;
-
-                    let mut out_path = out_dir.join(rel);
-                    out_path.set_extension("dlc");
-                    if let Some(parent) = out_path.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    std::fs::write(&out_path, &container)?;
-                    println!("created encrypted asset: {}", out_path.display());
-                }
-
-                // emit signed license / pubkey as before
-                if let Some(sup_license) = signed_license.as_deref() {
-                    if let Some(pubkey_str) = pubkey.as_deref() {
-                        let verifier = DlcKey::public(pubkey_str)
-                            .map_err(|e| format!("invalid provided pubkey: {:?}", e))?;
-                        let verified = verifier
-                            .verify_signed_license(&SignedLicense::from(sup_license.to_string()))
-                            .map_err(|e| {
-                                format!("supplied signed-license verification failed: {:?}", e)
-                            })?;
-                        if verified.product != product {
-                            return Err(
-                                "supplied signed-license product does not match --product".into()
-                            );
-                        }
-                        if !verified.dlcs.iter().any(|d| d == &dlc_id_str) {
-                            return Err(
-                                "supplied signed-license does not include the requested DLC id"
-                                    .into(),
-                            );
-                        }
-                        println!("SIGNED LICENSE:\n{}", sup_license);
-                        println!("PUB KEY: {}", pubkey_str);
-                    } else {
-                        eprintln!(
-                            "warning: supplied signed-license not verified (no --pubkey supplied)"
-                        );
-                        println!("SIGNED LICENSE:\n{}", sup_license);
-                    }
-                } else {
-                    let dlc_key = DlcKey::generate_random();
-                    let signedlicense = dlc_key.create_signed_license(
-                        &[DlcId::from(dlc_id_str.clone())],
-                        Product::from(product.clone()),
-                    )?;
-                    println!(
-                        "created {} encrypted assets to {}",
-                        input_files.len(),
-                        out_dir.display()
-                    );
-                    signedlicense
-                        .with_secret(|s| print_signed_license_and_pubkey(s.as_str(), &dlc_key));
-                }
-
-                return Ok(());
-            }
-
-            // Non-pack modes: support single-file or multiple-files input via `--files`.
-            // When the user supplied exactly one file, produce a single .dlc; when a
-            // single directory was supplied we already handled directory mode above; when
-            // multiple files are supplied pack each into its own .dlc under `out`.
-            if !pack {
-                // expand input_entries into explicit_files
-                let mut explicit_files: Vec<PathBuf> = Vec::new();
-                for entry in &files {
-                    if entry.is_dir() {
-                        // directories were handled above; still allow packing multiple dirs/files
-                        collect_files_recursive(entry, &mut explicit_files, None)?;
-                    } else if entry.is_file() {
-                        explicit_files.push(entry.clone());
-                    } else {
-                        return Err(format!("input path not found: {}", entry.display()).into());
-                    }
-                }
-
-                if explicit_files.is_empty() {
-                    return Err("no input files provided".into());
-                }
-
-                // single-file case
-                if explicit_files.len() == 1 {
-                    let input_file = &explicit_files[0];
-                    let mut f = File::open(input_file)?;
-                    let mut bytes = Vec::new();
-                    f.read_to_end(&mut bytes)?;
-
-                    let ext = input_file
-                        .extension()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("");
-
-                    let dlc_id = DlcId::from(dlc_id_str.clone());
-                    let encrypt_key = if let Some(lic_str) = signed_license.as_deref() {
-                        if let Some(key_bytes) = bevy_dlc::extract_encrypt_key_from_license(
-                            &bevy_dlc::SignedLicense::from(lic_str.to_string()),
-                        ) {
-                            if key_bytes.len() != 32 {
-                                return Err("embedded encrypt key has invalid length".into());
-                            }
-                            EncryptionKey::from(key_bytes)
-                        } else {
-                            EncryptionKey::from_random(32)
-                        }
-                    } else {
-                        EncryptionKey::from_random(32)
-                    };
-
-                    let (container, _nonce) = pack_encrypted_asset(
-                        &bytes,
-                        &dlc_id,
-                        if ext.is_empty() { None } else { Some(ext) },
-                        None,
-                        &encrypt_key,
-                    )?;
-
-                    // signed license / pubkey emission (unchanged)
-                    if let Some(sup_license) = signed_license.as_deref() {
-                        if let Some(pubkey_str) = pubkey.as_deref() {
-                            let verifier = DlcKey::public(pubkey_str)
-                                .map_err(|e| format!("invalid provided pubkey: {:?}", e))?;
-                            let verified = verifier
-                                .verify_signed_license(&SignedLicense::from(
-                                    sup_license.to_string(),
-                                ))
-                                .map_err(|e| {
-                                    format!("supplied signed-license verification failed: {:?}", e)
-                                })?;
-                            if verified.product != product {
-                                return Err(
-                                    "supplied signed-license product does not match --product"
-                                        .into(),
-                                );
-                            }
-                            if !verified.dlcs.iter().any(|d| d == &dlc_id_str) {
-                                return Err(
-                                    "supplied signed-license does not include the requested DLC id"
-                                        .into(),
-                                );
-                            }
-                            println!("SIGNED LICENSE:\n{}", sup_license);
-                            println!("PUB KEY: {}", pubkey_str);
-                        } else {
-                            eprintln!(
-                                "warning: supplied signed-license not verified (no --pubkey supplied)"
-                            );
-                            println!("SIGNED LICENSE:\n{}", sup_license);
-                        }
-                    } else {
-                        let dlc_key = DlcKey::generate_random();
-                        let signedlicense = dlc_key.create_signed_license(
-                            &[dlc_id.clone()],
-                            Product::from(product.clone()),
-                        )?;
-                        signedlicense
-                            .with_secret(|s| print_signed_license_and_pubkey(s.as_str(), &dlc_key));
-                    }
-
-                    if list {
-                        let enc = parse_encrypted(&container)?;
-                        println!("dlc_id: {}", enc.dlc_id);
-                        println!("original_extension: {}", enc.original_extension);
-                        println!("ciphertext_len: {}", enc.ciphertext.len());
-                        println!("nonce: {}", hex::encode(enc.nonce));
-                    }
-
-                    let out_path = out.unwrap_or_else(|| {
-                        let mut p = input_file.clone();
-                        p.set_extension("dlc");
-                        p
-                    });
-                    std::fs::write(&out_path, &container)?;
-                    println!("created encrypted asset: {}", out_path.display());
-                    return Ok(());
-                }
-
-                // multiple files: write individual .dlc files under `out` (default: generated)
-                let out_dir = out.unwrap_or_else(|| PathBuf::from("generated"));
-                if out_dir.exists() && !out_dir.is_dir() {
-                    return Err(
-                        "output path must be a directory when packing multiple files".into(),
-                    );
-                }
-                std::fs::create_dir_all(&out_dir)?;
-
-                let dlc_id = DlcId::from(dlc_id_str.clone());
-                let encrypt_key = if let Some(lic_str) = signed_license.as_deref() {
-                    if let Some(key_bytes) = bevy_dlc::extract_encrypt_key_from_license(
-                        &bevy_dlc::SignedLicense::from(lic_str.to_string()),
-                    ) {
-                        if key_bytes.len() != 32 {
-                            return Err("embedded encrypt key has invalid length".into());
-                        }
-                        EncryptionKey::from(key_bytes)
-                    } else {
-                        EncryptionKey::from_random(32)
-                    }
-                } else {
-                    EncryptionKey::from_random(32)
-                };
-
-                for file in &explicit_files {
-                    let mut f = File::open(file)?;
-                    let mut bytes = Vec::new();
-                    f.read_to_end(&mut bytes)?;
-
-                    // compute relative path (if file is under the single input dir) else use file name
-                    let mut rel = file
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("file")
-                        .to_string();
-                    if files.len() == 1 && files[0].is_dir() && file.starts_with(&files[0]) {
-                        rel = file
-                            .strip_prefix(&files[0])
-                            .unwrap()
-                            .to_string_lossy()
-                            .to_string();
-                    }
-
-                    let ext = file.extension().and_then(|s| s.to_str()).unwrap_or("");
-                    let (container, _nonce) = pack_encrypted_asset(
-                        &bytes,
-                        &dlc_id,
-                        if ext.is_empty() { None } else { Some(ext) },
-                        None,
-                        &encrypt_key,
-                    )?;
-
-                    let mut out_path = out_dir.join(rel);
-                    out_path.set_extension("dlc");
-                    if let Some(parent) = out_path.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    std::fs::write(&out_path, &container)?;
-                    println!("created encrypted asset: {}", out_path.display());
-                }
-
-                // emit signed-license/pubkey as done in directory mode
-                if let Some(sup_license) = signed_license.as_deref() {
-                    if let Some(pubkey_str) = pubkey.as_deref() {
-                        let verifier = DlcKey::public(pubkey_str)
-                            .map_err(|e| format!("invalid provided pubkey: {:?}", e))?;
-                        let verified = verifier
-                            .verify_signed_license(&SignedLicense::from(sup_license.to_string()))
-                            .map_err(|e| {
-                                format!("supplied signed-license verification failed: {:?}", e)
-                            })?;
-                        if verified.product != product {
-                            return Err(
-                                "supplied signed-license product does not match --product".into()
-                            );
-                        }
-                        if !verified.dlcs.iter().any(|d| d == &dlc_id_str) {
-                            return Err(
-                                "supplied signed-license does not include the requested DLC id"
-                                    .into(),
-                            );
-                        }
-                        println!("SIGNED LICENSE:\n{}", sup_license);
-                        println!("PUB KEY: {}", pubkey_str);
-                    } else {
-                        eprintln!(
-                            "warning: supplied signed-license not verified (no --pubkey supplied)"
-                        );
-                        println!("SIGNED LICENSE:\n{}", sup_license);
-                    }
-                } else {
-                    let dlc_key = DlcKey::generate_random();
-                    let signedlicense = dlc_key
-                        .create_signed_license(&[dlc_id.clone()], Product::from(product.clone()))?;
-                    signedlicense
-                        .with_secret(|s| print_signed_license_and_pubkey(s.as_str(), &dlc_key));
-                }
-
-                return Ok(());
-            }
+            pack_command(
+                &mut app,
+                dlc_id_str,
+                pack,
+                files,
+                list,
+                out,
+                product,
+                types,
+                pubkey,
+                signed_license,
+            )
+            .await?;
         }
 
         Commands::List { dlc } => {
