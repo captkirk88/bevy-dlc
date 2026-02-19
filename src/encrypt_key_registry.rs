@@ -7,7 +7,8 @@ use crate::EncryptionKey;
 use secure_gate::ExposeSecret;
 
 static KEY_REGISTRY: Lazy<DashMap<String, EncryptionKey>> = Lazy::new(|| DashMap::new());
-static PATH_REGISTRY: Lazy<DashMap<String, Vec<String>>> = Lazy::new(|| DashMap::new());
+// Each DLC ID can only have ONE associated pack file path.
+static PATH_REGISTRY: Lazy<DashMap<String, String>> = Lazy::new(|| DashMap::new());
 
 /// Insert or replace the encrypt key for `dlc_id`.
 pub(crate) fn insert(dlc_id: &str, key: EncryptionKey) {
@@ -32,26 +33,45 @@ pub(crate) fn get(dlc_id: &str) -> Option<EncryptionKey> {
     })
 }
 
-/// Register an asset path for a given `dlc_id`. The path is stored so that
-/// callers (for example `DlcManager` or a reload system) can trigger
-/// `AssetServer::reload` on the paths associated with a DLC when it becomes
-/// unlocked.
+/// Register an asset path for a given `dlc_id`. Each DLC ID can only have
+/// ONE associated pack file. This enforces the design constraint that each
+/// DLC release is shipped as a single .dlcpack or .dlc file.
+/// Calling this with a different path for the same DlcId will replace the
+/// previous entry (which should not happen if the asset loader's conflict check is working).
 pub(crate) fn register_asset_path(dlc_id: &str, path: &str) {
-    PATH_REGISTRY
-        .entry(dlc_id.to_owned())
-        .or_default()
-        .push(path.to_owned());
+    PATH_REGISTRY.insert(dlc_id.to_owned(), path.to_owned());
 }
 
-/// Return a list of registered asset paths for the DLC id (clone).
+/// Return the registered asset path for the DLC id as a Vec (0 or 1 element).
+/// Returns empty vec if the DLC id has not been registered.
 #[allow(unused)]
 pub(crate) fn asset_paths_for(dlc_id: &str) -> Vec<String> {
     PATH_REGISTRY
         .get(dlc_id)
-        .map(|v| v.value().clone())
+        .map(|v| vec![v.value().clone()])
         .unwrap_or_default()
 }
 
+/// Check if a specific path is already registered for a given DLC id.
+pub(crate) fn path_exists_for(dlc_id: &str, path: &str) -> bool {
+    if let Some(registered_path) = PATH_REGISTRY.get(dlc_id) {
+        registered_path.value() == path
+    } else {
+        false
+    }
+}
+
+/// Check if a DLC id is already registered with a different path, which indicates a conflict (for example, two different .dlcpack files claiming the same DLC id). This is used by the asset loader to detect and reject conflicting DLC packs. Returns true if there is a conflict, false otherwise.
+pub(crate) fn check(dlc_id: &str, path: &str) -> bool {
+    if let Some(registered_path) = PATH_REGISTRY.get(dlc_id) {
+        // Conflict if the registered path is different from the incoming path
+        registered_path.value() != path
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
 /// Utility for tests/demo: clear the registry.
 pub(crate) fn clear_all() {
     KEY_REGISTRY.clear();

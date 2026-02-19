@@ -347,18 +347,34 @@ impl AssetLoader for DlcPackLoader {
         reader
             .read_to_end(&mut bytes)
             .await
-            .map_err(|e| DlcLoaderError::Io(e))?;
+            .map_err(|e| {
+                bevy::log::error!(
+                    "Failed to read DLC pack file at '{}': {}. \
+                    \nCheck that the file exists and is readable in your configured asset source.",
+                    path_string, e
+                );
+                DlcLoaderError::Io(e)
+            })?;
 
         let (_product, dlc_id, _version, manifest_entries) = crate::parse_encrypted_pack(&bytes)
             .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
 
-        // Check for DLC ID conflicts: if this DLC ID is already loaded, prevent loading another pack with the same ID
-        if !crate::encrypt_key_registry::asset_paths_for(&dlc_id).is_empty() {
-            return Err(DlcLoaderError::DlcIdConflict(dlc_id));
+        // Check for DLC ID conflicts: reject if a DIFFERENT pack file is being loaded for the same DLC ID.
+        // Allow the same pack file to be loaded multiple times (e.g., when accessing labeled sub-assets).
+        let existing_paths = crate::encrypt_key_registry::asset_paths_for(&dlc_id);
+        if !existing_paths.is_empty() && existing_paths[0] != path_string {
+            return Err(DlcLoaderError::DlcIdConflict(
+                dlc_id.clone(),
+                existing_paths[0].clone(),
+                path_string.clone(),
+            ));
         }
 
-        // register this asset path for the dlc id so it can be reloaded on unlock
-        crate::encrypt_key_registry::register_asset_path(&dlc_id, &path_string);
+        // Register this asset path for the dlc id so it can be reloaded on unlock.
+        // If the path already exists for this DLC ID, it's idempotent (same pack file).
+        if !crate::encrypt_key_registry::path_exists_for(&dlc_id, &path_string) {
+            crate::encrypt_key_registry::register_asset_path(&dlc_id, &path_string);
+        }
 
         // Try to decrypt all entries immediately when the encrypt key is present.
         // If the key is missing we still populate the manifest so callers can
@@ -565,8 +581,8 @@ pub enum DlcLoaderError {
     DecryptionFailed(String),
     #[error("Invalid encrypted asset format: {0}")]
     InvalidFormat(String),
-    #[error("DLC ID conflict: a .dlcpack with DLC id '{0}' is already loaded; cannot load another pack with the same DLC id")]
-    DlcIdConflict(String),
+    #[error("DLC ID conflict: a .dlcpack with DLC id '{0}' is already loaded; cannot load another pack with the same DLC id, original: {1}, new: {2}")]
+    DlcIdConflict(String, String, String),
 }
 
 #[cfg(test)]
@@ -710,6 +726,36 @@ use secure_gate::ExposeSecret;
         let width = u32::from_be_bytes([raw[16], raw[17], raw[18], raw[19]]);
         let height = u32::from_be_bytes([raw[20], raw[21], raw[22], raw[23]]);
         assert!(width > 0 && height > 0);
+
+        crate::encrypt_key_registry::clear_all();
+    }
+
+    #[test]
+    fn dlc_id_conflict_detection() {
+        // Verify that loading different packs with the same DLC ID returns a conflict error,
+        // but loading the same pack multiple times is allowed.
+        crate::encrypt_key_registry::clear_all();
+
+        let dlc_id_str = "conflict_test_dlc";
+        let pack_path_1 = "existing_pack.dlcpack";
+        let pack_path_2 = "different_pack.dlcpack";
+
+        // Register a dummy path to simulate a pack already being loaded
+        crate::encrypt_key_registry::register_asset_path(dlc_id_str, pack_path_1);
+
+        // Verify that the registry shows paths exist
+        let paths = crate::encrypt_key_registry::asset_paths_for(dlc_id_str);
+        assert!(!paths.is_empty(), "paths should exist after registering");
+
+        // Same path should NOT be detected as a conflict (idempotent)
+        let same_path_conflict = crate::encrypt_key_registry::check(dlc_id_str, pack_path_1);
+        assert!(!same_path_conflict, "same pack path should NOT be a conflict");
+
+        // Different path SHOULD be detected as a conflict
+        let diff_path_conflict = crate::encrypt_key_registry::check(dlc_id_str, pack_path_2);
+        assert!(diff_path_conflict, "different pack path SHOULD be detected as a conflict");
+
+        crate::encrypt_key_registry::clear_all();
     }}
 
 impl<A> AssetLoader for DlcLoader<A>

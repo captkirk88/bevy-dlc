@@ -1347,12 +1347,17 @@ mod tests {
     }
 }
 
+// ============================================================================
+// Test helpers
+// ============================================================================
+
 /// Test helpers for integration tests. These provide controlled access to the
 /// internal registry to support test scenarios. Do not use in production code.
 ///
 /// The registry should only be updated by `DlcPackLoader` when assets are loaded
 /// or by systems processing `SignedLicense` tokens in production. This module
 /// allows integration tests to bypass normal flow by directly registering keys.
+#[cfg(test)]
 #[allow(dead_code)]
 pub mod test_helpers {
     use crate::{EncryptionKey, encrypt_key_registry};
