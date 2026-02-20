@@ -460,6 +460,68 @@ impl DlcKey {
         }
     }
 
+    /// Extend an existing signed license by merging additional DLC ids while preserving backwards compatibility.
+    ///
+    /// Extracts the DLC ids from an existing (unsigned or unverified) license payload, merges them
+    /// with the provided new DLC ids (with deduplication), and creates a fresh signed license
+    /// with the combined list. The product must match this key's current product.
+    ///
+    /// **Important**: This creates a NEW signed token with a potentially different signature,
+    /// but the payload contains all previous DLC ids plus the new ones. Existing DLC packs
+    /// remain unlocked by the new license.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let old_license = SignedLicense::from("...existing token...");
+    /// let new_license = dlc_key.extend_signed_license(
+    ///     &old_license,
+    ///     &["new_expansion"],
+    ///     product,
+    /// )?;
+    /// ```
+    pub fn extend_signed_license<D>(
+        &self,
+        existing: &SignedLicense,
+        new_dlcs: impl IntoIterator<Item = D>,
+        product: Product,
+    ) -> Result<SignedLicense, DlcError>
+    where
+        D: std::fmt::Display,
+    {
+        // Extract dlc_ids from existing license without verification
+        let mut combined_dlcs: Vec<String> = existing.with_secret(|token_str| {
+            let parts: Vec<&str> = token_str.split('.').collect();
+            if parts.len() != 2 {
+                return Vec::new();
+            }
+            if let Ok(payload) = URL_SAFE_NO_PAD.decode(parts[0].as_bytes()) {
+                if let Ok(payload_json) = serde_json::from_slice::<serde_json::Value>(&payload) {
+                    if let Some(dlcs_array) = payload_json.get("dlcs").and_then(|v| v.as_array()) {
+                        let mut dlcs = Vec::new();
+                        for dlc in dlcs_array {
+                            if let Some(dlc_id) = dlc.as_str() {
+                                dlcs.push(dlc_id.to_string());
+                            }
+                        }
+                        return dlcs;
+                    }
+                }
+            }
+            Vec::new()
+        });
+
+        // Merge in new DLC ids (with deduplication)
+        for new_dlc in new_dlcs {
+            let dlc_str = new_dlc.to_string();
+            if !combined_dlcs.contains(&dlc_str) {
+                combined_dlcs.push(dlc_str);
+            }
+        }
+
+        // Create new signed license with combined dlc_ids
+        self.create_signed_license(combined_dlcs, product)
+    }
+
     /// Verify a compact signed-license (signature + payload) using this key's public key
     /// and return a typed `VerifiedLicense`. This only checks signature + parsing;
     /// product checks are performed by `DlcManager::unlock_verified_license`.
@@ -1216,6 +1278,58 @@ mod tests {
         assert_eq!(s, "\"expansion_serde\"");
         let decoded: DlcId = serde_json::from_str(&s).expect("deserialize dlc id");
         assert_eq!(decoded.to_string(), "expansion_serde");
+    }
+
+    #[test]
+    fn extend_signed_license_merges_dlc_ids() {
+        let product = Product::from("test_product");
+        let dlc_key = DlcKey::generate_random();
+
+        // Create initial license with two DLC ids
+        let initial = dlc_key
+            .create_signed_license(&["expansion_a", "expansion_b"], product.clone())
+            .expect("create initial license");
+
+        // Extend with a new DLC id
+        let extended = dlc_key
+            .extend_signed_license(&initial, &["expansion_c"], product.clone())
+            .expect("extend license");
+
+        // Verify the extended license contains all three DLC ids
+        let verified = dlc_key
+            .verify_signed_license(&extended)
+            .expect("verify extended license");
+        assert_eq!(verified.dlcs.len(), 3);
+        assert!(verified.dlcs.contains(&"expansion_a".to_string()));
+        assert!(verified.dlcs.contains(&"expansion_b".to_string()));
+        assert!(verified.dlcs.contains(&"expansion_c".to_string()));
+    }
+
+    #[test]
+    fn extend_signed_license_deduplicates() {
+        let product = Product::from("test_product");
+        let dlc_key = DlcKey::generate_random();
+
+        // Create initial license with a DLC id
+        let initial = dlc_key
+            .create_signed_license(&["expansion_a"], product.clone())
+            .expect("create initial license");
+
+        // Try to extend with the same DLC id (should deduplicate)
+        let extended = dlc_key
+            .extend_signed_license(&initial, &["expansion_a"], product.clone())
+            .expect("extend license");
+
+        // Verify there's only one instance of expansion_a
+        let verified = dlc_key
+            .verify_signed_license(&extended)
+            .expect("verify extended license");
+        let count = verified
+            .dlcs
+            .iter()
+            .filter(|d| d == &"expansion_a")
+            .count();
+        assert_eq!(count, 1, "Should not duplicate dlc_ids");
     }
 }
 

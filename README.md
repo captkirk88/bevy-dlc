@@ -51,13 +51,13 @@ This will generate two files in `keys/`:
 ### Create a pack
 
 ```bash
-bevy-dlc pack --product my-game expansion_1 assets/expansionA -o dlc/expansion_1.dlcpack
+bevy-dlc pack --product my-game expansionA -o dlc -- assets/expansionA
 ```
 
-- `--product` — binds the pack to a product name (enforced by `DlcManager`)
+- `--product` — binds the pack to a product name
 - `assets/expansionA` — directory or file(s) to pack
-- `expansion_1` — DLC ID (used in licenses to unlock this pack)
-- `-o dlc/expansion_1.dlcpack` — output path for the pack, can also just be a directory (defaults to `{dlc_id}.dlcpack`)
+- `expansionA` — DLC ID (used in licenses to unlock this pack)
+- `-o dlc` — output path for the generated `.dlcpack`
 
 This creates `expansion_1.dlcpack` and prints a signed license token.
 
@@ -69,23 +69,27 @@ Alternatively you can use `bevy-dlc generate --help` to review how to generate a
 ### Load in your app
 
 ```rust
-use bevy::prelude::*;
-use bevy_dlc::prelude::*;
+// <aes-key> can be generated using `bevy-dlc generate --aes-key` or any secure random 32-byte key.
+secure::include_secure_str_aes!("example.slicense", "<aes-key>", "example_license");
 
-fn main() {
-    let dlc_key = DlcKey::public(pubkey_base64).unwrap();
-    let license = SignedLicense::from(secure_token_str);  // from CLI output or other secure source
+let dlc_key = DlcKey::public(include_str!("../../example.pubkey")).expect("invalid example pubkey");
+let signedlicense = SignedLicense::from(get_example_license());
 
-    App::new()
-        .add_plugins(DefaultPlugins)
-        .add_plugins(DlcPlugin::new(
-            Product::from("my-game"),
-            dlc_key,
-            license,
-        ))
-        .register_dlc_type::<MyCustomType>()  // if your pack has custom types
-        .run();
-}
+App::new()
+    .add_plugins(DefaultPlugins)
+    .add_plugins(DlcPlugin::new(
+        Product::from("example"),
+        dlc_key,
+        signedlicense,
+    ))
+    .init_asset::<TextAsset>()
+    .register_dlc_type::<TextAsset>()
+    .add_systems(Startup, startup)
+    .add_systems(
+        Update,
+        show_dlc_content.run_if(is_dlc_loaded("expansionA")),
+    )
+    .run()
 ```
 
 ### Load assets

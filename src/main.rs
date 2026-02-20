@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand};
 
 use bevy_dlc::{
     DLC_PACK_MAGIC, EncryptionKey, pack_encrypted_pack,
-    parse_encrypted_pack, prelude::*,
+    parse_encrypted_pack, prelude::*, extract_dlc_ids_from_license,
 };
 use secure_gate::ExposeSecret;
 use owo_colors::{AnsiColors, OwoColorize};
@@ -56,11 +56,11 @@ enum Commands {
             help = "Show the metadata the container would contain and exit; no file or private key will be produced."
         )]
         list: bool,
-        /// output path (defaults to <dlc_id>.dlcpack)
+        /// output path (defaults to <dlc_id>.dlcpack). If the supplied path has no extension it is treated as a directory and the generated file will be written to `<OUT>/<dlc_id>.dlcpack`.
         #[arg(
             short,
             long,
-            help = "Destination path for the generated .dlcpack (default: <dlc_id>.dlcpack)",
+            help = "Destination path for the generated .dlcpack (default: <dlc_id>.dlcpack). If the path has no extension it will be treated as a directory.",
             value_name = "OUT"
         )]
         out: Option<PathBuf>,
@@ -139,7 +139,7 @@ enum Commands {
         long_about = "Create a signed-license token and write <product>.slicense and <product>.pubkey; these files are used as defaults by other commands when present."
     )]
     Generate {
-        /// Product name (used for filenames and token product binding)
+        /// Product name to bind the license to (also used to name the output files)
         #[arg(value_name = "PRODUCT")]
         product: String,
         /// DLC ids to include in the signed license
@@ -151,12 +151,12 @@ enum Commands {
         /// Overwrite existing files if present
         #[arg(short, long)]
         force: bool,
-        /// Optionally emit a random 32-byte AES encrypt key (base64url/hex) (secure create requires an encrypt key, but this is not needed for signature verification or pack listing)
+        /// Optionally emit a random 32-byte AES key (base64url/hex). Use `--aes-key` to print the key.
         #[arg(
-            long = "emit-encrypt-key",
-            help = "Also print a random 32-byte AES encrypt key (base64url) for use with secure crate"
+            long = "aes-key",
+            help = "Print a random 32-byte AES key (base64url) for use with secure crate"
         )]
-        emit_encrypt_key: bool,
+        aes_key: bool,
     },
 
 }
@@ -218,10 +218,10 @@ fn print_signed_license_and_pubkey(
     write_files: bool,
     product: Option<&str>,
 ) {
-    println!("SIGNED LICENSE:\n{}", signedlicense);
+    println!("{}:\n{}","SIGNED LICENSE".green().bold(), signedlicense);
 
     let pubkey_b64 = URL_SAFE_NO_PAD.encode(dlc_key.get_public_key().get());
-    println!("PUB KEY: {}", pubkey_b64);
+    println!("{}: {}","PUB KEY".blue().bold(),pubkey_b64);
 
     if write_files {
         if let Some(prod) = product {
@@ -408,14 +408,53 @@ fn handle_license_output(
             if verified.product != product {
                 return Err("supplied signed-license product does not match --product".into());
             }
-            if !verified.dlcs.iter().any(|d| d == &dlc_id_str) {
-                return Err("supplied signed-license does not include the requested DLC id".into());
-            }
-            println!("SIGNED LICENSE:\n{}", sup_license);
-            println!("PUB KEY: {}", pubkey_str);
+            
+            // If the dlc_id is not in the license, try to extend it
+            let final_license = if !verified.dlcs.iter().any(|d| d == &dlc_id_str) {
+                if let Some(dlc_key) = signer_key {
+                    // Extend the supplied license with the new dlc_id
+                    let extended = dlc_key.extend_signed_license(
+                        &SignedLicense::from(sup_license.to_string()),
+                        &[DlcId::from(dlc_id_str.to_string())],
+                        Product::from(product.to_string()),
+                    )?;
+                    println!("{}", "note: supplied license did not include requested DLC id, extended with it".yellow());
+                    extended
+                } else {
+                    return Err("supplied signed-license does not include the requested DLC id (and no private key available to extend it)".into());
+                }
+            } else {
+                SignedLicense::from(sup_license.to_string())
+            };
+            
+            final_license.with_secret(|s| {
+                println!("{}:\n{}","SIGNED LICENSE".green().bold(), s);
+                println!("{}: {}","PUB KEY".blue().bold(), pubkey_str);
+            });
         } else {
             print_warning("supplied signed-license not verified (no --pubkey supplied)");
-            println!("SIGNED LICENSE:\n{}", sup_license);
+            
+            // Check if we can extend with the new dlc_id
+            let dlc_ids_in_existing = extract_dlc_ids_from_license(&SignedLicense::from(sup_license.to_string()));
+            let final_license = if !dlc_ids_in_existing.iter().any(|d| d == dlc_id_str) {
+                if let Some(dlc_key) = signer_key {
+                    // Extend the supplied license with the new dlc_id
+                    let extended = dlc_key.extend_signed_license(
+                        &SignedLicense::from(sup_license.to_string()),
+                        &[DlcId::from(dlc_id_str.to_string())],
+                        Product::from(product.to_string()),
+                    )?;
+                    println!("{}", "note: existing license did not include requested DLC id, extended with it".yellow());
+                    extended
+                } else {
+                    print_warning(&format!("existing license does not include DLC id '{}' (no private key available to extend)", dlc_id_str));
+                    SignedLicense::from(sup_license.to_string())
+                }
+            } else {
+                SignedLicense::from(sup_license.to_string())
+            };
+            
+            final_license.with_secret(|s| println!("{}:\n{}","SIGNED LICENSE:".green().bold(), s));
         }
     } else {
         // Use the provided signer key (the key that signed the pack) when available
@@ -762,10 +801,18 @@ async fn pack_command(
 
         let out_path = if let Some(out_val) = out {
             let path = PathBuf::from(&out_val);
-            if path.is_dir() {
+            if path.exists() && path.is_dir() {
+                // explicit existing directory
                 path.join(format!("{}.dlcpack", dlc_id_str))
-            } else {
+            } else if path.extension().is_some() {
+                // path *looks like* a file (has an extension) — treat as file path
                 path
+            } else {
+                // no extension: treat as directory (create it if necessary)
+                if !path.exists() {
+                    std::fs::create_dir_all(&path)?;
+                }
+                path.join(format!("{}.dlcpack", dlc_id_str))
             }
         } else {
             PathBuf::from(format!("{}.dlcpack", dlc_id_str))
@@ -797,7 +844,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.update();
 
     let cli = Cli::parse();
-
+    
     match cli.command {
         Commands::Pack {
             dlc_id: dlc_id_str,
@@ -917,11 +964,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dlcs,
             out_dir,
             force,
-            emit_encrypt_key,
+            aes_key,
         } => {
-            if dlcs.is_empty() {
-                return Err("must supply at least one DLC id for Generate".into());
-            }
+            // if dlcs.is_empty() {
+            //     return Err("must supply at least one DLC id for Generate".into());
+            // }
 
             // create private key + signed license (private key seed becomes embedded encrypt_key)
             let dlc_key = DlcKey::generate_random();
@@ -941,9 +988,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !force {
                 if slicense_path.exists() || pubkey_path.exists() {
                     return Err(format!(
-                        "'{}' or '{}' already exists; use --force to overwrite",
+                        "'{}' or '{}' already exists; use {} to overwrite",
                         slicense_path.display(),
-                        pubkey_path.display()
+                        pubkey_path.display(),
+                        "--force".color(AnsiColors::Magenta).bold()
                     )
                     .into());
                 }
@@ -952,11 +1000,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // print token + pubkey to stdout and write <product>.slicense / <product>.pubkey
             signedlicense.with_secret(|s| print_signed_license_and_pubkey(s.as_str(), &dlc_key, true, Some(product.as_str())));
 
-            // optionally emit a random 32-byte AES encrypt key (base64url)
-            if emit_encrypt_key {
+            // optionally emit a random 32-byte AES key (base64url)
+            if aes_key {
                 let ek = EncryptionKey::from_random(32);
                 ek.with_secret(|kb| {
-                    println!("{} {}","ENCRYPT KEY (base64url):".color(AnsiColors::Cyan).bold(), URL_SAFE_NO_PAD.encode(kb));
+                    println!("{} {}","AES KEY (base64url):".color(AnsiColors::Cyan).bold(), URL_SAFE_NO_PAD.encode(kb));
                 });
             }
 

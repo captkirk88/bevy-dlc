@@ -17,7 +17,7 @@ fn pack_unpack_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&src_dir)?;
     fs::write(src_dir.join("hello.txt"), b"hello dlc")?;
 
-    // Pack the directory into a .dlcpack
+    // Pack the directory into a .dlcpack (explicit file path)
     let out_pack = td.path().join("test_dlc.dlcpack");
     Command::new(cargo_bin!("bevy-dlc"))
         .current_dir(td.path())
@@ -35,6 +35,27 @@ fn pack_unpack_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         .success();
 
     assert!(out_pack.exists());
+
+    // Pack with a no-extension -o value -> treated as directory
+    let out_dir_no_ext = td.path().join("out_no_ext");
+    assert!(!out_dir_no_ext.exists());
+    Command::new(cargo_bin!("bevy-dlc"))
+        .current_dir(td.path())
+        .arg("pack")
+        .arg("--product")
+        .arg(prod)
+        .arg("other_dlc")
+        .arg("--types")
+        .arg("txt=some_crate::SomeType")
+        .arg("-o")
+        .arg(&out_dir_no_ext)
+        .arg("--")
+        .arg(&src_dir)
+        .assert()
+        .success();
+
+    let expected = out_dir_no_ext.join("other_dlc.dlcpack");
+    assert!(expected.exists());
 
     // List the pack
     Command::new(cargo_bin!("bevy-dlc"))
