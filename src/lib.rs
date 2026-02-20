@@ -103,29 +103,17 @@ impl Plugin for DlcPlugin {
             .init_asset_loader::<asset_loader::DlcLoader<AnimationClip>>()
             .init_asset_loader::<asset_loader::DlcLoader<AnimationGraph>>();
 
-        // Build DlcPackLoader with one TypedSubAssetRegistrar per registered type.
+        // Build `DlcPackLoader` from any factories registered via
+        // `DlcPackRegistrarFactories` (user calls to `register_dlc_type`) plus the
+        // crate's default registrars.
+        let factories = app.world().get_resource::<asset_loader::DlcPackRegistrarFactories>().cloned();
         let pack_loader = asset_loader::DlcPackLoader {
-            registrars: vec![
-                Box::new(asset_loader::TypedSubAssetRegistrar::<Image>::default()),
-                Box::new(asset_loader::TypedSubAssetRegistrar::<Scene>::default()),
-                Box::new(asset_loader::TypedSubAssetRegistrar::<bevy::mesh::Mesh>::default()),
-                Box::new(asset_loader::TypedSubAssetRegistrar::<Font>::default()),
-                Box::new(asset_loader::TypedSubAssetRegistrar::<AudioSource>::default()),
-                Box::new(asset_loader::TypedSubAssetRegistrar::<ColorMaterial>::default()),
-                Box::new(asset_loader::TypedSubAssetRegistrar::<
-                    bevy::pbr::StandardMaterial,
-                >::default()),
-                Box::new(asset_loader::TypedSubAssetRegistrar::<bevy::gltf::Gltf>::default()),
-                Box::new(asset_loader::TypedSubAssetRegistrar::<bevy::gltf::GltfMesh>::default()),
-                Box::new(asset_loader::TypedSubAssetRegistrar::<Shader>::default()),
-                Box::new(asset_loader::TypedSubAssetRegistrar::<DynamicScene>::default()),
-                Box::new(asset_loader::TypedSubAssetRegistrar::<AnimationClip>::default()),
-                Box::new(asset_loader::TypedSubAssetRegistrar::<AnimationGraph>::default()),
-            ],
+            registrars: asset_loader::collect_pack_registrars(factories.as_ref()),
+            factories,
         };
 
-        app.register_asset_loader(pack_loader)
-            .init_asset::<asset_loader::DlcPack>();
+        app.register_asset_loader(pack_loader);
+        app.init_asset::<asset_loader::DlcPack>();
     }
 }
 
@@ -135,11 +123,6 @@ pub trait AppExt {
     /// (Image, Scene, Mesh, Font, AudioSource, etc.) but you must register loaders for any custom
     /// asset types.
     ///
-    /// **Note**: to also support loading entries of type `T` from `.dlcpack` bundles, supply a
-    /// custom `DlcPackLoader` with an extra `TypedSubAssetRegistrar::<T>` pushed onto its
-    /// `registrars` list and pass it to `app.register_asset_loader(pack_loader)` before adding
-    /// the plugin, or re-register it afterwards.
-    ///
     /// **Suggestion**: If I missed a common asset type that should be supported out-of-the-box,
     /// please open an issue or PR to add it!
     fn register_dlc_type<T: Asset>(&mut self) -> &mut Self;
@@ -148,6 +131,25 @@ pub trait AppExt {
 impl AppExt for App {
     fn register_dlc_type<T: Asset>(&mut self) -> &mut Self {
         self.init_asset_loader::<DlcLoader<T>>();
+
+        // ensure a factory entry exists so `DlcPackLoader` will include a
+        // `TypedSubAssetRegistrar::<T>` when it (re)registers. This allows
+        // `register_dlc_type` to be called *before* or *after* the plugin is
+        // added and still result in the pack loader supporting `T`.
+        let tname = std::any::type_name::<T>();
+        if let Some(factories_res) = self.world_mut().get_resource_mut::<asset_loader::DlcPackRegistrarFactories>() {
+            let mut inner = factories_res.0.write().unwrap();
+            if !inner.iter().any(|f| f.type_name() == tname) {
+                inner.push(Box::new(asset_loader::TypedRegistrarFactory::<T>::default()));
+            }
+        } else {
+            let mut v: Vec<Box<dyn asset_loader::DlcPackRegistrarFactory>> = Vec::new();
+            v.push(Box::new(asset_loader::TypedRegistrarFactory::<T>::default()));
+            self.insert_resource(asset_loader::DlcPackRegistrarFactories(std::sync::Arc::new(std::sync::RwLock::new(v))));
+        }
+
+        // No need to re-register the `DlcPackLoader` — the loader holds a shared
+        // reference to the factories resource and will observe updates made here.
         self
     }
 }
@@ -159,12 +161,11 @@ impl AppExt for App {
 /// because a DLC ID is in the license doesn't mean the pack file has been delivered or loaded.
 ///
 /// This is useful for gating systems that should only run when specific DLC content is actually
-/// available. Multiple `.dlcpack` files can be loaded independently; this condition
-/// checks each one individually based on which pack files have been loaded by the asset loader.
+/// available.
 ///
 /// # Example
 /// ```ignore
-/// app.add_systems(Update, spawn_dlc_content.run_if(is_dlc_loaded("expansion_a".into())));
+/// app.add_systems(Update, spawn_dlc_content.run_if(is_dlc_loaded("expansionA")));
 /// ```
 pub fn is_dlc_loaded(dlc_id: impl Into<DlcId>) -> impl Fn() -> bool + Send + Sync + 'static {
     let id_string = dlc_id.into().0;
@@ -176,7 +177,6 @@ pub fn is_dlc_loaded(dlc_id: impl Into<DlcId>) -> impl Fn() -> bool + Send + Syn
 #[serde(transparent)]
 pub struct DlcId(pub String);
 
-// convenience impls
 impl From<&str> for DlcId {
     fn from(s: &str) -> Self {
         DlcId(s.to_owned())
@@ -196,7 +196,7 @@ impl std::fmt::Display for DlcId {
 }
 
 // secure-gate aliases for secrets used with `DlcKey`
-fixed_alias!(pub PrivateKey, 32);
+fixed_alias!(pub PrivateKey, 32, "A secure wrapper for a 32-byte Ed25519 signing seed (private key) used to create signed licenses. This should be protected and never exposed in logs or error messages.");
 
 /// PublicKey wrapper (32 bytes)
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -227,6 +227,9 @@ dynamic_alias!(pub SignedLicense, String, "A compact offline-signed token contai
 
 /// Extract the embedded encryption key from a signed license's payload (base64url-encoded).
 /// Returns `None` if the token is malformed or contains no encrypt_key.
+/// 
+/// TODO: remove content_key fallback because `encrypt_key` is now always embedded by `DlcKey::create_signed_license` and the old `content_key` name is deprecated.
+/// TODO: Returned encrypt_key is currently a raw byte vec; consider returning a `EncryptionKey` alias instead for better type safety and zeroization guarantees and security when used at runtime.
 pub fn extract_encrypt_key_from_license(license: &SignedLicense) -> Option<Vec<u8>> {
     license.with_secret(|token_str| {
         let parts: Vec<&str> = token_str.split('.').collect();
@@ -1330,6 +1333,40 @@ mod tests {
             .filter(|d| d == &"expansion_a")
             .count();
         assert_eq!(count, 1, "Should not duplicate dlc_ids");
+    }
+
+    #[test]
+    fn register_dlc_type_adds_pack_registrar_factory() {
+        let mut app = App::new();
+        app.add_plugins(AssetPlugin::default());
+        #[derive(Asset, TypePath)]
+        struct TestAsset;
+        app.init_asset::<TestAsset>();
+        app.register_dlc_type::<TestAsset>();
+
+        let factories = app
+            .world()
+            .get_resource::<asset_loader::DlcPackRegistrarFactories>()
+            .expect("should have factories resource");
+        assert!(factories.0.read().unwrap().iter().any(|f| f.type_name() == std::any::type_name::<TestAsset>()));
+    }
+
+    #[test]
+    fn register_dlc_type_is_idempotent_for_pack_factories() {
+        let mut app = App::new();
+        app.add_plugins(AssetPlugin::default());
+        #[derive(Asset, TypePath)]
+        struct TestAsset2;
+        app.init_asset::<TestAsset2>();
+        app.register_dlc_type::<TestAsset2>();
+        app.register_dlc_type::<TestAsset2>();
+
+        let factories = app
+            .world()
+            .get_resource::<asset_loader::DlcPackRegistrarFactories>()
+            .expect("should have factories resource");
+        let count = factories.0.read().unwrap().iter().filter(|f| f.type_name() == std::any::type_name::<TestAsset2>()).count();
+        assert_eq!(count, 1);
     }
 }
 

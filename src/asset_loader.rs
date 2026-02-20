@@ -1,5 +1,6 @@
 use bevy::asset::io::Reader;
 use bevy::asset::{Asset, AssetLoader, AssetPath, ErasedLoadedAsset, Handle, LoadContext, LoadedUntypedAsset};
+use bevy::prelude::*;
 use rayon::prelude::*;
 use bevy::ecs::reflect::AppTypeRegistry;
 use std::io;
@@ -315,6 +316,106 @@ pub struct DlcPackLoader {
     /// `init_asset_loader::<DlcLoader<A>>()`. The loader tries each in turn
     /// and uses the first successful downcast.
     pub registrars: Vec<Box<dyn ErasedSubAssetRegistrar>>,
+    /// Optional shared reference to the `DlcPackRegistrarFactories` resource so
+    /// the loader can observe updates to the factory list at runtime without
+    /// requiring the asset loader to be re-registered.
+    pub(crate) factories: Option<DlcPackRegistrarFactories>,
+}
+
+/// Factory trait used to create `ErasedSubAssetRegistrar` instance.
+///
+/// Implement `TypedRegistrarFactory<T>` for asset types to produce a
+/// `TypedSubAssetRegistrar::<T>` at collection time.
+pub trait DlcPackRegistrarFactory: Send + Sync + 'static {
+    fn type_name(&self) -> &'static str;
+    fn create_registrar(&self) -> Box<dyn ErasedSubAssetRegistrar>;
+}
+
+/// Generic typed factory that constructs `TypedSubAssetRegistrar::<T>`.
+pub struct TypedRegistrarFactory<T: Asset + 'static>(std::marker::PhantomData<T>);
+
+impl<T: Asset + 'static> DlcPackRegistrarFactory for TypedRegistrarFactory<T> {
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<T>()
+    }
+
+    fn create_registrar(&self) -> Box<dyn ErasedSubAssetRegistrar> {
+        Box::new(TypedSubAssetRegistrar::<T>::default())
+    }
+}
+
+impl<T: Asset + 'static> Default for TypedRegistrarFactory<T> {
+    fn default() -> Self {
+        TypedRegistrarFactory(std::marker::PhantomData)
+    }
+}
+
+
+
+use std::sync::{RwLock};
+
+/// Internal factory resource used by `AppExt::register_dlc_type` so user code
+/// can request additional pack-registrars without pushing closures.
+///
+/// The resource wraps an `Arc<RwLock<_>>` so the registered `DlcPackLoader`
+/// instance can hold a cheap clone and observe updates made by
+/// `register_dlc_type(...)` without needing to re-register the loader.
+#[derive(Clone, Resource)]
+pub(crate) struct DlcPackRegistrarFactories(pub Arc<RwLock<Vec<Box<dyn DlcPackRegistrarFactory>>>>);
+
+impl Default for DlcPackRegistrarFactories {
+    fn default() -> Self {
+        DlcPackRegistrarFactories(Arc::new(RwLock::new(Vec::new())))
+    }
+}
+
+/// Return the default set of pack registrar factories used by `DlcPlugin`.
+///
+/// Using factory objects avoids closures and makes it trivial to add custom
+/// typed factories in user code (box a `TypedRegistrarFactory::<T>`).
+pub(crate) fn default_pack_registrar_factories() -> Vec<Box<dyn DlcPackRegistrarFactory>> {
+    vec![
+        Box::new(TypedRegistrarFactory::<Image>::default()),
+        Box::new(TypedRegistrarFactory::<Scene>::default()),
+        Box::new(TypedRegistrarFactory::<bevy::mesh::Mesh>::default()),
+        Box::new(TypedRegistrarFactory::<Font>::default()),
+        Box::new(TypedRegistrarFactory::<AudioSource>::default()),
+        Box::new(TypedRegistrarFactory::<ColorMaterial>::default()),
+        Box::new(TypedRegistrarFactory::<bevy::pbr::StandardMaterial>::default()),
+        Box::new(TypedRegistrarFactory::<bevy::gltf::Gltf>::default()),
+        Box::new(TypedRegistrarFactory::<bevy::gltf::GltfMesh>::default()),
+        Box::new(TypedRegistrarFactory::<Shader>::default()),
+        Box::new(TypedRegistrarFactory::<DynamicScene>::default()),
+        Box::new(TypedRegistrarFactory::<AnimationClip>::default()),
+        Box::new(TypedRegistrarFactory::<AnimationGraph>::default()),
+    ]
+}
+
+/// Build the final `registrars` vector by combining factory objects supplied via
+/// the `DlcPackRegistrarFactories` resource with the crate's default factories.
+pub(crate) fn collect_pack_registrars(
+    factories: Option<&DlcPackRegistrarFactories>,
+) -> Vec<Box<dyn ErasedSubAssetRegistrar>> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<&'static str> = HashSet::new();
+    let mut out: Vec<Box<dyn ErasedSubAssetRegistrar>> = Vec::new();
+
+    if let Some(f) = factories {
+        let inner = f.0.read().unwrap();
+        for factory in inner.iter() {
+            out.push(factory.create_registrar());
+            seen.insert(factory.type_name());
+        }
+    }
+
+    for factory in default_pack_registrar_factories() {
+        if !seen.contains(factory.type_name()) {
+            out.push(factory.create_registrar());
+            seen.insert(factory.type_name());
+        }
+    }
+
+    out
 }
 
 impl AssetLoader for DlcPackLoader {
@@ -339,7 +440,7 @@ impl AssetLoader for DlcPackLoader {
             .read_to_end(&mut bytes)
             .await
             .map_err(|e| {
-                bevy::log::error!(
+                error!(
                     "Failed to read DLC pack file at '{}': {}. \
                     \nCheck that the file exists and is readable in your configured asset source.",
                     path_string, e
@@ -389,8 +490,16 @@ impl AssetLoader for DlcPackLoader {
 
         let mut out_entries = Vec::with_capacity(manifest_entries.len());
 
+        let mut unregistered_labels: Vec<String> = Vec::new();
+
         for (path, enc) in manifest_entries.into_iter() {
             let entry_label = path.replace('\\', "/");
+
+            // Track whether a typed labeled asset was successfully registered
+            // for this entry. If `false` after processing, the pack still
+            // contains the entry but no labeled asset will be available via
+            // `pack.dlcpack#entry` (AssetServer will report it as missing).
+            let mut registered_as_labeled = false;
 
             // Try to load this entry as a typed sub-asset when plaintext is available.
             if let Some(ref items) = decrypted_items {
@@ -423,26 +532,46 @@ impl AssetLoader for DlcPackLoader {
                     match result {
                         Ok(erased) => {
                             let mut remaining = Some(erased);
-                            for registrar in &self.registrars {
-                                match registrar.try_register(
-                                    entry_label.clone(),
-                                    remaining.take().unwrap(),
-                                    load_context,
-                                ) {
-                                    Ok(()) => { remaining = None; break; }
-                                    Err(back) => { remaining = Some(back); }
+
+                            // Prefer dynamic registrars from the shared factories resource
+                            // when available; otherwise use the static snapshot held by
+                            // the loader instance.
+                            let dynamic_regs = self.factories.as_ref().map(|f| crate::asset_loader::collect_pack_registrars(Some(f)));
+                            if let Some(regs) = dynamic_regs.as_ref() {
+                                for registrar in regs.iter() {
+                                    match registrar.try_register(
+                                        entry_label.clone(),
+                                        remaining.take().unwrap(),
+                                        load_context,
+                                    ) {
+                                        Ok(()) => { registered_as_labeled = true; remaining = None; break; }
+                                        Err(back) => { remaining = Some(back); }
+                                    }
+                                }
+                            } else {
+                                for registrar in &self.registrars {
+                                    match registrar.try_register(
+                                        entry_label.clone(),
+                                        remaining.take().unwrap(),
+                                        load_context,
+                                    ) {
+                                        Ok(()) => { registered_as_labeled = true; remaining = None; break; }
+                                        Err(back) => { remaining = Some(back); }
+                                    }
                                 }
                             }
+
                             if let Some(_) = remaining {
-                                bevy::log::warn!(
-                                    "DlcPackLoader: no registrar matched type for entry '{}' (extension='{}').",
+                                warn!(
+                                    "DlcPackLoader: entry '{}' present in container but no registered asset type matched (extension='{}'); the asset will NOT be available as 'pack#{}'. Register a loader with `app.register_dlc_type::<T>()` or supply `type_path` when packing.",
                                     entry_label,
-                                    ext
+                                    ext,
+                                    entry_label
                                 );
                             }
                         }
                         Err(e) => {
-                            bevy::log::warn!(
+                            warn!(
                                 "DlcPackLoader: failed to load entry '{}': {}",
                                 entry_label,
                                 e
@@ -455,11 +584,28 @@ impl AssetLoader for DlcPackLoader {
             // Build the labeled registered path for the DlcPackEntry.
             let registered_path = format!("{}#{}", path_string, entry_label);
 
+            if !registered_as_labeled {
+                unregistered_labels.push(entry_label.clone());
+            }
+
             out_entries.push(DlcPackEntry {
                 path: registered_path,
                 original_extension: enc.original_extension,
                 type_path: enc.type_path,
             });
+        }
+
+        // If any entries were not registered as labeled assets, emit a single
+        // summary warning that explains why `AssetServer::load("pack#entry")`
+        // will report the labeled asset as missing (see user-facing error).
+        if !unregistered_labels.is_empty() {
+            warn!(
+                "DlcPackLoader: {} {} in '{}' were not registered as labeled assets and will be inaccessible via 'pack#entry': {}. See earlier warnings for details or register the appropriate loader via `app.register_dlc_type::<T>()`.",
+                unregistered_labels.len(),
+                if unregistered_labels.len() == 1 { "entry" } else { "entries" },
+                path_string,
+                unregistered_labels.join(", ")
+            );
         }
 
         Ok(DlcPack {

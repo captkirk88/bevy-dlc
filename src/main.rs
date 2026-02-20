@@ -337,6 +337,33 @@ fn decrypt_with_key_local(
     Ok(pt)
 }
 
+fn print_pack_entries(version: usize, ents: &[(String, bevy_dlc::EncryptedAsset)]) {
+    if version >= 2 {
+        if let Some((_, first_enc)) = ents.first() {
+            println!(" ciphertext_len={} nonce={}", first_enc.ciphertext.len(), hex::encode(first_enc.nonce));
+        }
+        for (p, enc) in ents.iter() {
+            println!(
+                " - {} (ext={}) type={}",
+                p,
+                enc.original_extension,
+                enc.type_path.clone().unwrap_or("None".to_string())
+            );
+        }
+    } else {
+        for (p, enc) in ents.iter() {
+            println!(
+                " - {} (ext={}) ciphertext_len={} nonce={} type={}",
+                p,
+                enc.original_extension,
+                enc.ciphertext.len(),
+                hex::encode(enc.nonce),
+                enc.type_path.clone().unwrap_or("None".to_string())
+            );
+        }
+    }
+}
+
 /// Helper: Resolve pubkey and signed license from CLI args or defaults files
 fn resolve_pubkey_and_license(
     pubkey: Option<String>,
@@ -418,7 +445,7 @@ fn handle_license_output(
                         &[DlcId::from(dlc_id_str.to_string())],
                         Product::from(product.to_string()),
                     )?;
-                    println!("{}", "note: supplied license did not include requested DLC id, extended with it".yellow());
+                    println!("{}", "note: supplied license did not include requested DLC id, extending it now.".yellow());
                     extended
                 } else {
                     return Err("supplied signed-license does not include the requested DLC id (and no private key available to extend it)".into());
@@ -786,17 +813,9 @@ async fn pack_command(
         )?;
 
         if list {
-            let (_prod, did, _v, ents) = parse_encrypted_pack(&container)?;
+            let (_prod, did, version, ents) = parse_encrypted_pack(&container)?;
             println!("{} {} entries: {}","dlc_id".blue(), did, ents.len());
-            for (p, enc) in ents.iter() {
-                println!(
-                    " - {} (ext={}) ciphertext_len={} nonce={}",
-                    p,
-                    enc.original_extension,
-                    enc.ciphertext.len(),
-                    hex::encode(enc.nonce)
-                );
-            }
+            print_pack_entries(version, &ents);
         }
 
         let out_path = if let Some(out_val) = out {
@@ -890,15 +909,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             version,
                             ents.len()
                         );
-                        for (p, enc) in ents.iter() {
-                            println!(
-                                " - {} (ext={}) ciphertext_len={} nonce={}",
-                                p,
-                                enc.original_extension,
-                                enc.ciphertext.len(),
-                                hex::encode(enc.nonce)
-                            );
-                        }
+                        print_pack_entries(version, &ents);
                     }
                 }
                 return Ok(());
@@ -908,16 +919,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let bytes = std::fs::read(&dlc)?;
             let (_prod, did, version, ents) = parse_encrypted_pack(&bytes)?;
             println!("{} {} (v{}) entries: {}","dlcpack".color(AnsiColors::Blue), did, version, ents.len());
-            for (p, enc) in ents.iter() {
-                println!(
-                    " - {} (ext={}) ciphertext_len={} nonce={} type={}",
-                    p,
-                    enc.original_extension,
-                    enc.ciphertext.len(),
-                    hex::encode(enc.nonce),
-                    enc.type_path.clone().unwrap_or("None".to_string())
-                );
-            }
+            print_pack_entries(version, &ents);
             return Ok(());
         }
 
