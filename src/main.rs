@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 
 use bevy_dlc::{
     DLC_PACK_MAGIC, EncryptionKey, extract_dlc_ids_from_license, pack_encrypted_pack,
-    parse_encrypted_pack, prelude::*,
+    parse_encrypted_pack, prelude::*, PackItem,
 };
 use owo_colors::{AnsiColors, OwoColorize};
 use secure_gate::ExposeSecret;
@@ -68,7 +68,7 @@ enum Commands {
             short,
             long,
             help = "Product identifier to embed in the signed private key",
-            long_help = "Embeds a product identifier in the private key. When the DlcManager has a product binding set, tokens must include a matching product value to be accepted. Use this to restrict tokens to a specific game or application.",
+            long_help = "Embeds a product identifier in the private key. Tokens must include a matching product value to be accepted. Use this to restrict tokens to a specific game or application.",
             value_name = "PRODUCT"
         )]
         product: String,
@@ -411,13 +411,10 @@ fn derive_encrypt_key(
     signed_license: Option<&str>,
 ) -> Result<EncryptionKey, Box<dyn std::error::Error>> {
     Ok(if let Some(lic_str) = signed_license {
-        if let Some(key_bytes) = bevy_dlc::extract_encrypt_key_from_license(
+        if let Some(enc_key) = bevy_dlc::extract_encrypt_key_from_license(
             &bevy_dlc::SignedLicense::from(lic_str.to_string()),
         ) {
-            if key_bytes.len() != 32 {
-                return Err("embedded encrypt key has invalid length".into());
-            }
-            EncryptionKey::from(key_bytes)
+            enc_key
         } else {
             EncryptionKey::from_random(32)
         }
@@ -778,7 +775,7 @@ async fn pack_command(
         .unwrap_or_default();
     let type_path_map = resolve_type_paths_from_bevy(app, &selected_files, &type_overrides).await?;
 
-    let mut items: Vec<(String, Option<String>, Option<String>, Vec<u8>)> = Vec::new();
+    let mut items: Vec<PackItem> = Vec::new();
     for file in &selected_files {
         let mut f = File::open(file)?;
         let mut bytes = Vec::new();
@@ -791,6 +788,15 @@ async fn pack_command(
             )
             .into());
         }
+        let filename = file.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let mut item = PackItem::new(filename.to_string(), bytes.clone());
+        if let Some(ext) = file.extension().and_then(|e| e.to_str()) {
+            item = item.with_extension(ext);
+        }
+        if let Some(tp) = type_path_map.get(file) {
+            item = item.with_type_path(tp.clone());
+        }
+        items.push(item);
 
         let mut rel = file
             .file_name()
@@ -812,29 +818,27 @@ async fn pack_command(
             .and_then(|s| s.to_str())
             .map(|s| s.to_string());
         let type_path = type_path_map.get(file).cloned();
-        items.push((rel, ext, type_path, bytes));
+        let mut item = PackItem::new(rel.clone(), bytes.clone());
+        if let Some(e) = ext {
+            item = item.with_extension(e);
+        }
+        if let Some(tp) = type_path {
+            item = item.with_type_path(tp);
+        }
+        items.push(item);
     }
 
     let dlc_id = DlcId::from(dlc_id_str.clone());
-    // If the user supplied a signed-license and a pubkey, prefer signing the pack
-    // with the private seed embedded in that license so the pack's signature
-    // matches the provided `pubkey`/`slicense`. Otherwise generate a new key.
-    let dlc_key =
-        if let (Some(sup_license), Some(pk)) = (signed_license.as_deref(), pubkey.as_deref()) {
-            if let Some(seed_bytes) = bevy_dlc::extract_encrypt_key_from_license(
-                &SignedLicense::from(sup_license.to_string()),
-            ) {
-                let priv_b64 = URL_SAFE_NO_PAD.encode(&seed_bytes);
-                match DlcKey::new(pk, &priv_b64) {
-                    Ok(k) => k,
-                    Err(_) => DlcKey::generate_random(),
-                }
-            } else {
-                DlcKey::generate_random()
-            }
-        } else {
-            DlcKey::generate_random()
-        };
+    // Generate a new signing key for the pack. The private seed is never embedded
+    // in the signed license for security reasons - only the symmetric encryption key is.
+    let dlc_key = if let Some(pk) = pubkey.as_deref() {
+        match DlcKey::public(pk) {
+            Ok(k) => k,
+            Err(_) => DlcKey::generate_random(),
+        }
+    } else {
+        DlcKey::generate_random()
+    };
     let encrypt_key = derive_encrypt_key(signed_license.as_deref())?;
 
     let container = pack_encrypted_pack(

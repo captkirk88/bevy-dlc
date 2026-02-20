@@ -1,8 +1,7 @@
 //! bevy-dlc — DLC gating utilities for Bevy 0.18
 //!
 //! Preload encrypted assets and unlock them using offline-signed (Ed25519)
-//! tokens. See `DlcManager`, `DlcKey`, and `DlcPack` for the runtime API and
-//! examples.
+//! tokens. See `DlcKey` and `DlcPack` for the runtime API and examples.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -24,7 +23,7 @@ use thiserror::Error;
 pub mod prelude {
     pub use super::AppExt;
     pub use crate::{
-        DlcError, DlcId, DlcKey, DlcLoader, DlcManager, DlcPack, DlcPackLoader, DlcPlugin, Product,
+        DlcError, DlcId, DlcKey, DlcLoader, DlcPack, DlcPackLoader, DlcPlugin, Product,
         SignedLicense, VerifiedLicense, is_dlc_loaded,
     };
 }
@@ -43,33 +42,29 @@ pub mod prelude {
 ///
 /// Usage: provide the game with the public `DlcKey` and hand the signed
 /// license token (for example, from your platform or the CLI pack output)
-/// to the plugin; the plugin will apply the token to `DlcManager` and
-/// provision encrypt keys as needed.
+/// to the plugin; the plugin will extract and register encryption keys from it.
+#[allow(unused)]
 pub struct DlcPlugin {
     // keep the provided key (public or private) so `build` can insert it into
     // app resources; field is private to avoid exposing internals.
     dlc_key: DlcKey,
-    // Signed license token provided at construction; applied to the plugin's
-    // internal `DlcManager` during `build`.
+    // Signed license token provided at construction; applied during `build`
+    // to extract and register the encryption key.
     signed_license: SignedLicense,
-    // The plugin owns a `DlcManager` instance which will be populated by
-    // applying the signed license at build time and then inserted as a
-    // resource for the app to use.
-    dlc_manager: DlcManager,
+    
+    product: Product,
 }
 
 impl DlcPlugin {
     /// Create the plugin from a `DlcKey` and a `SignedLicense`.
     ///
-    /// The plugin will attempt to apply the signed token to an internal
-    /// `DlcManager` during `build` and then insert that `DlcManager` as a
-    /// resource so game systems do not need to call
-    /// `DlcManager::apply_signed_key_token` in `startup` themselves.
+    /// The plugin will extract the encryption key from the signed license
+    /// during `build` and register it in the global key registry.
     pub fn new(product: Product, dlc_key: DlcKey, signed_license: SignedLicense) -> Self {
         Self {
             dlc_key,
             signed_license,
-            dlc_manager: DlcManager::new(product),
+            product,
         }
     }
 }
@@ -77,18 +72,20 @@ impl DlcPlugin {
 impl Plugin for DlcPlugin {
     fn build(&self, app: &mut App) {
         // Extract and register the encryption key from the signed license
-        if let Some(key_bytes) = extract_encrypt_key_from_license(&self.signed_license) {
+        if let Some(encrypt_key) = extract_encrypt_key_from_license(&self.signed_license) {
             let dlcs = extract_dlc_ids_from_license(&self.signed_license);
             for dlc_id in dlcs {
-                // Create a fresh EncryptionKey for each DLC ID from the same key bytes
-                let encrypt_key = EncryptionKey::from(key_bytes.clone());
-                encrypt_key_registry::insert(&dlc_id, encrypt_key);
+                // Register the encryption key for each DLC ID (cloned securely from secret bytes)
+                let key_for_dlc = encrypt_key.with_secret(|kb| {
+                    EncryptionKey::from(kb.to_vec())
+                });
+                encrypt_key_registry::insert(&dlc_id, key_for_dlc);
             }
         }
 
         // Insert provided key + manager so other systems/resources can access them
         app.insert_resource(self.dlc_key.clone())
-            .insert_resource(self.dlc_manager.clone())
+            //.insert_resource(self.product.clone())
             .init_asset_loader::<asset_loader::DlcLoader<Image>>()
             .init_asset_loader::<asset_loader::DlcLoader<Scene>>()
             .init_asset_loader::<asset_loader::DlcLoader<bevy::mesh::Mesh>>()
@@ -139,7 +136,7 @@ impl AppExt for App {
         // `TypedSubAssetRegistrar::<T>` when it (re)registers. This allows
         // `register_dlc_type` to be called *before* or *after* the plugin is
         // added and still result in the pack loader supporting `T`.
-        let tname = std::any::type_name::<T>();
+        let tname = T::type_path();
         if let Some(factories_res) = self
             .world_mut()
             .get_resource_mut::<asset_loader::DlcPackRegistrarFactories>()
@@ -235,10 +232,7 @@ dynamic_alias!(pub SignedLicense, String, "A compact offline-signed token contai
 
 /// Extract the embedded encryption key from a signed license's payload (base64url-encoded).
 /// Returns `None` if the token is malformed or contains no encrypt_key.
-///
-/// TODO: remove content_key fallback because `encrypt_key` is now always embedded by `DlcKey::create_signed_license` and the old `content_key` name is deprecated.
-/// TODO: Returned encrypt_key is currently a raw byte vec; consider returning a `EncryptionKey` alias instead for better type safety and zeroization guarantees and security when used at runtime.
-pub fn extract_encrypt_key_from_license(license: &SignedLicense) -> Option<Vec<u8>> {
+pub fn extract_encrypt_key_from_license(license: &SignedLicense) -> Option<EncryptionKey> {
     license.with_secret(|token_str| {
         let parts: Vec<&str> = token_str.split('.').collect();
         if parts.len() != 2 {
@@ -248,9 +242,8 @@ pub fn extract_encrypt_key_from_license(license: &SignedLicense) -> Option<Vec<u
         let payload_json: serde_json::Value = serde_json::from_slice(&payload).ok()?;
         let key_b64 = payload_json
             .get("encrypt_key")
-            .and_then(|v| v.as_str())
-            .or_else(|| payload_json.get("content_key").and_then(|v| v.as_str()));
-        key_b64.and_then(|kb| URL_SAFE_NO_PAD.decode(kb.as_bytes()).ok())
+            .and_then(|v| v.as_str())?;
+        URL_SAFE_NO_PAD.decode(key_b64.as_bytes()).ok().map(EncryptionKey::from)
     })
 }
 
@@ -280,7 +273,7 @@ pub fn extract_dlc_ids_from_license(license: &SignedLicense) -> Vec<String> {
 }
 
 /// Product: non-secret identifier wrapper (keeps same API surface)
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Resource,Clone, PartialEq, Eq, Debug)]
 pub struct Product(String);
 
 impl Product {
@@ -534,8 +527,7 @@ impl DlcKey {
     }
 
     /// Verify a compact signed-license (signature + payload) using this key's public key
-    /// and return a typed `VerifiedLicense`. This only checks signature + parsing;
-    /// product checks are performed by `DlcManager::unlock_verified_license`.
+    /// and return a typed `VerifiedLicense`. This only checks signature + parsing.
     pub fn verify_signed_license(
         &self,
         license: &SignedLicense,
@@ -613,40 +605,6 @@ impl From<&DlcKey> for String {
     }
 }
 
-/// Resource that holds unlocked DLC IDs and verifies signed license tokens.
-///
-/// Security improvements:
-/// - DLC ids are `DlcId<K>` (typed identifier) rather than raw strings.
-/// - optional `product` binding can be set on the manager; if provided the
-///   private key must include a matching `product` field. This helps prevent
-///   cross-product reuse of tokens.
-#[derive(Resource, Debug, Clone)]
-pub struct DlcManager {
-    /// Product identifier for this game/application
-    product: Product,
-}
-
-impl DlcManager {
-    /// Create a new DLC manager for the given product.
-    /// All DLC packs must be signed for this product identifier.
-    pub fn new(product: Product) -> Self {
-        Self { product }
-    }
-
-    /// Get the product identifier for this manager
-    pub fn product(&self) -> &Product {
-        &self.product
-    }
-}
-
-impl Default for DlcManager {
-    fn default() -> Self {
-        Self {
-            product: Product::from("default"),
-        }
-    }
-}
-
 #[derive(Serialize, Deserialize, Debug)]
 struct LicensePayload {
     pub dlcs: Vec<String>,
@@ -698,10 +656,66 @@ fn decrypt_with_key(
     })
 }
 
+/// Helper struct for building DLC pack entries with optional metadata.
+/// Provides a builder pattern for creating entries to pack into a `.dlcpack` container.
+#[derive(Clone, Debug)]
+pub struct PackItem {
+    pub path: String,
+    pub original_extension: Option<String>,
+    pub type_path: Option<String>,
+    pub plaintext: Vec<u8>,
+}
+
+#[allow(dead_code)]
+impl PackItem {
+    pub fn new(path: impl Into<String>, plaintext: impl Into<Vec<u8>>) -> Self {
+        let path= path.into();
+        let ext = std::path::Path::new(&path).extension();
+        Self {
+            path: path.clone(),
+            original_extension: ext.and_then(|e| e.to_str()).map(|s| s.to_string()),
+            type_path: None,
+            plaintext: plaintext.into(),
+        }
+    }
+
+    pub fn with_extension(mut self, ext: impl Into<String>) -> Self {
+        self.original_extension = Some(ext.into());
+        self
+    }
+
+    pub fn with_type_path(mut self, type_path: impl Into<String>) -> Self {
+        self.type_path = Some(type_path.into());
+        self
+    }
+
+    pub fn with_type<T: Asset>(self) -> Self {
+        self.with_type_path(T::type_path())
+    }
+}
+
+impl From<PackItem> for (String, Option<String>, Option<String>, Vec<u8>) {
+    fn from(item: PackItem) -> Self {
+        (
+            item.path,
+            item.original_extension,
+            item.type_path,
+            item.plaintext,
+        )
+    }
+}
+
 /// Pack multiple entries into a single `.dlcpack` container.
+/// 
+/// Arguments:
+/// - `dlc_id`: the DLC ID this pack belongs to (used for registry lookup and validation)
+/// - `items`: a list of items to include in the pack, where each item is a tuple of (relative path, optional original file extension, optional type path, plaintext bytes)
+/// - `product`: the product identifier to bind the pack to
+/// - `dlc_key`: the `DlcKey` containing the private key used to sign the pack (must be a `DlcKey::Private`)
+/// - `key`: the symmetric encryption key used to encrypt the pack contents (must be 32 bytes for AES-256)
 pub fn pack_encrypted_pack(
     dlc_id: &DlcId,
-    items: &[(String, Option<String>, Option<String>, Vec<u8>)],
+    items: &[PackItem],
     product: &Product,
     dlc_key: &DlcKey,
     key: &EncryptionKey,
@@ -723,11 +737,11 @@ pub fn pack_encrypted_pack(
     };
 
     // refuse inputs that already look like BDLC / BDLP containers
-    for (path, _ext_opt, _type_opt, plaintext) in items {
-        if plaintext.len() >= 4 && (plaintext.starts_with(DLC_PACK_MAGIC)) {
+    for item in items {
+        if item.plaintext.len() >= 4 && item.plaintext.starts_with(DLC_PACK_MAGIC) {
             return Err(DlcError::Other(format!(
                 "cannot pack existing dlcpack container as an item: {}",
-                path
+                item.path
             )));
         }
     }
@@ -741,13 +755,13 @@ pub fn pack_encrypted_pack(
     {
         let enc = GzEncoder::new(&mut tar_gz, Compression::default());
         let mut tar = Builder::new(enc);
-        for (path, _ext_opt, _type_opt, plaintext) in items {
+        for item in items {
             let mut header = tar::Header::new_gnu();
-            header.set_size(plaintext.len() as u64);
+            header.set_size(item.plaintext.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
             // append_data takes a reader; Cursor over the slice is convenient
-            tar.append_data(&mut header, path, &mut std::io::Cursor::new(plaintext))
+            tar.append_data(&mut header, &item.path, &mut std::io::Cursor::new(&item.plaintext))
                 .map_err(|e| DlcError::Other(e.to_string()))?;
         }
         // finish the tar builder to flush into the gzip encoder
@@ -780,11 +794,11 @@ pub fn pack_encrypted_pack(
     }
 
     let mut manifest: Vec<ManifestEntry<'_>> = Vec::with_capacity(items.len());
-    for (path, ext_opt, type_opt, _plaintext) in items {
+    for item in items {
         manifest.push(ManifestEntry {
-            path: path.as_str(),
-            original_extension: ext_opt.as_deref(),
-            type_path: type_opt.as_deref(),
+            path: item.path.as_str(),
+            original_extension: item.original_extension.as_deref(),
+            type_path: item.type_path.as_deref(),
         });
     }
     let manifest_bytes =
@@ -1254,12 +1268,11 @@ mod tests {
         let dlc_id = DlcId::from("pack_test");
         let product = Product::from("test");
         let dlc_key = DlcKey::generate_random();
-        let items = vec![("a.txt".to_string(), Some("txt".to_string()), None, {
-            let mut v = Vec::new();
-            v.extend_from_slice(DLC_PACK_MAGIC);
-            v.extend_from_slice(b"inner");
-            v
-        })];
+        let mut items: Vec<PackItem> = Vec::new();
+        let mut v = Vec::new();
+        v.extend_from_slice(DLC_PACK_MAGIC);
+        v.extend_from_slice(b"inner");
+        items.push(PackItem::new("a.txt", v));
         let res = pack_encrypted_pack(&dlc_id, &items, &product, &dlc_key, &encrypt_key);
         assert!(matches!(res, Err(DlcError::Other(_))));
     }
@@ -1270,12 +1283,11 @@ mod tests {
         let dlc_id = DlcId::from("pack_test");
         let product = Product::from("test");
         let dlc_key = DlcKey::generate_random();
-        let items = vec![("b.bin".to_string(), None, None, {
-            let mut v = Vec::new();
-            v.extend_from_slice(b"BDLP");
-            v.extend_from_slice(b"innerpack");
-            v
-        })];
+        let mut items: Vec<PackItem> = Vec::new();
+        let mut v = Vec::new();
+        v.extend_from_slice(b"BDLP");
+        v.extend_from_slice(b"innerpack");
+        items.push(PackItem::new("b.bin", v));
         let res = pack_encrypted_pack(&dlc_id, &items, &product, &dlc_key, &key);
         assert!(matches!(res, Err(DlcError::Other(_))));
     }
@@ -1338,6 +1350,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn register_dlc_type_adds_pack_registrar_factory() {
         let mut app = App::new();
         app.add_plugins(AssetPlugin::default());
@@ -1356,11 +1369,12 @@ mod tests {
                 .read()
                 .unwrap()
                 .iter()
-                .any(|f| f.type_name() == std::any::type_name::<TestAsset>())
+                .any(|f| f.type_name() == TestAsset::type_path())
         );
     }
 
     #[test]
+    #[serial_test::serial]
     fn register_dlc_type_is_idempotent_for_pack_factories() {
         let mut app = App::new();
         app.add_plugins(AssetPlugin::default());
@@ -1379,7 +1393,7 @@ mod tests {
             .read()
             .unwrap()
             .iter()
-            .filter(|f| f.type_name() == std::any::type_name::<TestAsset2>())
+            .filter(|f| f.type_name() == TestAsset2::type_path())
             .count();
         assert_eq!(count, 1);
     }

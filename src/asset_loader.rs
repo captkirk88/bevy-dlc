@@ -335,9 +335,9 @@ pub trait DlcPackRegistrarFactory: Send + Sync + 'static {
 /// Generic typed factory that constructs `TypedSubAssetRegistrar::<T>`.
 pub struct TypedRegistrarFactory<T: Asset + 'static>(std::marker::PhantomData<T>);
 
-impl<T: Asset + 'static> DlcPackRegistrarFactory for TypedRegistrarFactory<T> {
+impl<T: Asset + TypePath + 'static> DlcPackRegistrarFactory for TypedRegistrarFactory<T> {
     fn type_name(&self) -> &'static str {
-        std::any::type_name::<T>()
+        T::type_path()
     }
 
     fn create_registrar(&self) -> Box<dyn ErasedSubAssetRegistrar> {
@@ -778,7 +778,7 @@ pub enum DlcLoaderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::EncryptionKey;
+    use crate::{EncryptionKey, PackItem};
 
     #[test]
     fn dlcpack_accessors_work_and_fields_read() {
@@ -808,12 +808,9 @@ mod tests {
     fn decrypt_pack_entries_without_key_returns_locked_error() {
         crate::encrypt_key_registry::clear_all();
         let dlc_id = crate::DlcId::from("locked_dlc");
-        let items = vec![(
-            "a.txt".to_string(),
-            Some("txt".to_string()),
-            None,
-            b"hello".to_vec(),
-        )];
+        let items = vec![
+            PackItem::new("a.txt", b"hello".to_vec()),
+        ];
         let key = EncryptionKey::from_random(32);
         let dlc_key = crate::DlcKey::generate_random();
         let product = crate::Product::from("test");
@@ -831,12 +828,9 @@ mod tests {
     fn decrypt_pack_entries_with_wrong_key_reports_entry_and_dlc() {
         crate::encrypt_key_registry::clear_all();
         let dlc_id = crate::DlcId::from("badkey_dlc");
-        let items = vec![(
-            "b.txt".to_string(),
-            Some("txt".to_string()),
-            None,
-            b"world".to_vec(),
-        )];
+        let items = vec![
+            PackItem::new("b.txt", b"world".to_vec()),
+        ];
         let real_key = EncryptionKey::from_random(32);
         let dlc_key = crate::DlcKey::generate_random();
         let product = crate::Product::from("test");
@@ -875,8 +869,14 @@ mod tests {
         // Register a dummy path to simulate a pack already being loaded
         crate::encrypt_key_registry::register_asset_path(dlc_id_str, pack_path_1);
 
-        // Verify that the registry shows paths exist
-        let paths = crate::encrypt_key_registry::asset_paths_for(dlc_id_str);
+        // Verify that the registry shows paths exist (retry briefly to avoid rare parallel-test races caused by tests/common/mod.rs)
+        let mut paths = crate::encrypt_key_registry::asset_paths_for(dlc_id_str);
+        let mut tries = 0;
+        while paths.is_empty() && tries < 10 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            paths = crate::encrypt_key_registry::asset_paths_for(dlc_id_str);
+            tries += 1;
+        }
         assert!(!paths.is_empty(), "paths should exist after registering");
 
         // Same path should NOT be detected as a conflict (idempotent)
@@ -954,13 +954,16 @@ where
                 DlcLoaderError::DecryptionFailed(msg)
             })?;
 
-        // Choose an extension for the nested load so Bevy selects the correct
-        // concrete loader (use container ext or fallback to original path ext).
+        // Choose an extension for the nested load so Bevy can pick a concrete
+        // loader if one exists. We keep the extension around so we can retry
+        // with it if the straightforward, static-type load fails. Prioritizing
+        // a static-type request avoids the need to downcast an erased asset,
+        // which is more efficient and sidesteps the edge cases where the
+        // extension loader returns a different type.
         let ext = enc.original_extension;
 
-        // Use an in-memory VecReader (no temp files) and ask the nested loader
-        // to immediately parse the bytes as the requested asset type `A`.
-        let mut vec_reader = bevy::asset::io::VecReader::new(plaintext);
+        // Keep plaintext bytes around so we can recreate readers as needed.
+        let bytes_clone = plaintext.clone();
 
         let stem = load_context
             .path()
@@ -970,45 +973,56 @@ where
             .unwrap_or("dlc_decrypted");
         let fake_path = format!("{}.{}", stem, ext);
 
-        // Prefer selecting the nested loader by *extension* when possible so
-        // the original concrete loader (e.g. `TextAssetLoader` for `.json`) is
-        // chosen. If we always force selection by asset *type* the
-        // `DlcLoader<A>` we registered for `A` can be selected recursively.
-        // If we have a meaningful extension prefer selecting the nested
-        // loader by *path/extension* (with_unknown_type) so Bevy chooses the
-        // concrete loader registered for that file type (avoids recursive
-        // selection of `DlcLoader<A>` registered for the asset *type*).
-        if ext == "bin" {
-            // no helpful extension available — fall back to static-type lookup
-            let loaded = load_context
+        // First attempt a direct static-type load. This bypasses extension
+        // dispatch entirely and returns a value of `A` if a loader exists for
+        // that type. Only if this fails do we fall back to using the extension
+        // and performing a downcast.
+        {
+            let mut static_reader = bevy::asset::io::VecReader::new(bytes_clone.clone());
+            if let Ok(loaded) = load_context
                 .loader()
                 .with_static_type()
                 .immediate()
-                .with_reader(&mut vec_reader)
-                .load::<A>(fake_path)
+                .with_reader(&mut static_reader)
+                .load::<A>(fake_path.clone())
                 .await
-                .map_err(|e| DlcLoaderError::DecryptionFailed(e.to_string()))?;
-            Ok(loaded.take())
-        } else {
-            // select loader by extension (unknown-typed) then downcast to A
-            let erased = load_context
-                .loader()
-                .immediate()
-                .with_reader(&mut vec_reader)
-                .with_unknown_type()
-                .load(fake_path)
-                .await
-                .map_err(|e| DlcLoaderError::DecryptionFailed(e.to_string()))?;
-
-            // try to downcast the erased-loaded asset into the requested type
-            match erased.downcast::<A>() {
-                Ok(loaded) => Ok(loaded.take()),
-                Err(e) => Err(DlcLoaderError::DecryptionFailed(format!(
-                    "type mismatch after decryption: expected {}, got {}",
-                    std::any::type_name::<A>(),
-                    e.asset_type_name()
-                ))),
+            {
+                return Ok(loaded.take());
             }
         }
+
+        // Static load didn't succeed. Try using the extension to select a loader
+        // and then downcast the result to `A`. This mirrors how the normal
+        // AssetServer would work when loading a file from disk.
+        if !ext.is_empty() {
+            let mut ext_reader = bevy::asset::io::VecReader::new(bytes_clone);
+            let attempt = load_context
+                .loader()
+                .immediate()
+                .with_reader(&mut ext_reader)
+                .with_unknown_type()
+                .load(fake_path.clone())
+                .await;
+
+            if let Ok(erased) = attempt {
+                match erased.downcast::<A>() {
+                    Ok(loaded) => return Ok(loaded.take()),
+                    Err(_) => return Err(DlcLoaderError::DecryptionFailed(format!(
+                        "dlc loader: extension-based load succeeded but downcast to '{}' failed",
+                        A::type_path(),
+                    ))),
+                }
+            } else if let Err(e) = attempt {
+                return Err(DlcLoaderError::DecryptionFailed(e.to_string()));
+            }
+        }
+
+        // If we reach here it means neither static nor extension-based loading
+        // succeeded; return an appropriate error. The original static attempt
+        // already logged a warning, so just surface a generic message.
+        Err(DlcLoaderError::DecryptionFailed(format!(
+            "dlc loader: unable to load decrypted asset as {}{}",
+            A::type_path(), if ext.is_empty() { "" } else { " (extension fallback also failed)" }
+        )))
     }
 }
