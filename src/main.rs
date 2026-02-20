@@ -987,13 +987,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if !force {
                 if slicense_path.exists() || pubkey_path.exists() {
-                    return Err(format!(
+                    print_error_and_exit(format!(
                         "'{}' or '{}' already exists; use {} to overwrite",
                         slicense_path.display(),
                         pubkey_path.display(),
                         "--force".color(AnsiColors::Magenta).bold()
-                    )
-                    .into());
+                    ).as_str());
                 }
             }
 
