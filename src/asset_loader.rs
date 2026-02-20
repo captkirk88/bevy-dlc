@@ -1,11 +1,13 @@
 use bevy::asset::io::Reader;
-use bevy::asset::{Asset, AssetLoader, AssetPath, ErasedLoadedAsset, Handle, LoadContext, LoadedUntypedAsset};
-use bevy::prelude::*;
-use rayon::prelude::*;
+use bevy::asset::{
+    Asset, AssetLoader, AssetPath, ErasedLoadedAsset, Handle, LoadContext, LoadedUntypedAsset,
+};
 use bevy::ecs::reflect::AppTypeRegistry;
+use bevy::prelude::*;
+use bevy::reflect::TypePath;
+use rayon::prelude::*;
 use std::io;
 use std::sync::Arc;
-use bevy::reflect::TypePath;
 use thiserror::Error;
 
 use crate::DlcId;
@@ -213,7 +215,6 @@ impl DlcPackEntry {
     pub fn type_path(&self) -> Option<&String> {
         self.type_path.as_ref()
     }
-
 }
 
 /// Represents a `.dlcpack` bundle (multiple encrypted entries).
@@ -260,8 +261,8 @@ impl DlcPack {
     ) -> Result<Vec<u8>, crate::asset_loader::DlcLoaderError> {
         // Decrypt the pack once (checks global encrypt-key registry) and
         // extract the requested entry.
-        let (_dlc_id, items) = crate::asset_loader::decrypt_pack_entries(&self.container_bytes)
-            .map_err(|e| e)?;
+        let (_dlc_id, items) =
+            crate::asset_loader::decrypt_pack_entries(&self.container_bytes).map_err(|e| e)?;
 
         // accept either "test.png" or "packfile.dlcpack#test.png" by
         // splitting on '#' and using the suffix when present.
@@ -275,9 +276,10 @@ impl DlcPack {
                 return Ok(plaintext);
             }
         }
-        Err(crate::asset_loader::DlcLoaderError::InvalidFormat(
-            format!("entry not found in container: {}", entry_path),
-        ))
+        Err(crate::asset_loader::DlcLoaderError::InvalidFormat(format!(
+            "entry not found in container: {}",
+            entry_path
+        )))
     }
 
     pub fn load<A: Asset>(
@@ -285,11 +287,10 @@ impl DlcPack {
         asset_server: &bevy::prelude::AssetServer,
         entry_path: &str,
     ) -> Option<Handle<A>> {
-        let entry = match self
-            .find_entry(entry_path) {
-                Some(e) => e,
-                None => return None,
-            };
+        let entry = match self.find_entry(entry_path) {
+            Some(e) => e,
+            None => return None,
+        };
         Some(asset_server.load::<A>(entry.path()))
     }
 }
@@ -350,9 +351,7 @@ impl<T: Asset + 'static> Default for TypedRegistrarFactory<T> {
     }
 }
 
-
-
-use std::sync::{RwLock};
+use std::sync::RwLock;
 
 /// Internal factory resource used by `AppExt::register_dlc_type` so user code
 /// can request additional pack-registrars without pushing closures.
@@ -436,17 +435,14 @@ impl AssetLoader for DlcPackLoader {
         let path_string = load_context.path().path().to_string_lossy().to_string();
 
         let mut bytes = Vec::new();
-        reader
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|e| {
-                error!(
-                    "Failed to read DLC pack file at '{}': {}. \
+        reader.read_to_end(&mut bytes).await.map_err(|e| {
+            error!(
+                "Failed to read DLC pack file at '{}': {}. \
                     \nCheck that the file exists and is readable in your configured asset source.",
-                    path_string, e
-                );
-                DlcLoaderError::Io(e)
-            })?;
+                path_string, e
+            );
+            DlcLoaderError::Io(e)
+        })?;
 
         let (_product, dlc_id, _version, manifest_entries) = crate::parse_encrypted_pack(&bytes)
             .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
@@ -477,9 +473,8 @@ impl AssetLoader for DlcPackLoader {
             // clone bytes for the blocking task so we can continue to own the
             // original `bytes` for `container_bytes` later
             let bytes_for_task = bytes.clone();
-            let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
-                decrypt_pack_entries(&bytes_for_task)
-            });
+            let task = bevy::tasks::AsyncComputeTaskPool::get()
+                .spawn(async move { decrypt_pack_entries(&bytes_for_task) });
 
             match task.await {
                 Ok((_id, items)) => Some(items),
@@ -536,7 +531,10 @@ impl AssetLoader for DlcPackLoader {
                             // Prefer dynamic registrars from the shared factories resource
                             // when available; otherwise use the static snapshot held by
                             // the loader instance.
-                            let dynamic_regs = self.factories.as_ref().map(|f| crate::asset_loader::collect_pack_registrars(Some(f)));
+                            let dynamic_regs = self
+                                .factories
+                                .as_ref()
+                                .map(|f| crate::asset_loader::collect_pack_registrars(Some(f)));
                             if let Some(regs) = dynamic_regs.as_ref() {
                                 for registrar in regs.iter() {
                                     match registrar.try_register(
@@ -544,8 +542,14 @@ impl AssetLoader for DlcPackLoader {
                                         remaining.take().unwrap(),
                                         load_context,
                                     ) {
-                                        Ok(()) => { registered_as_labeled = true; remaining = None; break; }
-                                        Err(back) => { remaining = Some(back); }
+                                        Ok(()) => {
+                                            registered_as_labeled = true;
+                                            remaining = None;
+                                            break;
+                                        }
+                                        Err(back) => {
+                                            remaining = Some(back);
+                                        }
                                     }
                                 }
                             } else {
@@ -555,8 +559,14 @@ impl AssetLoader for DlcPackLoader {
                                         remaining.take().unwrap(),
                                         load_context,
                                     ) {
-                                        Ok(()) => { registered_as_labeled = true; remaining = None; break; }
-                                        Err(back) => { remaining = Some(back); }
+                                        Ok(()) => {
+                                            registered_as_labeled = true;
+                                            remaining = None;
+                                            break;
+                                        }
+                                        Err(back) => {
+                                            remaining = Some(back);
+                                        }
                                     }
                                 }
                             }
@@ -564,17 +574,14 @@ impl AssetLoader for DlcPackLoader {
                             if let Some(_) = remaining {
                                 warn!(
                                     "DlcPackLoader: entry '{}' present in container but no registered asset type matched (extension='{}'); the asset will NOT be available as 'pack#{}'. Register a loader with `app.register_dlc_type::<T>()` or supply `type_path` when packing.",
-                                    entry_label,
-                                    ext,
-                                    entry_label
+                                    entry_label, ext, entry_label
                                 );
                             }
                         }
                         Err(e) => {
                             warn!(
                                 "DlcPackLoader: failed to load entry '{}': {}",
-                                entry_label,
-                                e
+                                entry_label, e
                             );
                         }
                     }
@@ -602,7 +609,11 @@ impl AssetLoader for DlcPackLoader {
             warn!(
                 "DlcPackLoader: {} {} in '{}' were not registered as labeled assets and will be inaccessible via 'pack#entry': {}. See earlier warnings for details or register the appropriate loader via `app.register_dlc_type::<T>()`.",
                 unregistered_labels.len(),
-                if unregistered_labels.len() == 1 { "entry" } else { "entries" },
+                if unregistered_labels.len() == 1 {
+                    "entry"
+                } else {
+                    "entries"
+                },
                 path_string,
                 unregistered_labels.join(", ")
             );
@@ -642,16 +653,22 @@ pub fn decrypt_pack_entries(
             entries
                 .into_par_iter()
                 .map(|(path, enc)| {
-                    let plaintext = crate::decrypt_with_key(&*key_for_tasks, &enc.ciphertext, &enc.nonce).map_err(|e| {
-                        let inner_error = e.to_string();
-                        let msg = format!(
-                            "dlc='{}' entry='{}' {}",
-                            dlc_id,
-                            path,
-                            if inner_error.is_empty() { "".to_string() } else { inner_error }
-                        );
-                        DlcLoaderError::DecryptionFailed(msg)
-                    })?;
+                    let plaintext =
+                        crate::decrypt_with_key(&*key_for_tasks, &enc.ciphertext, &enc.nonce)
+                            .map_err(|e| {
+                                let inner_error = e.to_string();
+                                let msg = format!(
+                                    "dlc='{}' entry='{}' {}",
+                                    dlc_id,
+                                    path,
+                                    if inner_error.is_empty() {
+                                        "".to_string()
+                                    } else {
+                                        inner_error
+                                    }
+                                );
+                                DlcLoaderError::DecryptionFailed(msg)
+                            })?;
                     Ok((path, enc.original_extension, enc.type_path, plaintext))
                 })
                 .collect();
@@ -677,19 +694,19 @@ pub fn decrypt_pack_entries(
     let archive_ciphertext = &entries[0].1.ciphertext;
 
     // decrypt the entire archive once
-    let archive_plain =
-        crate::decrypt_with_key(&encrypt_key, archive_ciphertext, &archive_nonce).map_err(|e| {
-            // report which DLC failed; include an example entry for context
-            let example_entry = &entries[0].0;
-            let msg = format!(
-                "dlc='{}' entry='{}' {}",
-                dlc_id,
-                example_entry,
-                e.to_string()
-            );
+    let archive_plain = crate::decrypt_with_key(&encrypt_key, archive_ciphertext, &archive_nonce)
+        .map_err(|e| {
+        // report which DLC failed; include an example entry for context
+        let example_entry = &entries[0].0;
+        let msg = format!(
+            "dlc='{}' entry='{}' {}",
+            dlc_id,
+            example_entry,
+            e.to_string()
+        );
 
-            DlcLoaderError::DecryptionFailed(msg)
-        })?;
+        DlcLoaderError::DecryptionFailed(msg)
+    })?;
 
     // decompress tar.gz and extract files
     use flate2::read::GzDecoder;
@@ -725,7 +742,10 @@ pub fn decrypt_pack_entries(
         // normalize manifest path (manifest paths may contain Windows backslashes);
         // extracted archive paths are normalized to forward slashes above.
         let normalized = path.replace("\\", "/");
-        match extracted.remove(&normalized).or_else(|| extracted.remove(&path)) {
+        match extracted
+            .remove(&normalized)
+            .or_else(|| extracted.remove(&path))
+        {
             Some(bytes) => out.push((path, enc.original_extension, enc.type_path, bytes)),
             None => {
                 return Err(DlcLoaderError::DecryptionFailed(format!(
@@ -749,14 +769,16 @@ pub enum DlcLoaderError {
     DecryptionFailed(String),
     #[error("Invalid encrypted asset format: {0}")]
     InvalidFormat(String),
-    #[error("DLC ID conflict: a .dlcpack with DLC id '{0}' is already loaded; cannot load another pack with the same DLC id, original: {1}, new: {2}")]
+    #[error(
+        "DLC ID conflict: a .dlcpack with DLC id '{0}' is already loaded; cannot load another pack with the same DLC id, original: {1}, new: {2}"
+    )]
     DlcIdConflict(String, String, String),
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::EncryptionKey;
     use super::*;
+    use crate::EncryptionKey;
 
     #[test]
     fn dlcpack_accessors_work_and_fields_read() {
@@ -795,7 +817,8 @@ mod tests {
         let key = EncryptionKey::from_random(32);
         let dlc_key = crate::DlcKey::generate_random();
         let product = crate::Product::from("test");
-        let container = crate::pack_encrypted_pack(&dlc_id, &items, &product, &dlc_key, &key).expect("pack");
+        let container =
+            crate::pack_encrypted_pack(&dlc_id, &items, &product, &dlc_key, &key).expect("pack");
 
         let err = decrypt_pack_entries(&container).expect_err("should be locked");
         match err {
@@ -817,11 +840,15 @@ mod tests {
         let real_key = EncryptionKey::from_random(32);
         let dlc_key = crate::DlcKey::generate_random();
         let product = crate::Product::from("test");
-        let container = crate::pack_encrypted_pack(&dlc_id, &items, &product, &dlc_key, &real_key).expect("pack");
+        let container = crate::pack_encrypted_pack(&dlc_id, &items, &product, &dlc_key, &real_key)
+            .expect("pack");
 
         // insert an incorrect key for this DLC
         let wrong_key: [u8; 32] = rand::random();
-        crate::encrypt_key_registry::insert(&dlc_id.to_string(), crate::EncryptionKey::from(wrong_key.to_vec()));
+        crate::encrypt_key_registry::insert(
+            &dlc_id.to_string(),
+            crate::EncryptionKey::from(wrong_key.to_vec()),
+        );
 
         let err = decrypt_pack_entries(&container).expect_err("should fail decryption");
         match err {
@@ -854,14 +881,21 @@ mod tests {
 
         // Same path should NOT be detected as a conflict (idempotent)
         let same_path_conflict = crate::encrypt_key_registry::check(dlc_id_str, pack_path_1);
-        assert!(!same_path_conflict, "same pack path should NOT be a conflict");
+        assert!(
+            !same_path_conflict,
+            "same pack path should NOT be a conflict"
+        );
 
         // Different path SHOULD be detected as a conflict
         let diff_path_conflict = crate::encrypt_key_registry::check(dlc_id_str, pack_path_2);
-        assert!(diff_path_conflict, "different pack path SHOULD be detected as a conflict");
+        assert!(
+            diff_path_conflict,
+            "different pack path SHOULD be detected as a conflict"
+        );
 
         crate::encrypt_key_registry::clear_all();
-    }}
+    }
+}
 
 impl<A> AssetLoader for DlcLoader<A>
 where
@@ -910,7 +944,11 @@ where
                     "dlc='{}' path='{}' {}",
                     enc.dlc_id,
                     path_string.unwrap_or_else(|| "<unknown>".to_string()),
-                    if inner_error.is_empty() { "".to_string() } else { format!("{}", inner_error) }
+                    if inner_error.is_empty() {
+                        "".to_string()
+                    } else {
+                        format!("{}", inner_error)
+                    }
                 );
 
                 DlcLoaderError::DecryptionFailed(msg)
@@ -965,9 +1003,11 @@ where
             // try to downcast the erased-loaded asset into the requested type
             match erased.downcast::<A>() {
                 Ok(loaded) => Ok(loaded.take()),
-                Err(e) => Err(DlcLoaderError::DecryptionFailed(
-                    format!("type mismatch after decryption: expected {}, got {}", std::any::type_name::<A>(), e.asset_type_name())
-                )),
+                Err(e) => Err(DlcLoaderError::DecryptionFailed(format!(
+                    "type mismatch after decryption: expected {}, got {}",
+                    std::any::type_name::<A>(),
+                    e.asset_type_name()
+                ))),
             }
         }
     }

@@ -106,7 +106,10 @@ impl Plugin for DlcPlugin {
         // Build `DlcPackLoader` from any factories registered via
         // `DlcPackRegistrarFactories` (user calls to `register_dlc_type`) plus the
         // crate's default registrars.
-        let factories = app.world().get_resource::<asset_loader::DlcPackRegistrarFactories>().cloned();
+        let factories = app
+            .world()
+            .get_resource::<asset_loader::DlcPackRegistrarFactories>()
+            .cloned();
         let pack_loader = asset_loader::DlcPackLoader {
             registrars: asset_loader::collect_pack_registrars(factories.as_ref()),
             factories,
@@ -137,7 +140,10 @@ impl AppExt for App {
         // `register_dlc_type` to be called *before* or *after* the plugin is
         // added and still result in the pack loader supporting `T`.
         let tname = std::any::type_name::<T>();
-        if let Some(factories_res) = self.world_mut().get_resource_mut::<asset_loader::DlcPackRegistrarFactories>() {
+        if let Some(factories_res) = self
+            .world_mut()
+            .get_resource_mut::<asset_loader::DlcPackRegistrarFactories>()
+        {
             let mut inner = factories_res.0.write().unwrap();
             if !inner.iter().any(|f| f.type_name() == tname) {
                 inner.push(Box::new(asset_loader::TypedRegistrarFactory::<T>::default()));
@@ -145,7 +151,9 @@ impl AppExt for App {
         } else {
             let mut v: Vec<Box<dyn asset_loader::DlcPackRegistrarFactory>> = Vec::new();
             v.push(Box::new(asset_loader::TypedRegistrarFactory::<T>::default()));
-            self.insert_resource(asset_loader::DlcPackRegistrarFactories(std::sync::Arc::new(std::sync::RwLock::new(v))));
+            self.insert_resource(asset_loader::DlcPackRegistrarFactories(
+                std::sync::Arc::new(std::sync::RwLock::new(v)),
+            ));
         }
 
         // No need to re-register the `DlcPackLoader` — the loader holds a shared
@@ -227,7 +235,7 @@ dynamic_alias!(pub SignedLicense, String, "A compact offline-signed token contai
 
 /// Extract the embedded encryption key from a signed license's payload (base64url-encoded).
 /// Returns `None` if the token is malformed or contains no encrypt_key.
-/// 
+///
 /// TODO: remove content_key fallback because `encrypt_key` is now always embedded by `DlcKey::create_signed_license` and the old `content_key` name is deprecated.
 /// TODO: Returned encrypt_key is currently a raw byte vec; consider returning a `EncryptionKey` alias instead for better type safety and zeroization guarantees and security when used at runtime.
 pub fn extract_encrypt_key_from_license(license: &SignedLicense) -> Option<Vec<u8>> {
@@ -716,9 +724,7 @@ pub fn pack_encrypted_pack(
 
     // refuse inputs that already look like BDLC / BDLP containers
     for (path, _ext_opt, _type_opt, plaintext) in items {
-        if plaintext.len() >= 4
-            && (plaintext.starts_with(DLC_PACK_MAGIC))
-        {
+        if plaintext.len() >= 4 && (plaintext.starts_with(DLC_PACK_MAGIC)) {
             return Err(DlcError::Other(format!(
                 "cannot pack existing dlcpack container as an item: {}",
                 path
@@ -1327,11 +1333,7 @@ mod tests {
         let verified = dlc_key
             .verify_signed_license(&extended)
             .expect("verify extended license");
-        let count = verified
-            .dlcs
-            .iter()
-            .filter(|d| d == &"expansion_a")
-            .count();
+        let count = verified.dlcs.iter().filter(|d| d == &"expansion_a").count();
         assert_eq!(count, 1, "Should not duplicate dlc_ids");
     }
 
@@ -1348,7 +1350,14 @@ mod tests {
             .world()
             .get_resource::<asset_loader::DlcPackRegistrarFactories>()
             .expect("should have factories resource");
-        assert!(factories.0.read().unwrap().iter().any(|f| f.type_name() == std::any::type_name::<TestAsset>()));
+        assert!(
+            factories
+                .0
+                .read()
+                .unwrap()
+                .iter()
+                .any(|f| f.type_name() == std::any::type_name::<TestAsset>())
+        );
     }
 
     #[test]
@@ -1365,7 +1374,13 @@ mod tests {
             .world()
             .get_resource::<asset_loader::DlcPackRegistrarFactories>()
             .expect("should have factories resource");
-        let count = factories.0.read().unwrap().iter().filter(|f| f.type_name() == std::any::type_name::<TestAsset2>()).count();
+        let count = factories
+            .0
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|f| f.type_name() == std::any::type_name::<TestAsset2>())
+            .count();
         assert_eq!(count, 1);
     }
 }
