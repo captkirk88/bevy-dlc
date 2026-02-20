@@ -68,6 +68,9 @@ Alternatively you can use `bevy-dlc generate --help` to review how to generate a
 
 ### Load in your app
 
+> [!NOTE]
+> As of `v2.0`, the `DlcPlugin` constructor no longer takes a `Product` argument.  Product binding is now handled at the pack and signed license level.  
+
 ```rust
 // <aes-key> can be generated using `bevy-dlc generate --aes-key` or any secure random 32-byte key.
 secure::include_secure_str_aes!("example.slicense", "<aes-key>", "example_license");
@@ -78,7 +81,6 @@ let signedlicense = SignedLicense::from(get_example_license());
 App::new()
     .add_plugins(DefaultPlugins)
     .add_plugins(DlcPlugin::new(
-        Product::from("example"),
         dlc_key,
         signedlicense,
     ))
@@ -105,7 +107,7 @@ let image: Handle<Image> = asset_server.load("expansion_1.dlcpack#sprites/player
 
 ### Suggestions and Contributions
 
-Contributions are very welcome!  Please open an issue or submit a pull request with any improvements, bug fixes, PERFORMANCE IMPROVEMENTS, or new features.
+Contributions are very welcome!  Please open an issue or submit a pull request with any improvements, bug fixes, or new features.
 
 ## License
 

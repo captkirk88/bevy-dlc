@@ -12,6 +12,12 @@ use thiserror::Error;
 
 use crate::DlcId;
 
+/// Fuzzy match for type paths, normalizing by trimming leading "::" to handle absolute vs relative paths.
+pub(crate) fn fuzzy_type_path_match<'a>(stored: &'a str, expected: &'a str) -> bool {
+    let normalize = |s: &'a str| s.trim_start_matches("::");
+    normalize(stored) == normalize(expected)
+}
+
 /// Attempts to downcast an `ErasedLoadedAsset` to `A` and, if successful,
 /// registers it as a labeled sub-asset in `load_context`.
 ///
@@ -251,6 +257,17 @@ impl DlcPack {
         self.entries
             .iter()
             .find(|e| e.path().to_string().ends_with(path) || e.path().path().ends_with(path))
+    }
+
+    /// Find all entries that match the specified asset type `A`.
+    pub fn find_by_type<A: Asset>(&self) -> Vec<&DlcPackEntry> {
+        self.entries
+            .iter()
+            .filter(|e| match e.type_path() {
+                Some(tp) => fuzzy_type_path_match(tp, A::type_path()),
+                None => false,
+            })
+            .collect()
     }
 
     /// Decrypt an entry (accepts either `name` or `packfile.dlcpack#name`) by

@@ -43,7 +43,6 @@ pub mod prelude {
 /// Usage: provide the game with the public `DlcKey` and hand the signed
 /// license token (for example, from your platform or the CLI pack output)
 /// to the plugin; the plugin will extract and register encryption keys from it.
-#[allow(unused)]
 pub struct DlcPlugin {
     // keep the provided key (public or private) so `build` can insert it into
     // app resources; field is private to avoid exposing internals.
@@ -51,8 +50,6 @@ pub struct DlcPlugin {
     // Signed license token provided at construction; applied during `build`
     // to extract and register the encryption key.
     signed_license: SignedLicense,
-    
-    product: Product,
 }
 
 impl DlcPlugin {
@@ -60,11 +57,10 @@ impl DlcPlugin {
     ///
     /// The plugin will extract the encryption key from the signed license
     /// during `build` and register it in the global key registry.
-    pub fn new(product: Product, dlc_key: DlcKey, signed_license: SignedLicense) -> Self {
+    pub fn new(dlc_key: DlcKey, signed_license: SignedLicense) -> Self {
         Self {
             dlc_key,
             signed_license,
-            product,
         }
     }
 }
@@ -122,6 +118,8 @@ pub trait AppExt {
     /// that may be loaded from a DLC pack. The plugin registers loaders for common asset types
     /// (Image, Scene, Mesh, Font, AudioSource, etc.) but you must register loaders for any custom
     /// asset types.
+    /// 
+    /// **Important**: As of `v2.0`, this function also calls `init_asset::<T>()` to register the asset type itself, so you do not need to call `init_asset` separately.
     ///
     /// **Suggestion**: If I missed a common asset type that should be supported out-of-the-box,
     /// please open an issue or PR to add it!
@@ -130,6 +128,7 @@ pub trait AppExt {
 
 impl AppExt for App {
     fn register_dlc_type<T: Asset>(&mut self) -> &mut Self {
+        self.init_asset::<T>();
         self.init_asset_loader::<DlcLoader<T>>();
 
         // ensure a factory entry exists so `DlcPackLoader` will include a
@@ -1369,7 +1368,7 @@ mod tests {
                 .read()
                 .unwrap()
                 .iter()
-                .any(|f| f.type_name() == TestAsset::type_path())
+                .any(|f| asset_loader::fuzzy_type_path_match(f.type_name(), TestAsset::type_path()))
         );
     }
 
@@ -1393,7 +1392,7 @@ mod tests {
             .read()
             .unwrap()
             .iter()
-            .filter(|f| f.type_name() == TestAsset2::type_path())
+            .filter(|f| asset_loader::fuzzy_type_path_match(f.type_name(), TestAsset2::type_path()))
             .count();
         assert_eq!(count, 1);
     }

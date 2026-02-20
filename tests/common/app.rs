@@ -83,7 +83,6 @@ impl TestAppBuilder {
         let signed_license_for_testapp =
             SignedLicense::from(signed_license.expose_secret().as_str());
         self.app.add_plugins(DlcPlugin::new(
-            Product::from(self.product.clone()),
             self.dlc_key.clone(),
             signed_license,
         ));
