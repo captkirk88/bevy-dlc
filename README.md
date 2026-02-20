@@ -101,7 +101,7 @@ let pack: Handle<DlcPack> = asset_server.load("expansion_1.dlcpack");
 let image: Handle<Image> = asset_server.load("expansion_1.dlcpack#sprites/player.png");
 ```
 
-*Review the [examples](examples/) for a complete example (run with `cargo run --manifest-path bevy-dlc-examples/Cargo.toml`).*
+*Review the [examples](examples/) for a complete example (run with `cargo run --example <example>`).*
 
 ### Suggestions and Contributions
 
