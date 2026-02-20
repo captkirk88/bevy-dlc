@@ -59,7 +59,7 @@ bevy-dlc pack --product my-game expansionA -o dlc -- assets/expansionA
 - `expansionA` — DLC ID (used in licenses to unlock this pack)
 - `-o dlc` — output path for the generated `.dlcpack`
 
-This creates `expansion_1.dlcpack` and prints a signed license token.
+This creates `expansionA.dlcpack` and prints a signed license token.
 
 Alternatively you can use `bevy-dlc generate --help` to review how to generate a signed license without packing, or `bevy-dlc validate --help` to verify it.
 
