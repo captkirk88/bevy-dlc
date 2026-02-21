@@ -71,7 +71,7 @@ Alternatively you can use `bevy-dlc generate --help` to review how to generate a
 You can edit the contents of a `.dlcpack` with `bevy-dlc edit`:
 
 ```bash
-bevy-dlc edit expansionA.dlcpack
+bevy-dlc edit <my_dlc>.dlcpack
 ```
 This opens an interactive REPL where you can add/remove files, and list contents.  Changes are saved back to the `.dlcpack` when you `save` and if you forget and exit, REPL will ask you.
 
