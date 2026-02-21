@@ -79,6 +79,8 @@ impl Plugin for DlcPlugin {
             }
         }
 
+        app.init_resource::<asset_loader::DlcPackRegistrarFactories>();
+
         // Insert provided key + manager so other systems/resources can access them
         app.insert_resource(self.dlc_key.clone())
             //.insert_resource(self.product.clone())

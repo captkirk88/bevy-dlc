@@ -62,6 +62,10 @@ fn show_dlc_content(
     for (entity, loaded) in query.iter() {
         match dlc_packs.get(&loaded.0) {
             Some(pack) => {
+                for entry in pack.entries() {
+                    info!("DLC Pack contains asset: {} of type {}", entry.path(), entry.type_path().unwrap_or(&"<unknown>".to_string()));
+                }
+
                 for entry in pack.find_by_type::<Image>() {
                     let img: Handle<Image> = asset_server.load(entry.path());
                     commands.spawn(Sprite::from_image(img));
@@ -97,10 +101,15 @@ fn display_loaded_text(
                 let mut ent = commands.entity(entity);
                 ent.insert((
                     Text::from(text_asset.0.clone()),
+                    TextFont {
+                        font_size: 12.0,
+                        ..default()
+                    },
+                    TextColor(Color::WHITE),
                     Node {
                         position_type: PositionType::Absolute,
-                        top: px(5),
-                        left: px(15),
+                        top: Val::Px(5.0),
+                        left: Val::Px(15.0),
                         ..default()
                     },
                 ));

@@ -58,6 +58,7 @@ bevy-dlc pack --product my-game expansionA -o dlc -- assets/expansionA
 - `assets/expansionA` — directory or file(s) to pack
 - `expansionA` — DLC ID (used in licenses to unlock this pack)
 - `-o dlc` — output path for the generated `.dlcpack`
+- `--types` — optional list of asset type paths to include in the pack index (e.g. `bevy::prelude::Image`), otherwise all assets will be indexed with their full type paths.  This can be used to normalize type paths across different versions of Bevy or your game.  The types you specify are fuzzy matched against the actual asset types in the pack, so you can just specify `assets::MyAsset` and it will match `my_game::assets::MyAsset` in the pack if that's the actual type.
 
 This creates `expansionA.dlcpack` and prints a signed license token.
 

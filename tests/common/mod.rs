@@ -7,6 +7,7 @@ pub mod app;
 
 use assert_cmd::{Command, pkg_name};
 use bevy::{asset::{AssetLoader, LoadContext, io::Reader, prelude::*}, prelude::*};
+use bevy_dlc::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -245,7 +246,7 @@ impl <A: Asset> Default for TextAssetPlugin<A> {
 
 impl <A> Plugin for TextAssetPlugin<A> where A: Asset {
     fn build(&self, app: &mut App) {
-        app.init_asset::<TextAsset>()
+        app.register_dlc_type::<TextAsset>()
             .register_asset_loader(TextAssetLoader::default());
     }
 }

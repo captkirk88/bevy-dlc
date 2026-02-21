@@ -13,9 +13,26 @@ use thiserror::Error;
 use crate::DlcId;
 
 /// Fuzzy match for type paths, normalizing by trimming leading "::" to handle absolute vs relative paths.
+/// Also handles crate name differences by allowing suffix matches.
 pub(crate) fn fuzzy_type_path_match<'a>(stored: &'a str, expected: &'a str) -> bool {
-    let normalize = |s: &'a str| s.trim_start_matches("::");
-    normalize(stored) == normalize(expected)
+    let s = stored.trim_start_matches("::");
+    let e = expected.trim_start_matches("::");
+
+    if s == e {
+        return true;
+    }
+
+    // Allow suffix matching to handle differences in crate names (e.g. "my_crate::MyType" vs "MyType")
+    // or when one path is more specific than the other.
+    if e.ends_with(s) && e.as_bytes().get(e.len() - s.len() - 1) == Some(&b':') {
+        return true;
+    }
+
+    if s.ends_with(e) && s.as_bytes().get(s.len() - e.len() - 1) == Some(&b':') {
+        return true;
+    }
+
+    false
 }
 
 /// Attempts to downcast an `ErasedLoadedAsset` to `A` and, if successful,
@@ -29,6 +46,20 @@ pub trait ErasedSubAssetRegistrar: Send + Sync + 'static {
         erased: ErasedLoadedAsset,
         load_context: &mut LoadContext<'_>,
     ) -> Result<(), ErasedLoadedAsset>;
+
+    /// Return the `TypePath` of the asset type this registrar handles.
+    fn asset_type_path(&self) -> &'static str;
+
+    /// Attempt to load the asset directly using its static type, bypassing
+    /// extension dispatch. This is used when a `type_path` is provided by
+    /// the container.
+    fn load_direct<'a>(
+        &'a self,
+        label: String,
+        fake_path: String,
+        reader: &'a mut dyn Reader,
+        load_context: &'a mut LoadContext<'_>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), DlcLoaderError>> + Send + 'a>>;
 }
 
 /// Concrete implementation for asset type `A`.
@@ -54,6 +85,36 @@ impl<A: Asset> ErasedSubAssetRegistrar for TypedSubAssetRegistrar<A> {
             }
             Err(back) => Err(back),
         }
+    }
+
+    fn asset_type_path(&self) -> &'static str {
+        A::type_path()
+    }
+
+    fn load_direct<'a>(
+        &'a self,
+        label: String,
+        fake_path: String,
+        reader: &'a mut dyn Reader,
+        load_context: &'a mut LoadContext<'_>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), DlcLoaderError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            match load_context
+                .loader()
+                .with_static_type()
+                .immediate()
+                .with_reader(reader)
+                .load::<A>(fake_path)
+                .await
+            {
+                Ok(loaded) => {
+                    load_context.add_loaded_labeled_asset(label, loaded);
+                    Ok(())
+                }
+                Err(e) => Err(DlcLoaderError::DecryptionFailed(e.to_string())),
+            }
+        })
     }
 }
 
@@ -222,6 +283,7 @@ impl DlcPackEntry {
         self.type_path.as_ref()
     }
 }
+
 
 /// Represents a `.dlcpack` bundle (multiple encrypted entries).
 /// The loader retains the encrypted container bytes so entries can be
@@ -504,6 +566,14 @@ impl AssetLoader for DlcPackLoader {
 
         let mut unregistered_labels: Vec<String> = Vec::new();
 
+        // Collect all available registrars once per pack load to avoid heavy
+        // overhead from shared resource locking/matching inside the loop.
+        let dynamic_regs = self
+            .factories
+            .as_ref()
+            .map(|f| crate::asset_loader::collect_pack_registrars(Some(f)));
+        let regs = dynamic_regs.unwrap_or_else(|| collect_pack_registrars(None));
+
         for (path, enc) in manifest_entries.into_iter() {
             let entry_label = path.replace('\\', "/");
 
@@ -515,7 +585,7 @@ impl AssetLoader for DlcPackLoader {
 
             // Try to load this entry as a typed sub-asset when plaintext is available.
             if let Some(ref items) = decrypted_items {
-                if let Some((_, ext, _type_path, plaintext)) =
+                if let Some((_, ext, type_path, plaintext)) =
                     items.iter().find(|(p, _, _, _)| p == &path)
                 {
                     // Build a fake path with the correct extension so
@@ -529,77 +599,82 @@ impl AssetLoader for DlcPackLoader {
 
                     let mut vec_reader = bevy::asset::io::VecReader::new(plaintext.clone());
 
-                    // Use extension dispatch — Bevy picks the right loader (e.g. ImageLoader
-                    // for .png). Returns an ErasedLoadedAsset (type-erased). We then try each
-                    // registered TypedSubAssetRegistrar in turn until one successfully downcasts
-                    // and registers the asset.
-                    let result = load_context
-                        .loader()
-                        .immediate()
-                        .with_reader(&mut vec_reader)
-                        .with_unknown_type()
-                        .load(fake_path)
-                        .await;
-
-                    match result {
-                        Ok(erased) => {
-                            let mut remaining = Some(erased);
-
-                            // Prefer dynamic registrars from the shared factories resource
-                            // when available; otherwise use the static snapshot held by
-                            // the loader instance.
-                            let dynamic_regs = self
-                                .factories
-                                .as_ref()
-                                .map(|f| crate::asset_loader::collect_pack_registrars(Some(f)));
-                            if let Some(regs) = dynamic_regs.as_ref() {
-                                for registrar in regs.iter() {
-                                    match registrar.try_register(
-                                        entry_label.clone(),
-                                        remaining.take().unwrap(),
-                                        load_context,
-                                    ) {
-                                        Ok(()) => {
-                                            registered_as_labeled = true;
-                                            remaining = None;
-                                            break;
-                                        }
-                                        Err(back) => {
-                                            remaining = Some(back);
-                                        }
-                                    }
+                    // 1. Guided load: if `type_path` is present in the container metadata,
+                    // attempt to find a matching registrar and load directly using
+                    // that type. This bypasses extension-based dispatch entirely.
+                    if let Some(tp) = type_path {
+                        if let Some(registrar) =
+                            regs.iter().find(|r| fuzzy_type_path_match(r.asset_type_path(), tp))
+                        {
+                            match registrar
+                                .load_direct(
+                                    entry_label.clone(),
+                                    fake_path.clone(),
+                                    &mut vec_reader,
+                                    load_context,
+                                )
+                                .await
+                            {
+                                Ok(()) => {
+                                    registered_as_labeled = true;
                                 }
-                            } else {
-                                for registrar in &self.registrars {
-                                    match registrar.try_register(
-                                        entry_label.clone(),
-                                        remaining.take().unwrap(),
-                                        load_context,
-                                    ) {
-                                        Ok(()) => {
-                                            registered_as_labeled = true;
-                                            remaining = None;
-                                            break;
-                                        }
-                                        Err(back) => {
-                                            remaining = Some(back);
-                                        }
-                                    }
+                                Err(e) => {
+                                    // if static load failed, we still have a chance with
+                                    // extension-based dispatch below (rare but possible).
+                                    debug!(
+                                        "DlcPackLoader: static load for type '{}' failed: {}; falling back to extension dispatch",
+                                        tp, e
+                                    );
                                 }
-                            }
-
-                            if let Some(_) = remaining {
-                                warn!(
-                                    "DlcPackLoader: entry '{}' present in container but no registered asset type matched (extension='{}'); the asset will NOT be available as 'pack#{}'. Register a loader with `app.register_dlc_type::<T>()` or supply `type_path` when packing.",
-                                    entry_label, ext, entry_label
-                                );
                             }
                         }
-                        Err(e) => {
-                            warn!(
-                                "DlcPackLoader: failed to load entry '{}': {}",
-                                entry_label, e
-                            );
+                    }
+
+                    // 2. Extension dispatch: Bevy picks the right loader based on `fake_path`
+                    // extension. We then try to match the resulting erased asset against
+                    // all known registrars to register it as a labeled sub-asset.
+                    if !registered_as_labeled {
+                        let mut vec_reader = bevy::asset::io::VecReader::new(plaintext.clone());
+                        let result = load_context
+                            .loader()
+                            .immediate()
+                            .with_reader(&mut vec_reader)
+                            .with_unknown_type()
+                            .load(fake_path.clone())
+                            .await;
+
+                        match result {
+                            Ok(erased) => {
+                                let mut remaining = Some(erased);
+
+                                for registrar in regs.iter() {
+                                    let label = entry_label.clone();
+                                    let to_register = remaining.take().unwrap();
+                                    match registrar.try_register(label, to_register, load_context) {
+                                        Ok(()) => {
+                                            registered_as_labeled = true;
+                                            remaining = None;
+                                            break;
+                                        }
+                                        Err(back) => {
+                                            remaining = Some(back);
+                                        }
+                                    }
+                                }
+
+                                if let Some(_) = remaining {
+                                    warn!(
+                                        "DlcPackLoader: entry '{}' (fake_path='{}') present in container but no registered asset type matched (extension='{}'); the asset will NOT be available as 'pack#{}'. Register a loader with `app.register_dlc_type::<T>()` or supply `type_path` when packing.",
+                                        entry_label, fake_path, ext, entry_label
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "DlcPackLoader: failed to load entry '{}' (fake_path='{}', extension='{}'): {}",
+                                    entry_label, fake_path, ext, e
+                                );
+                            }
                         }
                     }
                 }
@@ -889,8 +964,8 @@ mod tests {
         // Verify that the registry shows paths exist (retry briefly to avoid rare parallel-test races caused by tests/common/mod.rs)
         let mut paths = crate::encrypt_key_registry::asset_paths_for(dlc_id_str);
         let mut tries = 0;
-        while paths.is_empty() && tries < 10 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
+        while paths.is_empty() && tries < 100 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
             paths = crate::encrypt_key_registry::asset_paths_for(dlc_id_str);
             tries += 1;
         }
