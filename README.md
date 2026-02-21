@@ -25,7 +25,7 @@ Works with Bevy's asset pipeline.
 Add to your `Cargo.toml`:
 
 ```toml
-bevy-dlc = "1.1"
+bevy-dlc = "1.2"
 ```
 
 To use the CLI tool:
@@ -67,10 +67,18 @@ Alternatively you can use `bevy-dlc generate --help` to review how to generate a
 > [!NOTE]
 > `bevy-dlc help <command>` for detailed usage of each CLI command.
 
+### Edit a pack
+You can edit the contents of a `.dlcpack` with `bevy-dlc edit`:
+
+```bash
+bevy-dlc edit expansionA.dlcpack
+```
+This opens an interactive REPL where you can add/remove files, and list contents.  Changes are saved back to the `.dlcpack` when you `save` and if you forget and exit, REPL will ask you.
+
 ### Load in your app
 
 > [!NOTE]
-> As of `v2.0`, the `DlcPlugin` constructor no longer takes a `Product` argument.  Product binding is now handled at the pack and signed license level.  
+> As of `v1.2`, the `DlcPlugin` constructor no longer takes a `Product` argument.  Product binding is now handled at the pack and signed license level.  
 
 ```rust
 // <aes-key> can be generated using `bevy-dlc generate --aes-key` or any secure random 32-byte key.

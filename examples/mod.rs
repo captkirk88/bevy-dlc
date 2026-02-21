@@ -3,6 +3,15 @@ use bevy::{asset::{AssetLoader, LoadContext, io::Reader}, prelude::*};
 #[derive(Asset, Reflect, serde::Serialize, serde::Deserialize)]
 pub struct TextAsset(pub String);
 
+#[derive(serde::Serialize, serde::Deserialize, Reflect, Clone, Debug)]
+pub struct Person {
+    pub age: u32,
+    pub city: String,
+}
+
+#[derive(Asset, Reflect, serde::Serialize, serde::Deserialize)]
+pub struct JsonAsset(pub std::collections::HashMap<String, Person>);
+
 #[derive(Default, Reflect)]
 pub struct TextAssetLoader;
 

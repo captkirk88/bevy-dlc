@@ -24,7 +24,7 @@ pub mod prelude {
     pub use super::AppExt;
     pub use crate::{
         DlcError, DlcId, DlcKey, DlcLoader, DlcPack, DlcPackLoader, DlcPlugin, Product,
-        SignedLicense, VerifiedLicense, is_dlc_loaded,
+        SignedLicense, VerifiedLicense,EncryptedAsset, is_dlc_loaded,
     };
 }
 

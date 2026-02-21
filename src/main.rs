@@ -20,6 +20,8 @@ use secure_gate::ExposeSecret;
 
 const FORBIDDEN_EXTENSIONS: [&str; 3] = ["dlcpack", "pubkey", "slicense"];
 
+mod repl;
+
 #[derive(Parser)]
 #[command(
     author,
@@ -156,6 +158,25 @@ enum Commands {
             help = "Print a random 32-byte AES key (base64url) for use with secure crate"
         )]
         aes_key: bool,
+    },
+
+    #[command(
+        about = "Interactive REPL to edit an existing .dlcpack metadata",
+        long_about = "Modify the manifest of an existing .dlcpack (change types, remove entries) without re-encrypting the content. If a key/license is provided, you can also add new files."
+    )]
+    Edit {
+        /// path to a .dlcpack file
+        #[arg(value_name = "DLC")]
+        dlc: PathBuf,
+        /// Optional SignedLicense token to unlock re-encryption (for 'add' command)
+        #[arg(short, long = "signed-license", value_name = "SIGNED_LICENSE")]
+        signed_license: Option<String>,
+        /// Optional public key (base64url or file) used to verify the signed license
+        #[arg(long = "pubkey", value_name = "PUBKEY")]
+        pubkey: Option<String>,
+        /// Optional product name (used to find .slicense/.pubkey defaults)
+        #[arg(short, long, value_name = "PRODUCT")]
+        product: Option<String>,
     },
 }
 
@@ -1085,6 +1106,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pubkey_path.display()
             );
             return Ok(());
+        }
+        Commands::Edit {
+            dlc,
+            signed_license,
+            pubkey,
+            product,
+        } => {
+            // read container bytes to get embedded product/dlc id
+            let bytes = std::fs::read(&dlc)?;
+            let (emb_prod, _emb_did, _v, _ents) = parse_encrypted_pack(&bytes)?;
+            
+            // resolve pubkey and signed license with fallback to embedded product
+            let (_, sup_lic) = resolve_keys(
+                pubkey,
+                signed_license,
+                product,
+                Some(emb_prod),
+            );
+
+            // extract the encryption key from the license if present
+            let encrypt_key = if let Some(lic) = sup_lic.as_deref() {
+                extract_encrypt_key_from_token(lic).ok().flatten()
+            } else {
+                None
+            }.map(|k| EncryptionKey::from(k));
+
+            repl::run_edit_repl(dlc, encrypt_key)?;
         }
     }
 

@@ -10,7 +10,7 @@ use bevy_dlc::prelude::*;
 
 #[path = "../mod.rs"]
 mod examples;
-use examples::TextAsset;
+use examples::{JsonAsset, TextAsset};
 
 // You must generate `example.slicense` and `example.pubkey` by `bevy-dlc generate example`
 
@@ -34,10 +34,12 @@ fn main() -> AppExit {
             dlc_key,
             signedlicense,
         ))
-        .add_plugins(JsonAssetPlugin::<TextAsset>::new(&["json"]))
+        .add_plugins(JsonAssetPlugin::<JsonAsset>::new(&["json"]))
         .register_dlc_type::<TextAsset>()
+        .register_dlc_type::<JsonAsset>()
         .add_systems(Startup, startup)
         .add_systems(Update, show_dlc_content.run_if(is_dlc_loaded("dlcA")))
+        .add_systems(Update, display_loaded_text)
         .run()
 }
 
@@ -47,6 +49,9 @@ struct LoadedPack(Handle<DlcPack>);
 
 #[derive(Component)]
 struct LoadedText(Handle<TextAsset>);
+
+#[derive(Component)]
+struct LoadedJson(Handle<JsonAsset>);
 
 fn startup(asset_server: Res<AssetServer>, mut commands: Commands) {
     let handle = asset_server.load::<DlcPack>("dlcA.dlcpack");
@@ -75,6 +80,11 @@ fn show_dlc_content(
                     let text_asset: Handle<TextAsset> = asset_server.load(entry.path());
                     commands.spawn(LoadedText(text_asset));
                 }
+
+                for entry in pack.find_by_type::<JsonAsset>() {
+                    let json_asset: Handle<JsonAsset> = asset_server.load(entry.path());
+                    commands.spawn(LoadedJson(json_asset));
+                }
                 // prevent re-running/spawning again
                 commands.entity(entity).remove::<LoadedPack>();
             }
@@ -88,35 +98,40 @@ fn show_dlc_content(
 
 fn display_loaded_text(
     text_assets: Res<Assets<TextAsset>>,
+    json_assets: Res<Assets<JsonAsset>>,
     mut commands: Commands,
-    query: Query<(Entity, &LoadedText)>,
+    query: Query<(Entity, Option<&LoadedText>, Option<&LoadedJson>)>,
 ) {
-    for (entity, loaded) in query.iter() {
-        match text_assets.get(&loaded.0) {
-            Some(text_asset) => {
+    for (entity, text_loaded, json_loaded) in query.iter() {
+        if let Some(loaded) = text_loaded {
+            if let Some(text_asset) = text_assets.get(&loaded.0) {
                 info!("Loaded TextAsset from DLC: {}", text_asset.0);
-                // prevent re-printing
                 commands.entity(entity).remove::<LoadedText>();
+                // spawn text...
+            }
+        }
+
+        if let Some(loaded) = json_loaded {
+            if let Some(json_asset) = json_assets.get(&loaded.0) {
+                let count = json_asset.0.len();
+                info!("Loaded JsonAsset from DLC with {} entries", count);
+                commands.entity(entity).remove::<LoadedJson>();
 
                 let mut ent = commands.entity(entity);
                 ent.insert((
-                    Text::from(text_asset.0.clone()),
+                    Text::from(format!("JSON: {} people found", count)),
                     TextFont {
                         font_size: 12.0,
                         ..default()
                     },
-                    TextColor(Color::WHITE),
+                    TextColor(Color::LinearRgba(LinearRgba::GREEN)),
                     Node {
                         position_type: PositionType::Absolute,
-                        top: Val::Px(5.0),
+                        top: Val::Px(25.0),
                         left: Val::Px(15.0),
                         ..default()
                     },
                 ));
-            }
-            None => {
-                debug!("TextAsset not ready yet for handle: {:?}", loaded.0);
-                return;
             }
         }
     }

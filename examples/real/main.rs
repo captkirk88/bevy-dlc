@@ -108,7 +108,7 @@ fn display_loaded_text(
                         font_size: 12.0,
                         ..default()
                     },
-                    TextColor(Color::WHITE),
+                    TextColor(Color::LinearRgba(LinearRgba::BLUE)),
                     Node {
                         position_type: PositionType::Absolute,
                         top: Val::Px(5.0),
