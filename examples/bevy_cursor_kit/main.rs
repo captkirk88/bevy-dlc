@@ -66,7 +66,6 @@ struct Cursors(Handle<StaticCursor>);
 #[derive(Component)]
 struct DlcAText(Handle<TextAsset>);
 
-#[allow(unused)]
 fn startup(asset_server: Res<AssetServer>, mut packs: ResMut<DlcPacks>, mut commands: Commands) {
     packs.0.push(asset_server.load::<DlcPack>("dlcA.dlcpack"));
     commands.spawn(Camera2d);
