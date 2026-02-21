@@ -12,6 +12,53 @@ use thiserror::Error;
 
 use crate::DlcId;
 
+/// Event fired when a DLC pack is successfully loaded.
+#[derive(Event, Clone)]
+pub struct DlcPackLoaded {
+    dlc_id: DlcId,
+    pack: DlcPack,
+}
+
+impl DlcPackLoaded {
+    pub(crate) fn new(dlc_id: DlcId, pack: DlcPack) -> Self {
+        DlcPackLoaded { dlc_id, pack }
+    }
+
+    /// Return the DLC identifier for the loaded pack.
+    pub fn id(&self) -> &DlcId {
+        &self.dlc_id
+    }
+
+    /// Return a reference to the loaded `DlcPack`. The pack contains metadata about the DLC and provides methods to decrypt and load individual entries.
+    pub fn pack(&self) -> &DlcPack {
+        &self.pack
+    }
+}
+
+#[derive(Event, Debug, Clone)]
+pub struct DlcPackEntryLoaded {
+    dlc_id: DlcId,
+    entry: DlcPackEntry,
+}
+
+#[allow(unused)]
+impl DlcPackEntryLoaded {
+    pub(crate) fn new(dlc_id: DlcId, entry: &DlcPackEntry) -> Self {
+        DlcPackEntryLoaded { dlc_id, entry: entry.clone() }
+    }
+
+    /// Return the DLC identifier for the loaded entry.
+    pub fn id(&self) -> &DlcId {
+        &self.dlc_id
+    }
+
+    /// Return the registered path for the loaded entry (e.g. "assets/image.png").
+    pub fn entry(&self) -> &DlcPackEntry {
+        &self.entry
+    }
+}
+
+
 /// Fuzzy match for type paths, normalizing by trimming leading "::" to handle absolute vs relative paths.
 /// Also handles crate name differences by allowing suffix matches.
 pub(crate) fn fuzzy_type_path_match<'a>(stored: &'a str, expected: &'a str) -> bool {
@@ -126,7 +173,7 @@ pub struct EncryptedAsset {
     /// Optional serialized type identifier (e.g. `bevy::image::Image`)
     pub type_path: Option<String>,
     pub nonce: [u8; 12],
-    pub ciphertext: Vec<u8>,
+    pub ciphertext: std::sync::Arc<[u8]>,
 }
 
 /// Parse the binary encrypted-asset container `.dlcpack`.
@@ -208,7 +255,7 @@ pub fn parse_encrypted(bytes: &[u8]) -> Result<EncryptedAsset, io::Error> {
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&bytes[offset..offset + 12]);
     offset += 12;
-    let ciphertext = bytes[offset..].to_vec();
+    let ciphertext = bytes[offset..].into();
 
     Ok(EncryptedAsset {
         dlc_id,
@@ -248,10 +295,8 @@ where
 pub struct DlcPackEntry {
     /// Relative path inside the pack (as authored when packing)
     path: String,
-    /// Optional original extension stored by the pack producer
-    original_extension: String,
-    /// Optional serialized TypePath
-    type_path: Option<String>,
+    /// Encrypted asset metadata and ciphertext
+    encrypted: EncryptedAsset,
 }
 
 impl DlcPackEntry {
@@ -263,12 +308,65 @@ impl DlcPackEntry {
         asset_server.load_untyped(&self.path)
     }
 
-    /// Decrypt and return the plaintext bytes for this entry using the
-    /// `DlcPack` container that owns it. This consults the global encrypt-key
-    /// registry and will return `DlcLoaderError::DlcLocked` when the encrypt
-    /// key is not present.
-    pub fn decrypt_bytes(&self, pack: &DlcPack) -> Result<Vec<u8>, DlcLoaderError> {
-        pack.decrypt_entry_bytes(&self.path)
+    /// Decrypt and return the plaintext bytes for this entry.
+    /// This consults the global encrypt-key registry and will return
+    /// `DlcLoaderError::DlcLocked` when the encrypt key is not present.
+    pub fn decrypt_bytes(&self) -> Result<Vec<u8>, DlcLoaderError> {
+        let encrypt_key = crate::encrypt_key_registry::get(&self.encrypted.dlc_id)
+            .ok_or_else(|| DlcLoaderError::DlcLocked(self.encrypted.dlc_id.clone()))?;
+
+        let plaintext = crate::decrypt_with_key(
+            &encrypt_key,
+            &*self.encrypted.ciphertext,
+            &self.encrypted.nonce,
+        )
+        .map_err(|e| {
+            DlcLoaderError::DecryptionFailed(format!("entry='{}' {}", self.path, e.to_string()))
+        })?;
+
+        // If the plaintext is a GZIP archive (standard for v2/v3 packs),
+        // we must extract the specific file matching this entry's path.
+        if plaintext.len() > 2 && plaintext[0] == 0x1f && plaintext[1] == 0x8b {
+            use flate2::read::GzDecoder;
+            use std::io::Read;
+            use tar::Archive;
+
+            let mut archive = Archive::new(GzDecoder::new(std::io::Cursor::new(plaintext)));
+            let subpath = match self.path.rsplit_once('#') {
+                Some((_, suffix)) => suffix,
+                None => &self.path,
+            }
+            .replace("\\", "/");
+
+            for entry in archive.entries().map_err(|e| {
+                DlcLoaderError::DecryptionFailed(format!("entry='{}' archive read failed: {}", self.path, e))
+            })? {
+                let mut file = entry.map_err(|e| {
+                    DlcLoaderError::DecryptionFailed(format!(
+                        "entry='{}' archive entry read failed: {}",
+                        self.path, e
+                    ))
+                })?;
+                let path = file.path().map_err(|e| {
+                    DlcLoaderError::DecryptionFailed(format!("entry='{}' archive path error: {}", self.path, e))
+                })?;
+                let path_str = path.to_string_lossy().replace("\\", "/");
+                if path_str == subpath {
+                    let mut buf = Vec::new();
+                    file.read_to_end(&mut buf).map_err(|e| {
+                        DlcLoaderError::DecryptionFailed(format!("entry='{}' read file failed: {}", self.path, e))
+                    })?;
+                    return Ok(buf);
+                }
+            }
+            
+            return Err(DlcLoaderError::DecryptionFailed(format!(
+                "entry='{}' not found in archive",
+                self.path
+            )));
+        }
+
+        Ok(plaintext)
     }
 
     pub fn path(&self) -> AssetPath<'_> {
@@ -276,26 +374,20 @@ impl DlcPackEntry {
     }
 
     pub fn original_extension(&self) -> &String {
-        &self.original_extension
+        &self.encrypted.original_extension
     }
 
     pub fn type_path(&self) -> Option<&String> {
-        self.type_path.as_ref()
+        self.encrypted.type_path.as_ref()
     }
 }
 
 
 /// Represents a `.dlcpack` bundle (multiple encrypted entries).
-/// The loader retains the encrypted container bytes so entries can be
-/// decrypted on demand (e.g. after unlock).
 #[derive(Asset, TypePath, Clone, Debug)]
 pub struct DlcPack {
     dlc_id: DlcId,
     entries: Vec<DlcPackEntry>,
-    /// Original `.dlcpack` container bytes (still encrypted). Kept so
-    /// callers can decrypt individual entries on-demand without the pack
-    /// loader doing eager decryption.
-    container_bytes: Vec<u8>,
 }
 
 impl DlcPack {
@@ -307,11 +399,6 @@ impl DlcPack {
     /// Return a slice of contained entries.
     pub fn entries(&self) -> &[DlcPackEntry] {
         &self.entries
-    }
-
-    /// Return the raw `.dlcpack` container bytes retained by the asset.
-    pub fn container_bytes(&self) -> &[u8] {
-        &self.container_bytes
     }
 
     /// Find an entry by its registered path
@@ -332,33 +419,19 @@ impl DlcPack {
             .collect()
     }
 
-    /// Decrypt an entry (accepts either `name` or `packfile.dlcpack#name`) by
-    /// using the retained `container_bytes`. Returns plaintext or `DlcLocked`.
+    /// Decrypt an entry (accepts either `name` or `packfile.dlcpack#name`).
+    /// Returns plaintext or `DlcLocked`.
     pub fn decrypt_entry_bytes(
         &self,
         entry_path: &str,
     ) -> Result<Vec<u8>, crate::asset_loader::DlcLoaderError> {
-        // Decrypt the pack once (checks global encrypt-key registry) and
-        // extract the requested entry.
-        let (_dlc_id, items) =
-            crate::asset_loader::decrypt_pack_entries(&self.container_bytes).map_err(|e| e)?;
-
         // accept either "test.png" or "packfile.dlcpack#test.png" by
-        // splitting on '#' and using the suffix when present.
-        let subpath = match entry_path.rsplit_once('#') {
-            Some((_, suffix)) => suffix,
-            None => entry_path,
-        };
+        // checking both relative and absolute paths
+        let entry = self.find_entry(entry_path).ok_or_else(|| {
+            DlcLoaderError::DecryptionFailed(format!("entry not found: {}", entry_path))
+        })?;
 
-        for (p, _ext, _tp, plaintext) in items.into_iter() {
-            if p == subpath {
-                return Ok(plaintext);
-            }
-        }
-        Err(crate::asset_loader::DlcLoaderError::InvalidFormat(format!(
-            "entry not found in container: {}",
-            entry_path
-        )))
+        entry.decrypt_bytes()
     }
 
     pub fn load<A: Asset>(
@@ -528,18 +601,18 @@ impl AssetLoader for DlcPackLoader {
 
         // Check for DLC ID conflicts: reject if a DIFFERENT pack file is being loaded for the same DLC ID.
         // Allow the same pack file to be loaded multiple times (e.g., when accessing labeled sub-assets).
-        let existing_paths = crate::encrypt_key_registry::asset_paths_for(&dlc_id);
-        if !existing_paths.is_empty() && existing_paths[0] != path_string {
+        let existing_path = crate::encrypt_key_registry::asset_path_for(&dlc_id);
+        if !existing_path.is_empty() && existing_path != path_string {
             return Err(DlcLoaderError::DlcIdConflict(
                 dlc_id.clone(),
-                existing_paths[0].clone(),
+                existing_path.clone(),
                 path_string.clone(),
             ));
         }
 
         // Register this asset path for the dlc id so it can be reloaded on unlock.
         // If the path already exists for this DLC ID, it's idempotent (same pack file).
-        if !crate::encrypt_key_registry::path_exists_for(&dlc_id, &path_string) {
+        if !crate::encrypt_key_registry::has(&dlc_id, &path_string) {
             crate::encrypt_key_registry::register_asset_path(&dlc_id, &path_string);
         }
 
@@ -689,8 +762,7 @@ impl AssetLoader for DlcPackLoader {
 
             out_entries.push(DlcPackEntry {
                 path: registered_path,
-                original_extension: enc.original_extension,
-                type_path: enc.type_path,
+                encrypted: enc,
             });
         }
 
@@ -714,7 +786,6 @@ impl AssetLoader for DlcPackLoader {
         Ok(DlcPack {
             dlc_id: DlcId::from(dlc_id),
             entries: out_entries,
-            container_bytes: bytes,
         })
     }
 }
@@ -876,13 +947,17 @@ mod tests {
     fn dlcpack_accessors_work_and_fields_read() {
         let entry = DlcPackEntry {
             path: "a.txt".to_string(),
-            original_extension: "txt".to_string(),
-            type_path: None,
+            encrypted: EncryptedAsset {
+                dlc_id: "example_dlc".to_string(),
+                original_extension: "txt".to_string(),
+                type_path: None,
+                nonce: [0u8; 12],
+                ciphertext: vec![].into(),
+            },
         };
         let pack = DlcPack {
             dlc_id: DlcId::from("example_dlc"),
             entries: vec![entry.clone()],
-            container_bytes: Vec::new(),
         };
 
         // exercise getters (reads `dlc_id` + `entries` fields)
@@ -891,9 +966,9 @@ mod tests {
 
         // inspect an entry (reads `path`, `original_extension`)
         let found = pack.find_entry("a.txt").expect("entry present");
-        assert_eq!(found.path, "a.txt");
-        assert_eq!(found.original_extension, "txt");
-        assert!(found.type_path.is_none());
+        assert_eq!(found.path().path(), "a.txt");
+        assert_eq!(found.original_extension(), "txt");
+        assert!(found.type_path().is_none());
     }
 
     #[test]
@@ -962,11 +1037,11 @@ mod tests {
         crate::encrypt_key_registry::register_asset_path(dlc_id_str, pack_path_1);
 
         // Verify that the registry shows paths exist (retry briefly to avoid rare parallel-test races caused by tests/common/mod.rs)
-        let mut paths = crate::encrypt_key_registry::asset_paths_for(dlc_id_str);
+        let mut paths = crate::encrypt_key_registry::asset_path_for(dlc_id_str);
         let mut tries = 0;
         while paths.is_empty() && tries < 100 {
             std::thread::sleep(std::time::Duration::from_millis(5));
-            paths = crate::encrypt_key_registry::asset_paths_for(dlc_id_str);
+            paths = crate::encrypt_key_registry::asset_path_for(dlc_id_str);
             tries += 1;
         }
         assert!(!paths.is_empty(), "paths should exist after registering");

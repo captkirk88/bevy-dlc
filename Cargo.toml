@@ -1,6 +1,6 @@
 [package]
 name = "bevy-dlc"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2024"
 rust-version = "1.93"
 authors = ["Kirk <github.com/captkirk88>"]
@@ -44,7 +44,7 @@ tempfile = "3.6"
 secure = { version = "0.3" }
 serial_test = "3"
 bevy_common_assets = { version = "0.15.0", features = ["json"] }
-
+bevy_cursor_kit = { version = "0.8.0", features = ["serde"] }
 
 [profile.release]
 opt-level = "z"

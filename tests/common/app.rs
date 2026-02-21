@@ -1,4 +1,6 @@
-use bevy::{app::Plugins, prelude::*};
+use std::time::Duration;
+
+use bevy::{app::{Plugins, ScheduleRunnerPlugin}, prelude::*};
 use secure_gate::ExposeSecret;
 use tempfile::TempDir;
 
@@ -33,7 +35,7 @@ impl TestAppBuilder {
     }
 
     pub fn with_default_plugins(mut self) -> Self {
-        self.app.add_plugins(MinimalPlugins);
+        self.app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / 60.0))));
         self.app.add_plugins(bevy::window::WindowPlugin {
             primary_window: None,
             ..default()

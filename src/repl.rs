@@ -183,7 +183,7 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                                 original_extension: ext,
                                 type_path: type_override.cloned(),
                                 nonce: [0u8; 12],
-                                ciphertext: Vec::new(),
+                                ciphertext: vec![].into(),
                             }));
                             
                             println!("Added local file to staging: {} -> {}", f.color(AnsiColors::Cyan), inner_path.color(AnsiColors::Green));
@@ -232,7 +232,7 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                                     use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead, Nonce};
                                     use secure_gate::ExposeSecret;
 
-                                    let cipher = Aes256Gcm::new_from_slice(ek.expose_secret()).map_err(|_| "Invalid key")?;
+                                    let cipher = ek.with_secret(|s| Aes256Gcm::new_from_slice(s)).map_err(|_| "Invalid key")?;
                                     let mut found = false;
                                     
                                     if let Some((_, first)) = entries.first() {
@@ -299,6 +299,7 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
     }
 }
 
+/// Save function that attempts to optimize for the case where no files were added/removed, since we can just update the manifest and headers without touching the archive content. If files were added, we have to re-pack the archive which requires the encryption key.
 fn save_pack_optimized(
     path: &Path,
     bytes: &[u8],
@@ -318,11 +319,11 @@ fn save_pack_optimized(
 
     // If no files were ADDED, we can just update the manifest and headers without re-encrypting the archive.
     if added_files.is_empty() {
-        return legacy_save_pack(path, bytes, version, product, dlc_id, entries);
+        return update_manifest(path, bytes, version, product, dlc_id, entries);
     }
 
     // Re-packing requires the key
-    let ek = encrypt_key.ok_or("Re-packing with new files requires an encryption key (--signed-license or --aes-key)")?;
+    let ek = encrypt_key.ok_or("Re-packing with new files requires an signed license (--signed-license)")?;
     
     // 1. Recover old archive content
     let (_old_prod, _old_did, _old_v, old_entries) = parse_encrypted_pack(bytes)?;
@@ -333,7 +334,7 @@ fn save_pack_optimized(
         
         // 1a. Extract and add existing files from original archive
         if let Some((_, first)) = old_entries.first() {
-            let cipher = Aes256Gcm::new_from_slice(ek.expose_secret()).map_err(|_| "Invalid key")?;
+            let cipher = ek.with_secret(|s| Aes256Gcm::new_from_slice(s)).map_err(|_| "Invalid key")?;
             let nonce = Nonce::from_slice(&first.nonce);
             let pt = cipher.decrypt(nonce, first.ciphertext.as_ref()).map_err(|_| "Decryption failed (key may be incorrect for this pack)")?;
             
@@ -372,7 +373,7 @@ fn save_pack_optimized(
         n.copy_from_slice(&kb[0..12]);
         n
     });
-    let cipher = Aes256Gcm::new_from_slice(ek.expose_secret()).map_err(|_| "Cipher error")?;
+    let cipher = ek.with_secret(|s| Aes256Gcm::new_from_slice(s)).map_err(|_| "Cipher error")?;
     let ciphertext = cipher.encrypt(Nonce::from_slice(&nonce_bytes), compressed.as_ref()).map_err(|_| "Encryption error")?;
 
     // 3. Assemble final container
@@ -418,7 +419,8 @@ fn save_pack_optimized(
     Ok(())
 }
 
-fn legacy_save_pack(
+/// Update the manifest and headers of the pack without re-encrypting the archive (only works if no files were added/removed, just metadata changes)
+fn update_manifest(
     path: &Path,
     bytes: &[u8],
     version: usize,

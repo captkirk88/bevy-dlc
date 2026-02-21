@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
+use std::os::windows::fs::MetadataExt;
 use std::path::PathBuf;
 
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
@@ -186,13 +187,35 @@ fn collect_files_recursive(
     dir: &std::path::Path,
     out: &mut Vec<std::path::PathBuf>,
     ext_filter: Option<&str>,
+    max_depth: usize,
 ) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
         if path.is_dir() {
-            collect_files_recursive(&path, out, ext_filter)?;
+            // Skip hidden directories and common build/dependency artifacts to avoid searching too much
+            if name_str.starts_with('.') {
+                continue;
+            }
+            if max_depth > 0 {
+                collect_files_recursive(&path, out, ext_filter, max_depth - 1)?;
+            }
         } else if path.is_file() {
+            #[cfg(windows)]
+            if let Ok(meta) = path.metadata() {
+                if meta.file_attributes() & 0x00000002 != 0 {
+                    // Skip hidden files
+                    continue;
+                }
+            }
+
+            // Skip hidden files
+            if name_str.starts_with('.') {
+                continue;
+            }
             match ext_filter {
                 Some(filter) => {
                     if path
@@ -406,7 +429,7 @@ fn resolve_pubkey_and_license(
         }
         // recurse and look for matching filename
         let mut matches = Vec::new();
-        if collect_files_recursive(std::path::Path::new("."), &mut matches, Some(ext)).is_ok() {
+        if collect_files_recursive(std::path::Path::new("."), &mut matches, Some(ext), 3).is_ok() {
             for p in matches {
                 if let Some(fname) = p.file_name().and_then(|s| s.to_str()) {
                     if fname.eq_ignore_ascii_case(&file_name) {
@@ -559,7 +582,7 @@ fn resolve_keys(
                 .map(|s| s.trim().to_string());
         }
         let mut matches = Vec::new();
-        if collect_files_recursive(std::path::Path::new("."), &mut matches, Some(ext)).is_ok() {
+        if collect_files_recursive(std::path::Path::new("."), &mut matches, Some(ext), 3).is_ok() {
             for p in matches {
                 if let Some(fname) = p.file_name().and_then(|s| s.to_str()) {
                     if fname.eq_ignore_ascii_case(&file_name) {
@@ -778,7 +801,7 @@ async fn pack_command(
             .into());
         }
         if entry.is_dir() {
-            collect_files_recursive(entry, &mut selected_files, None)?;
+            collect_files_recursive(entry, &mut selected_files, None, 10)?;
         } else if entry.is_file() {
             selected_files.push(entry.clone());
         } else {
@@ -958,25 +981,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::List { dlc } => {
             if dlc.is_dir() {
                 let mut files = Vec::new();
-                collect_files_recursive(&dlc, &mut files, None)?;
+                collect_files_recursive(&dlc, &mut files, Some("dlcpack"), 10)?;
                 if files.is_empty() {
                     return Err("no .dlcpack files found in directory".into());
                 }
                 for file in &files {
-                    let ext = file.extension().and_then(|s| s.to_str()).unwrap_or("");
-                    if ext.eq_ignore_ascii_case("dlcpack") {
-                        let bytes = std::fs::read(file)?;
-                        let (_prod, did, version, ents) = parse_encrypted_pack(&bytes)?;
-                        println!(
-                            "{} -> {} {} (v{}) entries: {}",
-                            "dlcpack:".color(AnsiColors::Blue),
-                            did.as_str().color(AnsiColors::Magenta).bold(),
-                            file.display(),
-                            version,
-                            ents.len()
-                        );
-                        print_pack_entries(version, &ents);
-                    }
+                    let bytes = std::fs::read(file)?;
+                    let (_prod, did, version, ents) = parse_encrypted_pack(&bytes)?;
+                    println!(
+                        "{} -> {} {} (v{}) entries: {}",
+                        "dlcpack:".color(AnsiColors::Blue),
+                         did.as_str().color(AnsiColors::Magenta).bold(),
+                        file.display(),
+                        version,
+                        ents.len()
+                    );
+                    print_pack_entries(version, &ents);
                 }
                 return Ok(());
             }
@@ -1004,7 +1024,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // directory mode: validate every .dlcpack inside recursively
             if dlc.is_dir() {
                 let mut files = Vec::new();
-                collect_files_recursive(&dlc, &mut files, Some("dlcpack"))?;
+                collect_files_recursive(&dlc, &mut files, Some("dlcpack"), 10)?;
                 if files.is_empty() {
                     print_error_and_exit("no .dlcpack files found in directory");
                 }

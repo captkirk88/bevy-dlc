@@ -10,21 +10,5 @@
     "Charlie": {
         "age": 35,
         "city": "Chicago"
-    },
-    "Diana": {
-        "age": 28,
-        "city": "Miami"
-    },
-    "Eve": {
-        "age": 22,
-        "city": "Seattle"
-    },
-    "Frank": {
-        "age": 40,
-        "city": "Boston"
-    },
-    "Grace": {
-        "age": 27,
-        "city": "Denver"
     }
 }

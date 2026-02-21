@@ -5,6 +5,8 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use bevy::asset::AssetEvent;
+use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 
@@ -20,11 +22,14 @@ use serde::{Deserialize, Serialize};
 
 use thiserror::Error;
 
+use crate::asset_loader::DlcPackLoaded;
+
 pub mod prelude {
     pub use super::AppExt;
     pub use crate::{
-        DlcError, DlcId, DlcKey, DlcLoader, DlcPack, DlcPackLoader, DlcPlugin, Product,
-        SignedLicense, VerifiedLicense,EncryptedAsset, is_dlc_loaded,
+        DlcError, DlcId, DlcKey, DlcLoader, DlcPack, DlcPackLoader, DlcPlugin, EncryptedAsset,
+        Product, SignedLicense, VerifiedLicense, asset_loader::DlcPackLoaded, is_dlc_loaded,
+        is_dlc_entry_loaded,
     };
 }
 
@@ -71,10 +76,8 @@ impl Plugin for DlcPlugin {
         if let Some(encrypt_key) = extract_encrypt_key_from_license(&self.signed_license) {
             let dlcs = extract_dlc_ids_from_license(&self.signed_license);
             for dlc_id in dlcs {
-                // Register the encryption key for each DLC ID (cloned securely from secret bytes)
-                let key_for_dlc = encrypt_key.with_secret(|kb| {
-                    EncryptionKey::from(kb.to_vec())
-                });
+                // Register the encryption key for each DLC ID
+                let key_for_dlc = encrypt_key.with_secret(|kb| EncryptionKey::from(kb.to_vec()));
                 encrypt_key_registry::insert(&dlc_id, key_for_dlc);
             }
         }
@@ -83,7 +86,6 @@ impl Plugin for DlcPlugin {
 
         // Insert provided key + manager so other systems/resources can access them
         app.insert_resource(self.dlc_key.clone())
-            //.insert_resource(self.product.clone())
             .init_asset_loader::<asset_loader::DlcLoader<Image>>()
             .init_asset_loader::<asset_loader::DlcLoader<Scene>>()
             .init_asset_loader::<asset_loader::DlcLoader<bevy::mesh::Mesh>>()
@@ -98,9 +100,7 @@ impl Plugin for DlcPlugin {
             .init_asset_loader::<asset_loader::DlcLoader<AnimationClip>>()
             .init_asset_loader::<asset_loader::DlcLoader<AnimationGraph>>();
 
-        // Build `DlcPackLoader` from any factories registered via
-        // `DlcPackRegistrarFactories` (user calls to `register_dlc_type`) plus the
-        // crate's default registrars.
+        // Build `DlcPackLoader`
         let factories = app
             .world()
             .get_resource::<asset_loader::DlcPackRegistrarFactories>()
@@ -112,6 +112,39 @@ impl Plugin for DlcPlugin {
 
         app.register_asset_loader(pack_loader);
         app.init_asset::<asset_loader::DlcPack>();
+
+        // Trigger events for DLC packs and entries when they are added to Assets
+        app.add_systems(Update, trigger_dlc_events);
+    }
+}
+
+/// System that monitors `AssetEvent<DlcPack>` and triggers observer-friendly events.
+fn trigger_dlc_events(
+    mut events: MessageReader<AssetEvent<DlcPack>>,
+    packs: Res<Assets<DlcPack>>,
+    mut commands: Commands,
+) {
+    for event in events.read() {
+        match event {
+            AssetEvent::Added { id } => {
+                if let Some(pack) = packs.get(*id) {
+                    let dlc_id = pack.id().clone();
+                    commands.trigger(DlcPackLoaded::new(
+                        dlc_id.clone(),
+                        pack.clone(),
+                    ));
+
+                    // also trigger events for each entry in the pack
+                    for entry in pack.entries() {
+                        commands.trigger(asset_loader::DlcPackEntryLoaded::new(
+                            dlc_id.clone(),
+                            entry,
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -120,7 +153,7 @@ pub trait AppExt {
     /// that may be loaded from a DLC pack. The plugin registers loaders for common asset types
     /// (Image, Scene, Mesh, Font, AudioSource, etc.) but you must register loaders for any custom
     /// asset types.
-    /// 
+    ///
     /// **Important**: As of `v2.0`, this function also calls `init_asset::<T>()` to register the asset type itself, so you do not need to call `init_asset` separately.
     ///
     /// **Suggestion**: If I missed a common asset type that should be supported out-of-the-box,
@@ -153,29 +186,45 @@ impl AppExt for App {
                 std::sync::Arc::new(std::sync::RwLock::new(v)),
             ));
         }
-
-        // No need to re-register the `DlcPackLoader` — the loader holds a shared
-        // reference to the factories resource and will observe updates made here.
         self
     }
 }
 
-/// Create a Bevy system condition that returns `true` when a DLC pack has been loaded.
+/// A Bevy system condition that returns `true` when a DLC pack has been loaded.
 ///
 /// A DLC is considered loaded when `DlcPackLoader` has successfully loaded a `.dlcpack` file
-/// containing that `DlcId`. This is independent of the compile-time `SignedLicense` — just
-/// because a DLC ID is in the license doesn't mean the pack file has been delivered or loaded.
+/// containing that `DlcId`.
 ///
 /// This is useful for gating systems that should only run when specific DLC content is actually
 /// available.
 ///
 /// # Example
 /// ```ignore
-/// app.add_systems(Update, spawn_dlc_content.run_if(is_dlc_loaded("expansionA")));
+/// app.add_systems(Update, spawn_dlc_content.run_if(is_dlc_loaded("dlcA")));
 /// ```
 pub fn is_dlc_loaded(dlc_id: impl Into<DlcId>) -> impl Fn() -> bool + Send + Sync + 'static {
     let id_string = dlc_id.into().0;
-    move || !encrypt_key_registry::asset_paths_for(&id_string).is_empty()
+    move || !encrypt_key_registry::asset_path_for(&id_string).is_empty()
+}
+
+/// A Bevy system condition that returns `true` when a specific DLC pack entry is loaded.
+pub fn is_dlc_entry_loaded(
+    dlc_id: impl Into<DlcId>,
+    entry: impl Into<String>,
+) -> impl Fn(Res<Assets<DlcPack>>) -> bool + Send + Sync + 'static {
+    let id_string = dlc_id.into().0;
+    let entry_name = entry.into();
+    move |dlc_packs: Res<Assets<DlcPack>>| {
+        if !encrypt_key_registry::asset_path_for(&id_string).is_empty()
+        {
+            dlc_packs
+                .iter()
+                .filter(|p| p.1.id() == &DlcId::from(id_string.clone()))
+                .any(|pack| pack.1.find_entry(&entry_name).is_some())
+        } else {
+            false
+        }
+    }
 }
 
 /// Strongly-typed DLC identifier (string-backed).
@@ -241,10 +290,11 @@ pub fn extract_encrypt_key_from_license(license: &SignedLicense) -> Option<Encry
         }
         let payload = URL_SAFE_NO_PAD.decode(parts[0].as_bytes()).ok()?;
         let payload_json: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-        let key_b64 = payload_json
-            .get("encrypt_key")
-            .and_then(|v| v.as_str())?;
-        URL_SAFE_NO_PAD.decode(key_b64.as_bytes()).ok().map(EncryptionKey::from)
+        let key_b64 = payload_json.get("encrypt_key").and_then(|v| v.as_str())?;
+        URL_SAFE_NO_PAD
+            .decode(key_b64.as_bytes())
+            .ok()
+            .map(EncryptionKey::from)
     })
 }
 
@@ -274,7 +324,7 @@ pub fn extract_dlc_ids_from_license(license: &SignedLicense) -> Vec<String> {
 }
 
 /// Product: non-secret identifier wrapper (keeps same API surface)
-#[derive(Resource,Clone, PartialEq, Eq, Debug)]
+#[derive(Resource, Clone, PartialEq, Eq, Debug)]
 pub struct Product(String);
 
 impl Product {
@@ -296,7 +346,7 @@ impl From<&str> for Product {
 
 // `ContentKey`: secure heap-backed secret for symmetric keys
 // use secure-gate's `Dynamic<Vec<u8>>` API (methods are provided by the alias)
-dynamic_alias!(pub EncryptionKey, Vec<u8>, "A secure encrypt key (symmetric key for encrypting DLC assets)");
+dynamic_alias!(pub EncryptionKey, Vec<u8>, "A secure encrypt key (symmetric key for encrypting DLC pack entries). This should be protected and never exposed in logs or error messages.");
 
 /// Client-side wrapper for Ed25519 key operations: verify tokens and (when
 /// private) create compact signed tokens.
@@ -670,7 +720,7 @@ pub struct PackItem {
 #[allow(dead_code)]
 impl PackItem {
     pub fn new(path: impl Into<String>, plaintext: impl Into<Vec<u8>>) -> Self {
-        let path= path.into();
+        let path = path.into();
         let ext = std::path::Path::new(&path).extension();
         Self {
             path: path.clone(),
@@ -707,7 +757,7 @@ impl From<PackItem> for (String, Option<String>, Option<String>, Vec<u8>) {
 }
 
 /// Pack multiple entries into a single `.dlcpack` container.
-/// 
+///
 /// Arguments:
 /// - `dlc_id`: the DLC ID this pack belongs to (used for registry lookup and validation)
 /// - `items`: a list of items to include in the pack, where each item is a tuple of (relative path, optional original file extension, optional type path, plaintext bytes)
@@ -762,8 +812,12 @@ pub fn pack_encrypted_pack(
             header.set_mode(0o644);
             header.set_cksum();
             // append_data takes a reader; Cursor over the slice is convenient
-            tar.append_data(&mut header, &item.path, &mut std::io::Cursor::new(&item.plaintext))
-                .map_err(|e| DlcError::Other(e.to_string()))?;
+            tar.append_data(
+                &mut header,
+                &item.path,
+                &mut std::io::Cursor::new(&item.plaintext),
+            )
+            .map_err(|e| DlcError::Other(e.to_string()))?;
         }
         // finish the tar builder to flush into the gzip encoder
         let enc = tar
@@ -1046,7 +1100,7 @@ pub fn parse_encrypted_pack(
                     "truncated ciphertext",
                 ));
             }
-            let ciphertext = bytes[offset..offset + ciphertext_len].to_vec();
+            let ciphertext: std::sync::Arc<[u8]> = bytes[offset..offset + ciphertext_len].into();
             offset += ciphertext_len;
 
             let enc = crate::asset_loader::EncryptedAsset {
@@ -1108,7 +1162,7 @@ pub fn parse_encrypted_pack(
                 "truncated ciphertext",
             ));
         }
-        let ciphertext = bytes[offset..offset + ciphertext_len].to_vec();
+        let ciphertext: std::sync::Arc<[u8]> = bytes[offset..offset + ciphertext_len].into();
 
         // Construct per-entry metadata entries that reference the shared ciphertext
         let mut entries = Vec::with_capacity(manifest.len());
@@ -1370,7 +1424,10 @@ mod tests {
                 .read()
                 .unwrap()
                 .iter()
-                .any(|f| asset_loader::fuzzy_type_path_match(f.type_name(), TestAsset::type_path()))
+                .any(|f| asset_loader::fuzzy_type_path_match(
+                    f.type_name(),
+                    TestAsset::type_path()
+                ))
         );
     }
 

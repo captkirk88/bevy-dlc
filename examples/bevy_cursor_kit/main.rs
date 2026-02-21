@@ -3,7 +3,8 @@
 //! ```bash
 //! bevy-dlc generate --product example -o keys/
 //! ```
-//! You will see warnings in the console about missing asset loaders for the DLC pack entries until you register them with `app.register_dlc_type::<T>()` (see `startup` system below). This is expected and intentional to demonstrate how the plugin handles unsupported asset types in DLC packs, and to show how you can add support for them by registering loaders.
+//! You will see warnings in the console about missing asset loaders for the DLC pack entries until you register them with their AssetLoader and `app.register_dlc_type::<T>()` (see `startup` system below). This is expected and intentional to demonstrate how the plugin handles unsupported asset types in DLC packs, and to show how you can add support for them by registering loaders.
+
 use bevy::prelude::*;
 use bevy_dlc::DlcPack;
 use bevy_dlc::prelude::*;
@@ -11,6 +12,8 @@ use bevy_dlc::prelude::*;
 #[path = "../mod.rs"]
 mod examples;
 use examples::TextAsset;
+
+use bevy_cursor_kit::prelude::*;
 
 use crate::examples::TextAssetLoader;
 
@@ -31,18 +34,34 @@ fn main() -> AppExit {
 
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(DlcPlugin::new(dlc_key, SignedLicense::from(get_example_license())))
+        .add_plugins(DlcPlugin::new(
+            dlc_key,
+            SignedLicense::from(get_example_license()),
+        ))
+        .add_plugins(CursorAssetPlugin)
         .init_asset_loader::<TextAssetLoader>()
         .register_dlc_type::<TextAsset>()
+        .register_dlc_type::<StaticCursor>()
         .init_resource::<DlcPacks>()
+        .init_resource::<Cursors>()
         .add_systems(Startup, startup)
-        .add_systems(Update, display_loaded_text.run_if(is_dlc_entry_loaded("dlcA", "test.txt")))
+        .add_systems(
+            Update,
+            (
+                insert_cursor.run_if(is_dlc_entry_loaded("dlcA", "blue.cur")),
+                display_loaded_text,
+            ),
+        )
         .add_observer(on_dlc_pack_loaded)
         .run()
 }
 
 #[derive(Resource, Default)]
 struct DlcPacks(Vec<Handle<DlcPack>>);
+
+#[derive(Debug, Resource, Reflect, Default)]
+#[reflect(Debug, Resource)]
+struct Cursors(Handle<StaticCursor>);
 
 #[derive(Component)]
 struct DlcAText(Handle<TextAsset>);
@@ -69,6 +88,35 @@ fn on_dlc_pack_loaded(
         let text_asset: Handle<TextAsset> = asset_server.load(entry.path());
         commands.spawn(DlcAText(text_asset));
     }
+
+    for entry in pack.find_by_type::<StaticCursor>() {
+        let cursor: Handle<StaticCursor> = asset_server.load(entry.path());
+        commands.insert_resource(Cursors(cursor));
+    }
+}
+
+fn insert_cursor(
+    mut commands: Commands,
+    static_cursors: Res<Assets<StaticCursor>>,
+    cursors: Res<Cursors>,
+    window: Single<Entity, With<Window>>,
+    mut setup: Local<bool>,
+) {
+    if *setup {
+        return;
+    }
+
+    let Some(c) = static_cursors.get(&cursors.0.clone()) else {
+        return;
+    };
+
+    commands
+        .entity(*window)
+        .insert(bevy::window::CursorIcon::Custom(
+            CustomCursorImageBuilder::from_static_cursor(c, None).build(),
+        ));
+
+    *setup = true;
 }
 
 fn display_loaded_text(

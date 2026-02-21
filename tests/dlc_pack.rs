@@ -7,8 +7,8 @@ use bevy_dlc::PackItem;
 fn dlcpack_runtime_loads_and_decrypts_when_unlocked() {
     use bevy_dlc::DlcPack;
 
-    // TestApp contains a signed license that unlocks `expansionA`
-    let mut t = TestAppBuilder::new("test_product", &["expansionA"])
+    // TestApp contains a signed license that unlocks `dlcA`
+    let mut t = TestAppBuilder::new("test_product", &["dlcA"])
         .with_default_plugins()
         .add_plugins(TextAssetPlugin::<TextAsset>::default())
         .build();
@@ -19,12 +19,12 @@ fn dlcpack_runtime_loads_and_decrypts_when_unlocked() {
     ];
 
     // create + write + load the pack via the helper
-    let handle = t.pack_and_load("expansionA", &items);
+    let handle = t.pack_and_load("dlcA", &items);
 
     // asset should be present in Assets<DlcPack>
     let packs = t.resource::<bevy::prelude::Assets<DlcPack>>();
     let pack = packs.get(&handle).expect("pack loaded");
-    assert_eq!(pack.id().0, "expansionA");
+    assert_eq!(pack.id().0, "dlcA");
 
     // decrypt the entry using the pack API
     let bytes = pack.decrypt_entry_bytes("note.txt").expect("decrypt");
