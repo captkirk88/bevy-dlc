@@ -3,7 +3,8 @@
 //! ```bash
 //! bevy-dlc generate --product example -o keys/
 //! ```
-//! You will see warnings in the console about missing asset loaders for the DLC pack entries until you register them with `app.register_dlc_type::<T>()` (see `startup` system below). This is expected and intentional to demonstrate how the plugin handles unsupported asset types in DLC packs, and to show how you can add support for them by registering loaders.
+//! You will see warnings in the console about missing asset loaders for the DLC pack entries until you register them with their AssetLoader and `app.register_dlc_type::<T>()` (see `startup` system below). This is expected and intentional to demonstrate how the plugin handles unsupported asset types in DLC packs, and to show how you can add support for them.
+
 use bevy::prelude::*;
 use bevy_dlc::DlcPack;
 use bevy_dlc::prelude::*;

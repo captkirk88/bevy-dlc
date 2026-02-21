@@ -695,7 +695,7 @@ impl AssetLoader for DlcPackLoader {
                                     // if static load failed, we still have a chance with
                                     // extension-based dispatch below (rare but possible).
                                     debug!(
-                                        "DlcPackLoader: static load for type '{}' failed: {}; falling back to extension dispatch",
+                                        "Static load for type '{}' failed: {}; falling back to extension dispatch",
                                         tp, e
                                     );
                                 }
@@ -737,14 +737,14 @@ impl AssetLoader for DlcPackLoader {
 
                                 if let Some(_) = remaining {
                                     warn!(
-                                        "DlcPackLoader: entry '{}' (fake_path='{}') present in container but no registered asset type matched (extension='{}'); the asset will NOT be available as 'pack#{}'. Register a loader with `app.register_dlc_type::<T>()` or supply `type_path` when packing.",
-                                        entry_label, fake_path, ext, entry_label
+                                        "DLC entry '{}' (fake_path='{}') present in container but no registered asset type matched (extension='{}'); the asset will NOT be available as '{}#{}'. Register a loader with `app.register_dlc_type::<T>()`",
+                                        entry_label, fake_path, ext, path_string, entry_label
                                     );
                                 }
                             }
                             Err(e) => {
                                 warn!(
-                                    "DlcPackLoader: failed to load entry '{}' (fake_path='{}', extension='{}'): {}",
+                                    "Failed to load entry '{}' (fake_path='{}', extension='{}'): {}",
                                     entry_label, fake_path, ext, e
                                 );
                             }
@@ -771,7 +771,7 @@ impl AssetLoader for DlcPackLoader {
         // will report the labeled asset as missing (see user-facing error).
         if !unregistered_labels.is_empty() {
             warn!(
-                "DlcPackLoader: {} {} in '{}' were not registered as labeled assets and will be inaccessible via 'pack#entry': {}. See earlier warnings for details or register the appropriate loader via `app.register_dlc_type::<T>()`.",
+                "{} {} in '{}' were not registered as labeled assets and will be inaccessible via 'pack#entry': {}. See earlier warnings for details or register the appropriate loader via `app.register_dlc_type::<T>()`.",
                 unregistered_labels.len(),
                 if unregistered_labels.len() == 1 {
                     "entry"
@@ -924,14 +924,19 @@ pub fn decrypt_pack_entries(
 
 #[derive(Error, Debug)]
 pub enum DlcLoaderError {
+    /// Used for any IO failure during pack loading (e.g. file not found, read error, etc).
     #[error("IO error: {0}")]
     Io(io::Error),
+    /// Used when the encrypt key for the DLC ID is not found in the registry at load time, which means the DLC is still locked and entries cannot be decrypted yet. This is not a fatal error — the pack can still be loaded and inspected.
     #[error("DLC locked: encrypt key not found for DLC id: {0}")]
     DlcLocked(String),
+    /// Used for any failure during decryption of an entry or archive, including authentication failures from incorrect keys and any errors from archive extraction or manifest-archive mismatches.
     #[error("Decryption failed: {0}")]
     DecryptionFailed(String),
+    /// Used when the initial container-level decryption succeeds but the plaintext is malformed (e.g. gzip archive is corrupted, manifest metadata doesn't match archive contents, etc).
     #[error("Invalid encrypted asset format: {0}")]
     InvalidFormat(String),
+    /// Used when a DLC ID conflict is detected: a different pack file is already registered for the same DLC ID. This likely indicates a configuration error (e.g. two different `.dlcpack` files with the same internal DLC ID, or the same `.dlcpack` being loaded from two different paths). The error includes both the original and new pack paths for debugging.
     #[error(
         "DLC ID conflict: a .dlcpack with DLC id '{0}' is already loaded; cannot load another pack with the same DLC id, original: {1}, new: {2}"
     )]

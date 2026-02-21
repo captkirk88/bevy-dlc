@@ -3,7 +3,7 @@
 //! ```bash
 //! bevy-dlc generate --product example -o keys/
 //! ```
-//! You will see warnings in the console about missing asset loaders for the DLC pack entries until you register them with their AssetLoader and `app.register_dlc_type::<T>()` (see `startup` system below). This is expected and intentional to demonstrate how the plugin handles unsupported asset types in DLC packs, and to show how you can add support for them by registering loaders.
+//! You will see warnings in the console about missing asset loaders for the DLC pack entries until you register them with their AssetLoader and `app.register_dlc_type::<T>()` (see `startup` system below). This is expected and intentional to demonstrate how the plugin handles unsupported asset types in DLC packs, and to show how you can add support for them.
 
 use bevy::prelude::*;
 use bevy_dlc::DlcPack;
@@ -11,13 +11,8 @@ use bevy_dlc::prelude::*;
 
 #[path = "../mod.rs"]
 mod examples;
-use examples::TextAsset;
 
 use bevy_cursor_kit::prelude::*;
-
-use crate::examples::TextAssetLoader;
-
-// You must generate `example.slicense` and `example.pubkey` by `bevy-dlc generate example`
 
 fn main() -> AppExit {
     // DO NOT USE ABCD... as your choice of secure key. This is just a placeholder for the example.
@@ -39,8 +34,6 @@ fn main() -> AppExit {
             SignedLicense::from(get_example_license()),
         ))
         .add_plugins(CursorAssetPlugin)
-        .init_asset_loader::<TextAssetLoader>()
-        .register_dlc_type::<TextAsset>()
         .register_dlc_type::<StaticCursor>()
         .init_resource::<DlcPacks>()
         .init_resource::<Cursors>()
@@ -49,7 +42,6 @@ fn main() -> AppExit {
             Update,
             (
                 insert_cursor.run_if(is_dlc_entry_loaded("dlcA", "blue.cur")),
-                display_loaded_text,
             ),
         )
         .add_observer(on_dlc_pack_loaded)
@@ -62,9 +54,6 @@ struct DlcPacks(Vec<Handle<DlcPack>>);
 #[derive(Debug, Resource, Reflect, Default)]
 #[reflect(Debug, Resource)]
 struct Cursors(Handle<StaticCursor>);
-
-#[derive(Component)]
-struct DlcAText(Handle<TextAsset>);
 
 fn startup(asset_server: Res<AssetServer>, mut packs: ResMut<DlcPacks>, mut commands: Commands) {
     packs.0.push(asset_server.load::<DlcPack>("dlcA.dlcpack"));
@@ -81,11 +70,6 @@ fn on_dlc_pack_loaded(
     for entry in pack.find_by_type::<Image>() {
         let img: Handle<Image> = asset_server.load(entry.path());
         commands.spawn(Sprite::from_image(img));
-    }
-
-    for entry in pack.find_by_type::<TextAsset>() {
-        let text_asset: Handle<TextAsset> = asset_server.load(entry.path());
-        commands.spawn(DlcAText(text_asset));
     }
 
     for entry in pack.find_by_type::<StaticCursor>() {
@@ -116,40 +100,4 @@ fn insert_cursor(
         ));
 
     *setup = true;
-}
-
-fn display_loaded_text(
-    text_assets: Res<Assets<TextAsset>>,
-    mut commands: Commands,
-    query: Query<(Entity, &DlcAText)>,
-) {
-    for (entity, loaded) in query.iter() {
-        match text_assets.get(&loaded.0) {
-            Some(text_asset) => {
-                info!("Loaded TextAsset from DLC: {}", text_asset.0);
-                // prevent re-printing
-                commands.entity(entity).remove::<DlcAText>();
-
-                let mut ent = commands.entity(entity);
-                ent.insert((
-                    Text::from(text_asset.0.clone()),
-                    TextFont {
-                        font_size: 12.0,
-                        ..default()
-                    },
-                    TextColor(Color::LinearRgba(LinearRgba::BLUE)),
-                    Node {
-                        position_type: PositionType::Absolute,
-                        top: Val::Px(5.0),
-                        left: Val::Px(15.0),
-                        ..default()
-                    },
-                ));
-            }
-            None => {
-                debug!("TextAsset not ready yet for handle: {:?}", loaded.0);
-                return;
-            }
-        }
-    }
 }

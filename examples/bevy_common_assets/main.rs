@@ -3,6 +3,8 @@
 //! ```bash
 //! bevy-dlc generate --product example -o keys/
 //! ```
+//! You will see warnings in the console about missing asset loaders for the DLC pack entries until you register them with their AssetLoader and `app.register_dlc_type::<T>()` (see `startup` system below). This is expected and intentional to demonstrate how the plugin handles unsupported asset types in DLC packs, and to show how you can add support for them.
+
 use bevy::prelude::*;
 use bevy_common_assets::json::JsonAssetPlugin;
 use bevy_dlc::DlcPack;
@@ -12,7 +14,6 @@ use bevy_dlc::prelude::*;
 mod examples;
 use examples::JsonAsset;
 
-// You must generate `example.slicense` and `example.pubkey` by `bevy-dlc generate example`
 
 fn main() -> AppExit {
     // DO NOT USE ABCD... as your choice of secure key. This is just a placeholder for the example.
