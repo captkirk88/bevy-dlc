@@ -4,9 +4,7 @@ use bevy::{app::{Plugins, ScheduleRunnerPlugin}, prelude::*};
 use secure_gate::ExposeSecret;
 use tempfile::TempDir;
 
-use bevy_dlc::{
-    AppExt, DlcId, DlcKey, DlcPlugin, EncryptionKey, Product, SignedLicense, pack_encrypted_pack, PackItem,
-};
+use bevy_dlc::{EncryptionKey, pack_encrypted_pack, prelude::*};
 
 /// Test app builder
 pub struct TestAppBuilder {
@@ -351,7 +349,7 @@ impl TestApp {
             .with_extension(original_ext.unwrap_or_default());
         // derive encryption key and pack same as before
         let signed: SignedLicense = self.signed_license();
-        let enc_key: EncryptionKey = bevy_dlc::extract_encrypt_key_from_license(&signed).expect("encrypt_key in license");
+        let enc_key = bevy_dlc::extract_encrypt_key_from_license(&signed).expect("encrypt_key in license");
 
         let pack_bytes = pack_encrypted_pack(
             &DlcId::from(dlc_id.to_string()),
