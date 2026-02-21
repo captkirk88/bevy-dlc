@@ -196,7 +196,7 @@ impl CliTestCtx {
 }
 
 #[derive(Asset, Reflect, Serialize, Deserialize)]
-pub struct TextAsset(String);
+pub struct TextAsset(pub String);
 
 #[derive(Default, Reflect)]
 pub struct TextAssetLoader;

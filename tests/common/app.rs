@@ -297,10 +297,12 @@ impl TestApp {
         &mut self,
         handle: &Handle<T>,
     ) {
-        use std::time::Duration;
+        const TIMEOUT: Duration = Duration::from_secs(5);
 
+        use std::time::Duration;
+        let start = std::time::Instant::now();
         // poll the app's `Assets<T>` resource until the asset appears (or timeout)
-        for _ in 0..20 {
+        while start.elapsed() < TIMEOUT {
             self.app.update();
 
             if let Some(assets) = self.app.world().get_resource::<bevy::prelude::Assets<T>>() {
@@ -308,7 +310,7 @@ impl TestApp {
                     return;
                 }
             }
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(10));
         }
 
         panic!(

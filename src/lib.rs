@@ -14,6 +14,9 @@ use secure_gate::{ExposeSecret, dynamic_alias, fixed_alias};
 
 mod asset_loader;
 mod encrypt_key_registry;
+#[cfg(feature = "steam")]
+pub mod steamworks;
+
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 pub use asset_loader::{DlcLoader, DlcPack, DlcPackLoader, EncryptedAsset, parse_encrypted};
 
