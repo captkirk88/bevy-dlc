@@ -308,6 +308,14 @@ impl DlcPackEntry {
         asset_server.load_untyped(&self.path)
     }
 
+    /// Check if this entry is declared as type `A` (via the optional `type_path` in the container, which is independent of file extension). This is not used by the loader itself (which relies on extension-based dispatch) but can be used by user code to inspect entries or implement custom loading behavior.
+    pub fn is_type<A: Asset>(&self) -> bool {
+        match self.encrypted.type_path.as_ref() {
+            Some(tp) => fuzzy_type_path_match(tp, A::type_path()),
+            None => false,
+        }
+    }
+
     /// Decrypt and return the plaintext bytes for this entry.
     /// This consults the global encrypt-key registry and will return
     /// `DlcLoaderError::DlcLocked` when the encrypt key is not present.

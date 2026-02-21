@@ -1,14 +1,40 @@
-use std::io::{Write, stdin, stdout};
+use std::io::{Write, stdin, stdout, ErrorKind};
 use std::path::{PathBuf, Path};
 use clap::{Arg, Command};
 use owo_colors::{OwoColorize, AnsiColors};
 use bevy_dlc::{prelude::*, DLC_PACK_MAGIC, parse_encrypted_pack, EncryptionKey};
 
+// Helper macros that ignore broken pipe errors when writing to stdout. When a pipe is
+// closed (e.g. the parent process exits or the output is piped through a failing
+// command), we want the REPL to quietly terminate instead of panicking.
+macro_rules! safe_println {
+    ($($arg:tt)*) => {{
+        let res = writeln!(stdout(), $($arg)*);
+        if let Err(e) = res {
+            if e.kind() == ErrorKind::BrokenPipe {
+                return Ok(());
+            }
+        }
+    }};
+}
+
+/// Helper macro for print without newline, with the same broken pipe handling as `safe_println`.
+macro_rules! safe_print {
+    ($($arg:tt)*) => {{
+        let res = write!(stdout(), $($arg)*);
+        if let Err(e) = res {
+            if e.kind() == ErrorKind::BrokenPipe {
+                return Ok(());
+            }
+        }
+    }};
+}
+
 pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read(&path)?;
     let (product, mut dlc_id, version, mut entries): (String, String, usize, Vec<(String, EncryptedAsset)>) = parse_encrypted_pack(&bytes)?;
 
-    println!(
+    safe_println!(
         "{} {} (v{}, {}: {}, dlc: {})",
         "REPL".color(AnsiColors::Cyan).bold(),
         path.display().to_string().color(AnsiColors::Cyan),
@@ -19,18 +45,25 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
     );
 
     if encrypt_key.is_some() {
-        println!("{} Encryption key available (adding new files enabled).", "".green());
+        safe_println!("{} Encryption key available (adding new files enabled).", "".green());
     } else {
-        println!("{} No encryption key provided (adding new files disabled).", "".yellow());
+        safe_println!("{} No encryption key provided (adding new files disabled).", "".yellow());
     }
-    println!("Type 'help' for commands.");
+    safe_println!("Type 'help' for commands.");
 
     let mut dirty = false;
     let mut added_files: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
 
     loop {
-        print!("{} ", ">".color(AnsiColors::Magenta).bold());
-        stdout().flush()?;
+        safe_print!("{} ", ">".color(AnsiColors::Magenta).bold());
+        if let Err(e) = stdout().flush() {
+            if e.kind() == ErrorKind::BrokenPipe {
+                stdout().flush().ok(); // Attempt to flush any remaining output, ignoring errors
+                return Ok(());
+            } else {
+                return Err(e.into());
+            }
+        }
         let mut input = String::new();
         stdin().read_line(&mut input)?;
         let trimmed = input.trim();
@@ -88,15 +121,15 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
             Ok(matches) => {
                 match matches.subcommand() {
                     Some(("info", _)) => {
-                        println!("Pack info: {}", path.display().to_string().color(AnsiColors::Cyan));
-                        println!(" Product: {}", product.color(AnsiColors::Blue));
-                        println!(" DLC ID: {}", dlc_id.color(AnsiColors::Magenta));
-                        println!(" Version: {}", version.to_string().color(AnsiColors::Yellow));
+                        safe_println!("Pack info: {}", path.display().to_string().color(AnsiColors::Cyan));
+                        safe_println!(" Product: {}", product.color(AnsiColors::Blue));
+                        safe_println!(" DLC ID: {}", dlc_id.color(AnsiColors::Magenta));
+                        safe_println!(" Version: {}", version.to_string().color(AnsiColors::Yellow));
                     }
                     Some(("ls", _)) => {
-                        println!("Entries in {}:", dlc_id.as_str().color(AnsiColors::Magenta));
+                        safe_println!("Entries in {}:", dlc_id.as_str().color(AnsiColors::Magenta));
                         for (i, (p, enc)) in entries.iter().enumerate() {
-                            println!(
+                            safe_println!(
                                 " [{}] {} (ext: {}) type: {}",
                                 i.color(AnsiColors::Cyan),
                                 p.as_str().color(AnsiColors::Green),
@@ -117,10 +150,10 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
 
                         if let Some((p, enc)) = target {
                             enc.type_path = Some(new_type.to_string());
-                            println!("Updated type for {} to {}", p.color(AnsiColors::Green), new_type.color(AnsiColors::Yellow));
+                            safe_println!("Updated type for {} to {}", p.color(AnsiColors::Green), new_type.color(AnsiColors::Yellow));
                             dirty = true;
                         } else {
-                            println!("Entry not found: {}", id);
+                            safe_println!("Entry not found: {}", id);
                         }
                     }
                     Some(("rm", sub)) => {
@@ -135,18 +168,18 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                             if i < entries.len() {
                                 let (p, _) = entries.remove(i);
                                 added_files.remove(&p);
-                                println!("Removed entry from manifest: {}", p.color(AnsiColors::Green));
+                                safe_println!("Removed entry from manifest: {}", p.color(AnsiColors::Green));
                                 dirty = true;
                             } else {
-                                println!("Index out of bounds: {}", i);
+                                safe_println!("Index out of bounds: {}", i);
                             }
                         } else {
-                            println!("Entry not found: {}", id);
+                            safe_println!("Entry not found: {}", id);
                         }
                     }
                     Some(("add", sub)) => {
                         if encrypt_key.is_none() {
-                            println!("{} Command 'add' requires an encryption key. Provide a --signed-license or --aes-key to use this.", "error".red().bold());
+                            safe_println!("{} Command 'add' requires an encryption key. Provide a --signed-license or --aes-key to use this.", "error".red().bold());
                             continue;
                         }
 
@@ -157,7 +190,7 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                         for f in files {
                             let f_path = Path::new(f);
                             if !f_path.exists() {
-                                println!("{} Local file not found: {}", "error".red(), f);
+                                safe_println!("{} Local file not found: {}", "error".red(), f);
                                 continue;
                             }
                             let filename = f_path.file_name().unwrap().to_string_lossy().to_string();
@@ -167,7 +200,7 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                             let data = std::fs::read(f_path)?;
                             
                             if ext.eq_ignore_ascii_case("dlcpack") || data.starts_with(DLC_PACK_MAGIC) {
-                                println!(
+                                safe_println!(
                                     "{} Cannot add .dlcpack files to another pack: {}",
                                     "error".red().bold(),
                                     f.color(AnsiColors::Yellow)
@@ -186,13 +219,13 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                                 ciphertext: vec![].into(),
                             }));
                             
-                            println!("Added local file to staging: {} -> {}", f.color(AnsiColors::Cyan), inner_path.color(AnsiColors::Green));
+                            safe_println!("Added local file to staging: {} -> {}", f.color(AnsiColors::Cyan), inner_path.color(AnsiColors::Green));
                         }
                         dirty = true;
                     }
                     Some(("id", sub)) => {
                         let new_id = sub.get_one::<String>("new_id").unwrap();
-                        println!("Renaming pack DLC ID: {} -> {}", dlc_id.color(AnsiColors::Magenta), new_id.color(AnsiColors::Magenta).bold());
+                        safe_println!("Renaming pack DLC ID: {} -> {}", dlc_id.color(AnsiColors::Magenta), new_id.color(AnsiColors::Magenta).bold());
                         dlc_id = new_id.clone();
                         dirty = true;
                     }
@@ -224,7 +257,7 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                             if let Some(ek) = encrypt_key.as_ref() {
                                 if let Some(data) = added_files.get(&p) {
                                     std::fs::write(&out_dest, data)?;
-                                    println!("Exported (staged) file to {}", out_dest.display().to_string().color(AnsiColors::Cyan));
+                                    safe_println!("Exported (staged) file to {}", out_dest.display().to_string().color(AnsiColors::Cyan));
                                 } else {
                                     // Must extract from the original pack bytes
                                     use flate2::read::GzDecoder;
@@ -246,41 +279,53 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                                             if entry.path()?.to_string_lossy() == p {
                                                 let mut out_file = std::fs::File::create(&out_dest)?;
                                                 std::io::copy(&mut entry, &mut out_file)?;
-                                                println!("Exported {} to {}", p.color(AnsiColors::Green), out_dest.display().to_string().color(AnsiColors::Cyan));
+                                                safe_println!("Exported {} to {}", p.color(AnsiColors::Green), out_dest.display().to_string().color(AnsiColors::Cyan));
                                                 found = true;
                                                 break;
                                             }
                                         }
                                     }
                                     if !found {
-                                        println!("{} Entry {} not found in archive.", "error".red(), p);
+                                        safe_println!("{} Entry {} not found in archive.", "error".red(), p);
                                     }
                                 }
                             } else {
-                                println!("{} Exporting requires an encryption key.", "error".red());
+                                safe_println!("{} Exporting requires an encryption key.", "error".red());
                             }
                         } else {
-                            println!("{} Entry not found: {}", "error".red(), id);
+                            safe_println!("{} Entry not found: {}", "error".red(), id);
                         }
                     }
                     Some(("cls", _)) => {
-                        print!("\x1B[2J\x1B[1;1H");
-                        stdout().flush()?;
+                        safe_print!("\x1B[2J\x1B[1;1H");
+                        if let Err(e) = stdout().flush() {
+                            if e.kind() == ErrorKind::BrokenPipe {
+                                return Ok(());
+                            } else {
+                                return Err(e.into());
+                            }
+                        }
                     }
                     Some(("save", _)) => {
                         if !dirty {
-                            println!("No changes to save.");
+                            safe_println!("No changes to save.");
                         } else {
                             save_pack_optimized(&path, &bytes, version, &product, &dlc_id, &entries, &added_files, encrypt_key.as_ref())?;
-                            println!("Saved changes to {}", path.display().to_string().color(AnsiColors::Cyan));
+                            safe_println!("Saved changes to {}", path.display().to_string().color(AnsiColors::Cyan));
                             dirty = false;
                             added_files.clear();
                         }
                     }
                     Some(("exit", _)) => {
                         if dirty {
-                            print!("You have unsaved changes. Exit anyway? (y/n) ");
-                            stdout().flush()?;
+                            safe_print!("You have unsaved changes. Exit anyway? (y/n) ");
+                            if let Err(e) = stdout().flush() {
+                                if e.kind() == ErrorKind::BrokenPipe {
+                                    return Ok(());
+                                } else {
+                                    return Err(e.into());
+                                }
+                            }
                             let mut confirm = String::new();
                             stdin().read_line(&mut confirm)?;
                             if !confirm.trim().eq_ignore_ascii_case("y") {
@@ -293,7 +338,7 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                 }
             }
             Err(e) => {
-                println!("{}", e);
+                safe_println!("{}", e);
             }
         }
     }

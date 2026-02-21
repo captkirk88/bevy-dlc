@@ -296,13 +296,14 @@ impl TestApp {
     pub fn wait_for_asset<T: bevy::asset::Asset + 'static + Send + Sync>(
         &mut self,
         handle: &Handle<T>,
+        timeout: Option<Duration>,
     ) {
-        const TIMEOUT: Duration = Duration::from_secs(5);
+        let timeout: Duration = timeout.unwrap_or(Duration::from_secs(2));
 
         use std::time::Duration;
         let start = std::time::Instant::now();
         // poll the app's `Assets<T>` resource until the asset appears (or timeout)
-        while start.elapsed() < TIMEOUT {
+        while start.elapsed() < timeout {
             self.app.update();
 
             if let Some(assets) = self.app.world().get_resource::<bevy::prelude::Assets<T>>() {

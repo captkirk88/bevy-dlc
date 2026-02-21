@@ -1,6 +1,7 @@
 mod common;
 use common::prelude::*;
 use bevy_dlc::PackItem;
+use owo_colors::OwoColorize;
 
 #[test]
 #[serial_test::serial]
@@ -70,5 +71,6 @@ fn dlcpack_runtime_loads_but_locked_without_key() {
     let pack = packs.get(&handle).expect("pack loaded");
 
     let res = pack.decrypt_entry_bytes("secret.txt");
+    eprintln!("DlcLocked error (expected): {}", format!("{res:?}").red());
     assert!(res.is_err(), "expected DlcLocked or DecryptionFailed");
 }

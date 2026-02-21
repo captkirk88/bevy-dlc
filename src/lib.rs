@@ -14,8 +14,6 @@ use secure_gate::{ExposeSecret, dynamic_alias, fixed_alias};
 
 mod asset_loader;
 mod encrypt_key_registry;
-#[cfg(feature = "steam")]
-pub mod steamworks;
 
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 pub use asset_loader::{DlcLoader, DlcPack, DlcPackLoader, EncryptedAsset, parse_encrypted};
@@ -30,9 +28,19 @@ use crate::asset_loader::DlcPackLoaded;
 pub mod prelude {
     pub use super::AppExt;
     pub use crate::{
-        DlcError, DlcId, DlcKey, DlcLoader, DlcPack, DlcPackLoader, DlcPlugin, EncryptedAsset,
-        Product, SignedLicense, VerifiedLicense, asset_loader::DlcPackLoaded, is_dlc_loaded,
-        is_dlc_entry_loaded,
+        // Core
+        DlcPlugin, DlcId, DlcKey, DlcPack, Product, SignedLicense, asset_loader::DlcPackEntry,
+
+        // Asset handling
+        DlcLoader, DlcPackLoader, EncryptedAsset, VerifiedLicense,
+        
+        // Utility functions and conditions
+        is_dlc_loaded, is_dlc_entry_loaded,
+
+        // Events
+        asset_loader::DlcPackLoaded, asset_loader::DlcPackEntryLoaded,
+        // Error
+        DlcError,
     };
 }
 
