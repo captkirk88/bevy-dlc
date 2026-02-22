@@ -1,7 +1,7 @@
 use std::io::{Write, stdin, stdout, ErrorKind};
 use std::path::{PathBuf, Path};
 use clap::{Arg, Command};
-use owo_colors::{OwoColorize, AnsiColors};
+use owo_colors::{AnsiColors, CssColors, OwoColorize};
 use bevy_dlc::{prelude::*, DLC_PACK_MAGIC, parse_encrypted_pack, EncryptionKey};
 
 // Helper macros that ignore broken pipe errors when writing to stdout. When a pipe is
@@ -141,8 +141,17 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                         safe_println!(" Product: {}", product.color(AnsiColors::Blue));
                         safe_println!(" DLC ID: {}", dlc_id.color(AnsiColors::Magenta));
                         safe_println!(" Version: {}", version.to_string().color(AnsiColors::Yellow));
-                        let total: usize = entries.iter().map(|(_, e)| e.ciphertext.len()).sum();
-                        safe_println!(" Size: {}", human_bytes(total).color(AnsiColors::BrightYellow));
+                        // we used to sum ciphertext lengths here, but for v2+ packs each
+                        // entry points at the same blob, so the sum would be N×actual
+                        // size. instead report the container size on disk which matches the
+                        // file the user passed in.
+                        if let Some((_,enc)) = entries.first() {
+                            safe_println!(" Content Size: {}", human_bytes(enc.ciphertext.len()).color(CssColors::SlateGray));
+                        } else {
+                            // fallback if metadata fails – should be rare
+                            let total: usize = entries.iter().map(|(_, e)| e.ciphertext.len()).sum();
+                            safe_println!(" Content Size (approx): {}", human_bytes(total).color(CssColors::SlateGray));
+                        }
                     }
                     Some(("ls", _)) => {
                         safe_println!("Entries in {}:", dlc_id.as_str().color(AnsiColors::Magenta));
