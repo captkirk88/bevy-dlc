@@ -19,6 +19,7 @@ Works with Bevy's asset pipeline.
 - Verify signatures at runtime and unlock encrypted content
 - Lazy loading of labeled assets (e.g. `pack.dlcpack#sprites/player.png`)
 - Product binding — prevent token reuse across games
+- Security checks to prevent common mistakes like packing executables or other packs
 
 ## Install
 
