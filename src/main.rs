@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
+// Windows exposes a hidden-file flag that we skip; on Unix/macOS the
+// conventional “hidden” file is simply one whose name begins with a dot.
+// Guard the import so the code still builds on non-Windows platforms.
+#[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -18,7 +22,62 @@ use bevy_dlc::{
 use owo_colors::{AnsiColors, OwoColorize};
 use secure_gate::ExposeSecret;
 
-const FORBIDDEN_EXTENSIONS: [&str; 3] = ["dlcpack", "pubkey", "slicense"];
+/// TODO If you find a extension that should not be allowed in a .dlcpack file for obvious reasons, PR and update this, please.
+// Extensions that should never be packed into a .dlcpack. We avoid
+// things that could execute or otherwise abuse the container; games often
+// expose modding, so content formats like scripts or data files are allowed,
+// but binary modules and archives are not.
+const FORBIDDEN_EXTENSIONS: [&str; 43] = [
+    "dlcpack",
+    "pubkey",
+    "slicense",
+    // Windows executables & installers
+    "exe",
+    "dll",
+    "sys",
+    "msi",
+    "msp",
+    "com",
+    "scr",
+    "pif",
+    "cpl",
+    "gadget",
+    // Windows scripts
+    "bat",
+    "cmd",
+    "vbs",
+    "vbe",
+    "js",  // Windows Script Host can execute .js
+    "jse",
+    "wsf",
+    "wsh",
+    "ps1",
+    "ps2",
+    "psc1",
+    "psc2",
+    // Unix/macOS binaries & scripts
+    "so",
+    "dylib",
+    "bin",
+    "sh",
+    "bash",
+    "command",
+    // Mobile/other package formats
+    "apk",
+    "ipa",
+    "jar",
+    "deb",
+    "rpm",
+    // Web/Native modules
+    "node",
+    // General archives (to prevent nested/untracked containers)
+    "zip",
+    "7z",
+    "rar",
+    "tar",
+    "gz",
+    "xz",
+];
 
 mod repl;
 
@@ -1233,7 +1292,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Found .dlcpack at: {}", path.display().bold());
                 },
                 Err(e) => {
-                    print_error(&format!("No .dlcpack found with dlc_id '{}': {}", dlc_id, e));
+                    print_error(&e.to_string());
                 }
             }
         }
