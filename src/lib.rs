@@ -702,10 +702,10 @@ fn decrypt_with_key(
 /// Provides a builder pattern for creating entries to pack into a `.dlcpack` container.
 #[derive(Clone, Debug)]
 pub struct PackItem {
-    pub path: String,
+    path: String,
     pub original_extension: Option<String>,
     pub type_path: Option<String>,
-    pub plaintext: Vec<u8>,
+    plaintext: Vec<u8>,
 }
 
 #[allow(dead_code)]
@@ -717,6 +717,13 @@ impl PackItem {
         if bytes.len() >= 4 && bytes.starts_with(DLC_PACK_MAGIC) {
             return Err(DlcError::Other(format!(
                 "cannot pack existing dlcpack container as an item: {}",
+                path
+            )));
+        }
+
+        if is_data_executable(&bytes) {
+            return Err(DlcError::Other(format!(
+                "input data looks like an executable payload, which is not allowed: {}",
                 path
             )));
         }
@@ -762,6 +769,16 @@ impl PackItem {
     pub fn with_type<T: Asset>(self) -> Self {
         self.with_type_path(T::type_path())
     }
+
+    /// Return the relative path for this item within the pack. This is used by the loader to determine how to register the decrypted asset.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Return the plaintext bytes for this item. This is the data that will be encrypted and stored in the pack.
+    pub fn plaintext(&self) -> &[u8] {
+        &self.plaintext
+    }
 }
 
 impl From<PackItem> for (String, Option<String>, Option<String>, Vec<u8>) {
@@ -783,6 +800,21 @@ impl From<PackItem> for (String, Option<String>, Option<String>, Vec<u8>) {
 /// - `product`: the product identifier to bind the pack to
 /// - `dlc_key`: the `DlcKey` containing the private key used to sign the pack (must be a `DlcKey::Private`)
 /// - `key`: the symmetric encryption key used to encrypt the pack contents (must be 32 bytes for AES-256)
+/// Return true if the supplied data buffer looks like an executable payload.
+/// This mirrors the file-based `is_executable` logic used by the CLI; the
+/// implementation is intentionally minimal and is only used as a secondary
+/// sanity-check during pack construction.  Scripts (shebang) and any byte
+/// sequence recognized by `infer::is_app` are considered executable.
+fn is_data_executable(data: &[u8]) -> bool {
+    if infer::is_app(data) {
+        return true;
+    }
+    if data.starts_with(b"#!") {
+        return true;
+    }
+    false
+}
+
 pub fn pack_encrypted_pack(
     dlc_id: &DlcId,
     items: &[PackItem],
@@ -818,10 +850,7 @@ pub fn pack_encrypted_pack(
         // refuse inputs with forbidden extensions or paths that look like applications
         // not fool-proof but provides a basic sanity check to prevent common mistakes like packing an executable or another pack as an item.
         if is_malicious_file(&item.path, item.original_extension.as_deref()) {
-            return Err(DlcError::Other(format!(
-                "file not allowed: {}",
-                item.path
-            )));
+            return Err(DlcError::Other(format!("file not allowed: {}", item.path)));
         }
     }
 
@@ -948,7 +977,7 @@ const FORBIDDEN_EXTENSIONS: [&str; 43] = [
     "bat", "cmd", "vbs", "vbe", "js", // Windows Script Host can execute .js
     "jse", "wsf", "wsh", "ps1", "ps2", "psc1", "psc2", // Unix/macOS binaries & scripts
     "so", "dylib", "bin", "sh", "bash", "command", // Mobile/other package formats
-    "apk", "ipa", "jar", "deb", "rpm", // Web/Native modules
+    "apk", "ipa", "jar", "deb", "rpm",  // Web/Native modules
     "node", // General archives (to prevent nested/untracked containers)
     "zip", "7z", "rar", "tar", "gz", "xz",
 ];
@@ -961,8 +990,16 @@ fn is_forbidden_extension(ext: &str) -> bool {
 }
 
 /// Helper: returns true if the file is potentially malicious based on its path and extension.
-/// This is a best-effort check to prevent packing executable files, but it is not a comprehensive security measure.
+///
+/// This is a best-effort check used by the packaging helpers. It looks at the
+/// provided extension as well as running `infer::get_from_path` on the path to
+/// identify application/binary formats.  The function is exposed publicly so
+/// that higher-level tests (and any advanced users) can exercise the same logic.
+///
+/// Note: even when this returns `false`, the item may still be rejected by other
+/// validation layers (forbidden extensions, pack magic, etc.).
 pub(crate) fn is_malicious_file(path: &str, ext: Option<&str>) -> bool {
+    /// Check if the file extension is in the forbidden list.
     fn is_app(path: &str) -> bool {
         if let Ok(t) = infer::get_from_path(path) {
             if let Some(t) = t {
@@ -974,6 +1011,8 @@ pub(crate) fn is_malicious_file(path: &str, ext: Option<&str>) -> bool {
         }
         false
     }
+
+    // Check the extension first (if provided), then fall back to content-based checks.
     if let Some(ext) = ext {
         if is_forbidden_extension(ext) || is_app(path) {
             return true;
@@ -1380,16 +1419,13 @@ pub enum DlcError {
     #[error("no encrypt key for dlc: {0}")]
     NoEncryptKey(String),
 
-    // private key binding mismatches
+    /// The DLC pack being loaded is cryptographically valid but the product it is bound to does not match the expected product. This indicates a mismatch between the pack and the game's registered product key.
     #[error("private key product does not match")]
     TokenProductMismatch,
 
-    // versioning
+    /// The version of the pack being loaded is older than the minimum supported version. The string contains the minimum supported version (e.g. "3").
     #[error("deprecated version: v{0}")]
     DeprecatedVersion(String),
-
-    #[error("bad formatted version: {0}")]
-    BadVersionFormat(String),
 
     // fallback
     #[error("{0}")]
@@ -1404,32 +1440,50 @@ mod tests {
 
     #[test]
     fn pack_encrypted_pack_rejects_nested_dlc() {
-        let encrypt_key = EncryptionKey::from_random(32);
-        let dlc_id = DlcId::from("pack_test");
-        let product = Product::from("test");
-        let dlc_key = DlcKey::generate_random();
-        let mut items: Vec<PackItem> = Vec::new();
+        // PackItem constructor now rejects payloads starting with container magic,
+        // so we assert that directly rather than invoking pack_encrypted_pack.
         let mut v = Vec::new();
         v.extend_from_slice(DLC_PACK_MAGIC);
         v.extend_from_slice(b"inner");
-        items.push(PackItem::new("a.txt", v).expect("create pack item"));
-        let res = pack_encrypted_pack(&dlc_id, &items, &product, &dlc_key, &encrypt_key);
-        assert!(matches!(res, Err(DlcError::Other(_))));
+        let err = PackItem::new("a.txt", v).unwrap_err();
+        assert!(err.to_string().contains("cannot pack existing dlcpack"));
     }
 
     #[test]
     fn pack_encrypted_pack_rejects_nested_dlcpack() {
+        let mut v = Vec::new();
+        v.extend_from_slice(DLC_PACK_MAGIC);
+        v.extend_from_slice(b"innerpack");
+        let err = PackItem::new("b.dlcpack", v);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn is_data_executable_detects_pe_header() {
+        assert!(is_data_executable(&[0x4D, 0x5A, 0, 0]));
+    }
+
+    #[test]
+    fn is_data_executable_detects_shebang() {
+        assert!(is_data_executable(b"#! /bin/sh"));
+    }
+
+    #[test]
+    fn is_data_executable_ignores_plain_text() {
+        assert!(!is_data_executable(b"hello"));
+    }
+
+    #[test]
+    fn pack_encrypted_pack_rejects_binary_data() {
         let key = EncryptionKey::from_random(32);
         let dlc_id = DlcId::from("pack_test");
         let product = Product::from("test");
         let dlc_key = DlcKey::generate_random();
-        let mut items: Vec<PackItem> = Vec::new();
         let mut v = Vec::new();
-        v.extend_from_slice(b"BDLP");
-        v.extend_from_slice(b"innerpack");
-        items.push(PackItem::new("b.bin", v).expect("create pack item"));
-        let res = pack_encrypted_pack(&dlc_id, &items, &product, &dlc_key, &key);
-        assert!(matches!(res, Err(DlcError::Other(_))));
+        v.extend_from_slice(&[0x4D, 0x5A, 0, 0]);
+        // use non-forbidden extension so PackItem::new succeeds
+        let pack_item = PackItem::new("evil.dat", v);
+        assert!(pack_item.is_err());
     }
 
     #[test]
@@ -1540,6 +1594,24 @@ mod tests {
             .count();
         assert_eq!(count, 1);
     }
+
+    #[test]
+    fn application_is_malicious() {
+        assert!(test_helpers::is_malicious("foo.exe", Some("exe")));
+    }
+
+    #[test]
+    fn real_application_is_malicious() {
+        // This test relies on the presence of a real executable file. We can use the current Rust binary itself as a test case.
+        let current_exe = std::env::current_exe().expect("should get current exe path");
+        let path_str = current_exe
+            .to_str()
+            .expect("exe path should be valid UTF-8");
+        assert!(test_helpers::is_malicious(
+            path_str,
+            current_exe.extension().and_then(|e| e.to_str()),
+        ));
+    }
 }
 
 // ============================================================================
@@ -1577,5 +1649,18 @@ pub mod test_helpers {
     /// **Test-only**: Call this in test cleanup to reset state.
     pub fn clear_test_registry() {
         encrypt_key_registry::clear_all();
+    }
+
+    /// Proxy to crate-private `is_malicious_file` for integration tests.
+    ///
+    /// The real implementation is intentionally `pub(crate)`; this helper
+    /// exposes the logic to external test crates without opening up the API
+    /// surface for downstream consumers.
+    pub fn is_malicious(path: &str, ext: Option<&str>) -> bool {
+        super::is_malicious_file(path, ext)
+    }
+
+    pub fn is_malicious_data(data: &[u8]) -> bool {
+        super::is_data_executable(data)
     }
 }

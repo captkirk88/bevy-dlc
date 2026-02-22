@@ -258,7 +258,7 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                                 pack_item = pack_item.with_type_path(tp);
                             }
 
-                            added_files.insert(inner_path.clone(), pack_item.plaintext.clone());
+                            added_files.insert(inner_path.clone(), pack_item.plaintext().to_vec());
                             
                             // Staging entry for the REPL to display in 'ls'
                             entries.push((inner_path.clone(), EncryptedAsset {
