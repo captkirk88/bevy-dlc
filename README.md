@@ -24,8 +24,8 @@ Works with Bevy's asset pipeline.
 
 Add to your `Cargo.toml`:
 
-```toml
-bevy-dlc = "1.18.0"
+```bash
+cargo add bevy-dlc
 ```
 > [!NOTE]
 > `bevy-dlc` will always be compatible with Bevy 1.## with the minor version being used for bug fixes and new features.  So `bevy-dlc = "1.18"` will also work and automatically get you any compatible bug fixes.

@@ -989,7 +989,7 @@ mod tests {
         crate::encrypt_key_registry::clear_all();
         let dlc_id = crate::DlcId::from("locked_dlc");
         let items = vec![
-            PackItem::new("a.txt", b"hello".to_vec()),
+            PackItem::new("a.txt", b"hello".to_vec()).expect("pack item"),
         ];
         let key = EncryptionKey::from_random(32);
         let dlc_key = crate::DlcKey::generate_random();
@@ -1009,7 +1009,7 @@ mod tests {
         crate::encrypt_key_registry::clear_all();
         let dlc_id = crate::DlcId::from("badkey_dlc");
         let items = vec![
-            PackItem::new("b.txt", b"world".to_vec()),
+            PackItem::new("b.txt", b"world".to_vec()).expect("pack item"),
         ];
         let real_key = EncryptionKey::from_random(32);
         let dlc_key = crate::DlcKey::generate_random();

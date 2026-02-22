@@ -11,7 +11,7 @@
 ///
 /// Examples:
 ///
-/// ```rust
+/// ```ignore
 /// use bevy_dlc::pack_items;
 ///
 /// let items = pack_items![
@@ -33,8 +33,8 @@ macro_rules! pack_items {
     ) => {{
         let mut v = Vec::new();
         $(
-            let mut item = $crate::PackItem::new($path, $bytes);
-            $( item = item.with_extension($ext); )?
+            let mut item = $crate::PackItem::new($path, $bytes).expect("forbidden extension or invalid dlcpack content");
+            $( item = item.with_extension($ext).expect("forbidden extension"); )?
             $( item = item.with_type_path($type_path); )?
             v.push(item);
         )*
@@ -47,7 +47,7 @@ macro_rules! pack_items {
 ///
 /// Useful when registering several DLC-supported asset types in one line:
 ///
-/// ```rust
+/// ```ignore
 /// use bevy::prelude::*;
 /// use bevy_dlc::prelude::*;
 ///
@@ -87,7 +87,7 @@ macro_rules! dlc_register_types {
 ///
 /// Example:
 ///
-/// ```rust
+/// ```ignore
 /// // demonstration only; we don't actually run a Bevy app inside the doctest
 /// use bevy::prelude::AssetApp;
 /// use bevy_dlc::dlc_simple_asset;

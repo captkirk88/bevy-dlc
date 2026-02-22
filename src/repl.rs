@@ -4,6 +4,8 @@ use clap::{Arg, Command};
 use owo_colors::{AnsiColors, CssColors, OwoColorize};
 use bevy_dlc::{prelude::*, DLC_PACK_MAGIC, parse_encrypted_pack, EncryptionKey};
 
+use crate::print_error;
+
 // Helper macros that ignore broken pipe errors when writing to stdout. When a pipe is
 // closed (e.g. the parent process exits or the output is piped through a failing
 // command), we want the REPL to quietly terminate instead of panicking.
@@ -222,27 +224,28 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                             }
                             let filename = f_path.file_name().unwrap().to_string_lossy().to_string();
                             let inner_path = inner_path_arg.cloned().unwrap_or(filename);
-                            let ext = f_path.extension().and_then(|s| s.to_str()).unwrap_or("").to_string();
                             
                             let data = std::fs::read(f_path)?;
                             
-                            if is_forbidden_extension(&ext) || data.starts_with(DLC_PACK_MAGIC) {
-                                safe_println!(
-                                    "{} Refusing to pack forbidden file extension (.{}) or existing .dlcpack: {}",
-                                    "error".red().bold(),
-                                    ext,
-                                    f.color(AnsiColors::Yellow)
-                                );
-                                continue;
+                            let mut pack_item = match PackItem::new(inner_path.clone(), data) {
+                                Ok(item) => item,
+                                Err(e) => {
+                                    print_error(&e.to_string());
+                                    continue;
+                                }
+                            };
+
+                            if let Some(tp) = type_override {
+                                pack_item = pack_item.with_type_path(tp);
                             }
 
-                            added_files.insert(inner_path.clone(), data);
+                            added_files.insert(inner_path.clone(), pack_item.plaintext.clone());
                             
-                            // Placeholder EncryptedAsset
+                            // Staging entry for the REPL to display in 'ls'
                             entries.push((inner_path.clone(), EncryptedAsset {
                                 dlc_id: dlc_id.clone(),
-                                original_extension: ext,
-                                type_path: type_override.cloned(),
+                                original_extension: pack_item.original_extension.unwrap_or_default(),
+                                type_path: pack_item.type_path,
                                 nonce: [0u8; 12],
                                 ciphertext: vec![].into(),
                             }));

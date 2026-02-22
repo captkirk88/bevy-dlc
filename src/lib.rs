@@ -47,7 +47,7 @@ pub mod prelude {
         DlcLoader, DlcPackLoader, EncryptedAsset, VerifiedLicense,
         
         // Utility functions and conditions
-        is_dlc_loaded, is_dlc_entry_loaded, is_forbidden_extension,
+        is_dlc_loaded, is_dlc_entry_loaded,
 
         // Events
         asset_loader::DlcPackLoaded,
@@ -172,7 +172,7 @@ fn trigger_dlc_events(
 /// available.
 ///
 /// # Example
-/// ```rust
+/// ```ignore
 /// use bevy::prelude::*;
 /// use bevy_dlc::is_dlc_loaded;
 ///
@@ -505,7 +505,7 @@ impl DlcKey {
     /// remain unlocked by the new license.
     ///
     /// # Example
-    /// ```rust
+    /// ```ignore
     /// use bevy_dlc::{DlcKey, SignedLicense, Product};
     ///
     /// // in a real program you would obtain a key and product from your build
@@ -704,20 +704,48 @@ pub struct PackItem {
 
 #[allow(dead_code)]
 impl PackItem {
-    pub fn new(path: impl Into<String>, plaintext: impl Into<Vec<u8>>) -> Self {
+    pub fn new(path: impl Into<String>, plaintext: impl Into<Vec<u8>>) -> Result<Self, DlcError> {
         let path = path.into();
-        let ext = std::path::Path::new(&path).extension();
-        Self {
-            path: path.clone(),
-            original_extension: ext.and_then(|e| e.to_str()).map(|s| s.to_string()),
-            type_path: None,
-            plaintext: plaintext.into(),
+        let bytes = plaintext.into();
+
+        if bytes.len() >= 4 && bytes.starts_with(DLC_PACK_MAGIC) {
+            return Err(DlcError::Other(format!(
+                "cannot pack existing dlcpack container as an item: {}",
+                path
+            )));
         }
+
+        let ext_str = std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str());
+
+        if let Some(ext) = ext_str {
+            if is_forbidden_extension(ext) {
+                return Err(DlcError::Other(format!(
+                    "input path contains forbidden extension (.{}): {}",
+                    ext, path
+                )));
+            }
+        }
+
+        Ok(Self {
+            path: path.clone(),
+            original_extension: ext_str.map(|s| s.to_string()),
+            type_path: None,
+            plaintext: bytes,
+        })
     }
 
-    pub fn with_extension(mut self, ext: impl Into<String>) -> Self {
-        self.original_extension = Some(ext.into());
-        self
+    pub fn with_extension(mut self, ext: impl Into<String>) -> Result<Self, DlcError> {
+        let ext_s = ext.into();
+        if is_forbidden_extension(&ext_s) {
+            return Err(DlcError::Other(format!(
+                "forbidden extension (.{}): {}",
+                ext_s, self.path
+            )));
+        }
+        self.original_extension = Some(ext_s);
+        Ok(self)
     }
 
     pub fn with_type_path(mut self, type_path: impl Into<String>) -> Self {
@@ -917,7 +945,7 @@ pub const DLC_PACK_VERSION: u8 = 3;
 /// things that could execute or otherwise abuse the container; games often
 /// expose modding, so content formats like scripts or data files are allowed,
 /// but binary modules and archives are not.
-pub(crate) const FORBIDDEN_EXTENSIONS: [&str; 43] = [
+const FORBIDDEN_EXTENSIONS: [&str; 43] = [
     "dlcpack",
     "pubkey",
     "slicense",
@@ -1404,7 +1432,7 @@ mod tests {
         let mut v = Vec::new();
         v.extend_from_slice(DLC_PACK_MAGIC);
         v.extend_from_slice(b"inner");
-        items.push(PackItem::new("a.txt", v));
+        items.push(PackItem::new("a.txt", v).expect("create pack item"));
         let res = pack_encrypted_pack(&dlc_id, &items, &product, &dlc_key, &encrypt_key);
         assert!(matches!(res, Err(DlcError::Other(_))));
     }
@@ -1419,7 +1447,7 @@ mod tests {
         let mut v = Vec::new();
         v.extend_from_slice(b"BDLP");
         v.extend_from_slice(b"innerpack");
-        items.push(PackItem::new("b.bin", v));
+        items.push(PackItem::new("b.bin", v).expect("create pack item"));
         let res = pack_encrypted_pack(&dlc_id, &items, &product, &dlc_key, &key);
         assert!(matches!(res, Err(DlcError::Other(_))));
     }

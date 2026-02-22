@@ -17,7 +17,7 @@ use bevy::{asset::AssetServer, log::LogPlugin};
 use clap::{Parser, Subcommand};
 
 use bevy_dlc::{
-    DLC_PACK_MAGIC, DLC_PACK_VERSION, EncryptionKey, PackItem, extract_dlc_ids_from_license, pack_encrypted_pack, parse_encrypted_pack, is_forbidden_extension, prelude::*
+    DLC_PACK_VERSION, EncryptionKey, PackItem, extract_dlc_ids_from_license, pack_encrypted_pack, parse_encrypted_pack, prelude::*
 };
 use owo_colors::{AnsiColors, OwoColorize};
 use secure_gate::ExposeSecret;
@@ -841,20 +841,6 @@ async fn pack_command(
         }
     }
 
-    // Secondary check: verify that none of the collected files are forbidden
-    for entry in &selected_files {
-        if let Some(ext) = entry.extension().and_then(|s| s.to_str()) {
-            if is_forbidden_extension(ext) {
-                return Err(format!(
-                    "input contains forbidden file extension (.{}): {}",
-                    ext,
-                    entry.display()
-                )
-                .into());
-            }
-        }
-    }
-
     if selected_files.is_empty() {
         return Err("no files selected for dlcpack".into());
     }
@@ -870,23 +856,6 @@ async fn pack_command(
         let mut f = File::open(file)?;
         let mut bytes = Vec::new();
         f.read_to_end(&mut bytes)?;
-
-        if bytes.len() >= 4 && &bytes[0..4] == DLC_PACK_MAGIC {
-            return Err(format!(
-                "refusing to pack '{}' — input appears to be an existing .dlcpack",
-                file.display()
-            )
-            .into());
-        }
-        let filename = file.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        let mut item = PackItem::new(filename.to_string(), bytes.clone());
-        if let Some(ext) = file.extension().and_then(|e| e.to_str()) {
-            item = item.with_extension(ext);
-        }
-        if let Some(tp) = type_path_map.get(file) {
-            item = item.with_type_path(tp.clone());
-        }
-        items.push(item);
 
         let mut rel = file
             .file_name()
@@ -908,9 +877,10 @@ async fn pack_command(
             .and_then(|s| s.to_str())
             .map(|s| s.to_string());
         let type_path = type_path_map.get(file).cloned();
-        let mut item = PackItem::new(rel.clone(), bytes.clone());
+        
+        let mut item = PackItem::new(rel.clone(), bytes.clone())?;
         if let Some(e) = ext {
-            item = item.with_extension(e);
+            item = item.with_extension(e)?;
         }
         if let Some(tp) = type_path {
             item = item.with_type_path(tp);
