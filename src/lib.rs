@@ -625,11 +625,10 @@ impl Clone for DlcKey {
         match self {
             DlcKey::Private { privkey, pubkey } => {
                 // copy the seed bytes into a new `PrivateKey`
-                let seed = privkey.with_secret(|s| *s);
-                DlcKey::Private {
-                    privkey: PrivateKey::new(seed),
+                privkey.with_secret(|s| DlcKey::Private {
+                    privkey: PrivateKey::new(*s),
                     pubkey: *pubkey,
-                }
+                })
             }
             DlcKey::Public { pubkey } => DlcKey::Public { pubkey: *pubkey },
         }
@@ -816,19 +815,11 @@ pub fn pack_encrypted_pack(
             )));
         }
 
-        // enforce forbidden file extensions
-        if let Some(ext) = &item.original_extension {
-            if is_forbidden_extension(ext) {
-                return Err(DlcError::Other(format!(
-                    "input contains forbidden file extension (.{}): {}",
-                    ext, item.path
-                )));
-            }
-        }
-        // fallback to extension from path
-        if is_malicious_file(&item.path, None) {
+        // refuse inputs with forbidden extensions or paths that look like applications
+        // not fool-proof but provides a basic sanity check to prevent common mistakes like packing an executable or another pack as an item.
+        if is_malicious_file(&item.path, item.original_extension.as_deref()) {
             return Err(DlcError::Other(format!(
-                "input path is a application: {}",
+                "file not allowed: {}",
                 item.path
             )));
         }
