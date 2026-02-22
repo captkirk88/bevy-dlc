@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::os::windows::fs::MetadataExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use base64::Engine as _;
@@ -13,8 +13,7 @@ use bevy::{asset::AssetServer, log::LogPlugin};
 use clap::{Parser, Subcommand};
 
 use bevy_dlc::{
-    DLC_PACK_MAGIC, EncryptionKey, extract_dlc_ids_from_license, pack_encrypted_pack,
-    parse_encrypted_pack, prelude::*, PackItem,
+    DLC_PACK_MAGIC, DLC_PACK_VERSION, EncryptionKey, PackItem, extract_dlc_ids_from_license, pack_encrypted_pack, parse_encrypted_pack, prelude::*
 };
 use owo_colors::{AnsiColors, OwoColorize};
 use secure_gate::ExposeSecret;
@@ -37,6 +36,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(about = "Print version information")]
+    Version {
+        /// Optional path to a .dlcpack file; when supplied the command will
+        /// also report the encrypted-pack version embedded in the file.
+        #[arg(value_name = "DLC", help = "Optional .dlcpack path")] 
+        dlc: Option<PathBuf>,
+    },
     #[command(
         about = "Pack assets into a .dlcpack bundle (writes .dlcpack, prints private key + pub key)",
         long_about = "Encrypts the provided input files into a single bevy-dlc .dlcpack bundle and prints a signed private key and public key. Use --list to preview container metadata without writing files."
@@ -179,6 +185,17 @@ enum Commands {
         #[arg(short, long, value_name = "PRODUCT")]
         product: Option<String>,
     },
+    Find {
+        /// DLC id to search for in .dlcpack files
+        #[arg(value_name = "DLC_ID")]
+        dlc_id: String,
+        /// Directory to search for .dlcpack files (recursive)
+        #[arg(value_name = "DIR")]
+        dir: PathBuf,
+        /// Max depth for recursive search (default: 5)
+        #[arg(short = 'd', long, default_value_t = 5)]
+        max_depth: usize,
+    }
 }
 
 /// Recursively collect files under `dir`. If `ext_filter` is Some(ext), only
@@ -718,12 +735,12 @@ fn validate_dlc_file(
 
     // Verify signature if pubkey provided
     if let Some(pk) = supplied_pubkey.as_deref() {
-        match bevy_dlc::verify_pack_signature(&bytes, pk) {
+        match bevy_dlc::verify_pack_signature(&bytes, pk, DLC_PACK_VERSION) {
             Ok(true) => {}
             Ok(false) => {
-                return Err("Pack signature verification: FAILED (invalid signature)".into());
+                return Err("Pack signature verification failed, invalid signature".into());
             }
-            Err(e) => return Err(format!("Pack signature verification: ERROR ({})", e).into()),
+            Err(e) => return Err(format!("Pack signature verfication failed, {}", e).into()),
         }
     }
 
@@ -767,6 +784,32 @@ fn validate_dlc_file(
     }
 
     Ok(())
+}
+
+/// Helper: search for a .dlcpack file with the specified dlc_id under root_path (recursive, up to depth)
+fn find_dlcpack(root_path: &Path, dlc_id: impl Into<DlcId>, depth: Option<usize>) -> Result<(PathBuf, usize, DlcPack), Box<dyn std::error::Error>> {
+    let dlc_id = dlc_id.into();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    collect_files_recursive(root_path, &mut candidates, Some("dlcpack"), depth.unwrap_or(5))?;
+    let mut best_match: Option<(PathBuf, usize, DlcPack)> = None;
+    for p in candidates {
+        let bytes = std::fs::read(&p)?;
+        let (_prod, did, version, ents) = parse_encrypted_pack(&bytes)?;
+        let did = DlcId::from(did);
+        // if dlc_id is not an exact match, skip
+        if did != dlc_id {
+            continue;
+        }
+        
+        let pack = DlcPack::from((did,ents));
+        best_match = Some((p, version, pack));
+        break;
+    }
+    if let Some(matched) = best_match {
+        Ok(matched)
+    } else {
+        Err(format!("no .dlcpack found with dlc_id '{}'", dlc_id).into())
+    }
 }
 
 async fn pack_command(
@@ -954,6 +997,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Version { dlc } => {
+            // package name & version
+            println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+            if let Some(path) = dlc {
+                match std::fs::read(&path) {
+                    Ok(bytes) => match parse_encrypted_pack(&bytes) {
+                        Ok((_prod, did, version, _ents)) => {
+                            println!(
+                                "{} -> {} (pack v{})",
+                                path.display(),
+                                did.as_str(),
+                                version
+                            );
+                        }
+                        Err(e) => {
+                            print_error(&format!(
+                                "failed to parse dlcpack '{}': {}",
+                                path.display(), e
+                            ));
+                            std::process::exit(1);
+                        }
+                    },
+                    Err(e) => {
+                        print_error(&format!(
+                            "error reading '{}': {}",
+                            path.display(), e
+                        ));
+                        std::process::exit(1);
+                    }
+                }
+            }
+            return Ok(());
+        }
         Commands::Pack {
             dlc_id: dlc_id_str,
             files,
@@ -1070,10 +1146,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             force,
             aes_key,
         } => {
-            // if dlcs.is_empty() {
-            //     return Err("must supply at least one DLC id for Generate".into());
-            // }
-
             // create private key + signed license (private key seed becomes embedded encrypt_key)
             let dlc_key = DlcKey::generate_random();
             let signedlicense =
@@ -1153,6 +1225,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }.map(|k| EncryptionKey::from(k));
 
             repl::run_edit_repl(dlc, encrypt_key)?;
+        },
+        Commands::Find { dlc_id, dir, max_depth } =>{
+            match find_dlcpack(&dir, dlc_id.clone(), Some(max_depth)) {
+                Ok((path, _version, _pack)) => {
+                    println!("Found .dlcpack at: {}", path.display().bold());
+                },
+                Err(e) => {
+                    print_error(&format!("No .dlcpack found with dlc_id '{}': {}", dlc_id, e));
+                }
+            }
         }
     }
 

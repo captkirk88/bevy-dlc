@@ -50,7 +50,7 @@ pub mod prelude {
         is_dlc_loaded, is_dlc_entry_loaded,
 
         // Events
-        asset_loader::DlcPackLoaded, asset_loader::DlcPackEntryLoaded,
+        asset_loader::DlcPackLoaded,
         // Error
         DlcError,
     };
@@ -772,7 +772,7 @@ pub fn pack_encrypted_pack(
         }
     };
 
-    // refuse inputs that already look like BDLC / BDLP containers
+    // refuse inputs that already look like an existing pack container
     for item in items {
         if item.plaintext.len() >= 4 && item.plaintext.starts_with(DLC_PACK_MAGIC) {
             return Err(DlcError::Other(format!(
@@ -888,10 +888,11 @@ pub fn pack_encrypted_pack(
     Ok(out)
 }
 
-/// .dlc container magic header (4 bytes) used to identify encrypted asset containers.
-// pub const DLC_ASSET_MAGIC: &[u8; 4] = b"BDLC";
 /// .dlcpack container magic header (4 bytes) used to identify encrypted pack containers.
 pub const DLC_PACK_MAGIC: &[u8; 4] = b"BDLP";
+
+/// Current supported .dlcpack format version. This is stored in the container header and used to determine how to parse the contents.
+pub const DLC_PACK_VERSION: u8 = 3;
 
 /// Parse a `.dlcpack` container and return product, embedded dlc_id, and a list
 /// of `(path, EncryptedAsset)` pairs. For v3 format, also validates the signature
@@ -928,7 +929,7 @@ pub fn parse_encrypted_pack(
     let mut offset = 5usize;
 
     // v3: product | signature(64) | dlc_len | dlc_id | ...
-    let product_str = if version == 3 {
+    let product_str = if version == DLC_PACK_VERSION {
         if offset + 2 > bytes.len() {
             return Err(std::io::Error::new(
                 ErrorKind::InvalidData,
@@ -960,7 +961,7 @@ pub fn parse_encrypted_pack(
         // For now, we parse and store it but don't verify (verification happens at load time)
 
         prod
-    } else if version == 2 || version == 1 {
+    } else if version < DLC_PACK_VERSION {
         // v1/v2 formats are product-less (legacy); treat as empty/unknown product
         String::new()
     } else {
@@ -1191,16 +1192,16 @@ pub fn parse_encrypted_pack(
 ///
 /// Returns `Ok(true)` if the signature is valid, `Ok(false)` if invalid, or `Err` if parsing fails.
 /// Only works for v3 packs which include product and signature.
-pub fn verify_pack_signature(pack_bytes: &[u8], pub_key_str: &str) -> Result<bool, DlcError> {
+pub fn verify_pack_signature(pack_bytes: &[u8], pub_key_str: &str, version: u8) -> Result<bool, DlcError> {
     // Check magic and version
     if pack_bytes.len() < 5 || &pack_bytes[0..4] != DLC_PACK_MAGIC {
         return Err(DlcError::Other("not a valid dlcpack".into()));
     }
-    let version = pack_bytes[4];
+    let pack_version = pack_bytes[4];
 
-    if version != 3 {
-        return Err(DlcError::Other(
-            "signature verification only supported for v3 packs".into(),
+    if pack_version < version {
+        return Err(DlcError::DeprecatedVersion(format!(
+            "{}", version).into(),
         ));
     }
 
@@ -1292,6 +1293,13 @@ pub enum DlcError {
     // private key binding mismatches
     #[error("private key product does not match")]
     TokenProductMismatch,
+
+    // versioning
+    #[error("deprecated version: v{0}")]
+    DeprecatedVersion(String),
+
+    #[error("bad formatted version: {0}")]
+    BadVersionFormat(String),
 
     // fallback
     #[error("{0}")]

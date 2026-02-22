@@ -35,31 +35,6 @@ impl DlcPackLoaded {
     }
 }
 
-#[deprecated(note = "Use DlcPackLoaded instead", since = "1.18.0")]
-#[derive(Event, Debug, Clone)]
-pub struct DlcPackEntryLoaded {
-    dlc_id: DlcId,
-    entry: DlcPackEntry,
-}
-
-#[allow(unused)]
-impl DlcPackEntryLoaded {
-    pub(crate) fn new(dlc_id: DlcId, entry: &DlcPackEntry) -> Self {
-        DlcPackEntryLoaded { dlc_id, entry: entry.clone() }
-    }
-
-    /// Return the DLC identifier for the loaded entry.
-    pub fn id(&self) -> &DlcId {
-        &self.dlc_id
-    }
-
-    /// Return the registered path for the loaded entry (e.g. "assets/image.png").
-    pub fn entry(&self) -> &DlcPackEntry {
-        &self.entry
-    }
-}
-
-
 /// Fuzzy match for type paths, normalizing by trimming leading "::" to handle absolute vs relative paths.
 /// Also handles crate name differences by allowing suffix matches.
 pub(crate) fn fuzzy_type_path_match<'a>(stored: &'a str, expected: &'a str) -> bool {
@@ -177,27 +152,30 @@ pub struct EncryptedAsset {
     pub ciphertext: std::sync::Arc<[u8]>,
 }
 
-/// Parse the binary encrypted-asset container `.dlcpack`.
+/// Parse the binary encrypted-asset container.
+///
+/// The old single-asset format used a `BDLC` magic header, but that format has
+/// been deprecated.  This parser no longer enforces a specific magic string and
+/// simply assumes the serialized fields follow the documented layout.
 ///
 /// Returns metadata (dlc id, original extension, optional `type_path`) plus
 /// the ciphertext — no decryption is performed here.
 ///
-/// Format: magic(4) | version(1) | dlc_len(u16) | dlc_id | ext_len(u8) | ext | type_len(u16) | type_path | nonce(12) | ciphertext
+/// Layout: version(1) | dlc_len(u16) | dlc_id | ext_len(u8) | ext |
+///         type_len(u16) | type_path | nonce(12) | ciphertext
 pub fn parse_encrypted(bytes: &[u8]) -> Result<EncryptedAsset, io::Error> {
-    if bytes.len() < 4 + 1 + 2 + 1 + 12 {
+    // make sure we can read the fixed-size header fields without panicking:
+    // version (1 byte) + dlc_len (2 bytes) + ext_len (1 byte) + nonce (12 bytes)
+    // the remaining lengths (dlc_id, ext, type_path, ciphertext) are variable
+    // and validated later, so this check only guards the very earliest reads.
+    if bytes.len() < 1 + 2 + 1 + 12 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "encrypted file too small",
         ));
     }
-    if &bytes[0..4] != b"BDLC" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid encrypted asset magic",
-        ));
-    }
-    let version = bytes[4];
-    let mut offset = 5usize;
+    let version = bytes[0];
+    let mut offset = 1usize;
 
     let dlc_len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
     offset += 2;
@@ -391,6 +369,12 @@ impl DlcPackEntry {
     }
 }
 
+impl From<(String, EncryptedAsset)> for DlcPackEntry {
+    fn from((path, encrypted): (String, EncryptedAsset)) -> Self {
+        DlcPackEntry { path, encrypted }
+    }
+}
+
 
 /// Represents a `.dlcpack` bundle (multiple encrypted entries).
 #[derive(Asset, TypePath, Clone, Debug)]
@@ -453,6 +437,24 @@ impl DlcPack {
             None => return None,
         };
         Some(asset_server.load::<A>(entry.path()))
+    }
+}
+
+impl From<(DlcId, Vec<(String, EncryptedAsset)>)> for DlcPack {
+    fn from((dlc_id, entries): (DlcId, Vec<(String, EncryptedAsset)>)) -> Self {
+        DlcPack {
+            dlc_id,
+            entries: entries
+                .into_iter()
+                .map(|(path, encrypted)| DlcPackEntry::from((path, encrypted)))
+                .collect(),
+        }
+    }
+}
+
+impl From<(DlcId, Vec<DlcPackEntry>)> for DlcPack {
+    fn from((dlc_id, entries): (DlcId, Vec<DlcPackEntry>)) -> Self {
+        DlcPack { dlc_id, entries }
     }
 }
 
@@ -792,10 +794,7 @@ impl AssetLoader for DlcPackLoader {
             );
         }
 
-        Ok(DlcPack {
-            dlc_id: DlcId::from(dlc_id),
-            entries: out_entries,
-        })
+        Ok(DlcPack::from((DlcId::from(dlc_id), out_entries)))
     }
 }
 
