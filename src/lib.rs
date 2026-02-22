@@ -5,8 +5,6 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use bevy::asset::AssetEvent;
-use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 
@@ -18,10 +16,6 @@ mod ext;
 
 // convenience helpers shipped as macros
 mod macros;
-
-// the macros themselves are `#[macro_export]` so they are available at the
-// crate root (`bevy_dlc::pack_items!()` etc.) and do not need an explicit
-// `pub use` here.  keep the module around so it gets built.
 
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 pub use asset_loader::{DlcLoader, DlcPack, DlcPackLoader, EncryptedAsset, parse_encrypted};
@@ -122,12 +116,12 @@ impl Plugin for DlcPlugin {
         app.insert_resource(self.dlc_key.clone())
             .init_asset_loader::<asset_loader::DlcLoader<Image>>()
             .init_asset_loader::<asset_loader::DlcLoader<Scene>>()
-            .init_asset_loader::<asset_loader::DlcLoader<bevy::mesh::Mesh>>()
+            .init_asset_loader::<asset_loader::DlcLoader<Mesh>>()
             .init_asset_loader::<asset_loader::DlcLoader<Font>>()
             .init_asset_loader::<asset_loader::DlcLoader<AudioSource>>()
             .init_asset_loader::<asset_loader::DlcLoader<ColorMaterial>>()
-            .init_asset_loader::<asset_loader::DlcLoader<bevy::pbr::StandardMaterial>>()
-            .init_asset_loader::<asset_loader::DlcLoader<bevy::gltf::Gltf>>()
+            .init_asset_loader::<asset_loader::DlcLoader<StandardMaterial>>()
+            .init_asset_loader::<asset_loader::DlcLoader<Gltf>>()
             .init_asset_loader::<asset_loader::DlcLoader<bevy::gltf::GltfMesh>>()
             .init_asset_loader::<asset_loader::DlcLoader<Shader>>()
             .init_asset_loader::<asset_loader::DlcLoader<DynamicScene>>()

@@ -133,6 +133,11 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
             )
             .subcommand(Command::new("cls").about("Clear the console").visible_alias("clear"))
             .subcommand(Command::new("save").about("Write changes back to disk"))
+            .subcommand(
+                Command::new("merge")
+                    .about("Merge entries from another .dlcpack into the current one")
+                    .arg(Arg::new("file").help("Path to other dlcpack").required(true))
+            )
             .subcommand(Command::new("exit").about("Exit the editor").visible_alias("quit"));
 
         match cmd.try_get_matches_from(parts) {
@@ -366,11 +371,38 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                             added_files.clear();
                         }
                     }
+                    Some(("merge", sub)) => {
+                        let file = sub.get_one::<String>("file").unwrap();
+                        let other_path = Path::new(file);
+                        if !other_path.exists() {
+                            safe_println!("{} file not found: {}", "error".red(), file);
+                            continue;
+                        }
+                        if encrypt_key.is_none() {
+                            safe_println!("{}: merging packs requires an encryption key", "error".red());
+                            continue;
+                        }
+                        if let Err(e) = merge_pack_into(
+                            other_path,
+                            &mut entries,
+                            &mut added_files,
+                            encrypt_key.as_ref(),
+                            &product,
+                            &dlc_id,
+                        ) {
+                            safe_println!("{}: failed to merge: {}", "error".red(), e);
+                        } else {
+                            dirty = true;
+                        }
+                    }
                     Some(("exit", _)) => {
                         if dirty {
-                            safe_print!("You have unsaved changes. Exit anyway? (y/n) ");
+                            safe_print!("You have unsaved changes. {}? ({}/{}) ", "Save before exiting".yellow(), 'y'.green(), 'n'.red());
                             if let Err(e) = stdout().flush() {
                                 if e.kind() == ErrorKind::BrokenPipe {
+                                    save_pack_optimized(&path, &bytes, version, &product, &dlc_id, &entries, &added_files, encrypt_key.as_ref())?;
+                                    safe_println!("Saved changes to {}", path.display().to_string().color(AnsiColors::Cyan));
+                                    added_files.clear();
                                     return Ok(());
                                 } else {
                                     return Err(e.into());
@@ -378,8 +410,10 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                             }
                             let mut confirm = String::new();
                             stdin().read_line(&mut confirm)?;
-                            if !confirm.trim().eq_ignore_ascii_case("y") {
-                                continue;
+                            if confirm.trim().eq_ignore_ascii_case("y") {
+                                save_pack_optimized(&path, &bytes, version, &product, &dlc_id, &entries, &added_files, encrypt_key.as_ref())?;
+                                safe_println!("Saved changes to {}", path.display().to_string().color(AnsiColors::Cyan));
+                                added_files.clear();
                             }
                         }
                         return Ok(());
@@ -561,7 +595,21 @@ fn update_manifest(
     out.extend_from_slice(&(manifest_bytes.len() as u32).to_be_bytes());
     out.extend_from_slice(&manifest_bytes);
 
-    if let Some((_, first_enc)) = entries.first() {
+    // When there are still entries the first one provides the nonce/
+    // ciphertext blob we need to keep.  However if the user removed every
+    // entry we still need to preserve the original archive bytes so the
+    // container remains valid (the manifest may be empty but we can't
+    // re-pack without the encryption key).  In that case parse the original
+    // pack to pull its first encrypted blob and write it unchanged.
+    if entries.is_empty() {
+        if let Ok((_, _, _, orig_entries)) = parse_encrypted_pack(bytes) {
+            if let Some((_, orig_first)) = orig_entries.first() {
+                out.extend_from_slice(&orig_first.nonce);
+                out.extend_from_slice(&(orig_first.ciphertext.len() as u32).to_be_bytes());
+                out.extend_from_slice(&orig_first.ciphertext);
+            }
+        }
+    } else if let Some((_, first_enc)) = entries.first() {
         out.extend_from_slice(&first_enc.nonce);
         out.extend_from_slice(&(first_enc.ciphertext.len() as u32).to_be_bytes());
         out.extend_from_slice(&first_enc.ciphertext);
@@ -569,4 +617,144 @@ fn update_manifest(
 
     std::fs::write(path, &out)?;
     Ok(())
+}
+
+/// Merge entries from another `.dlcpack` into the working manifest and
+/// staging area.  The `encrypt_key` is used to decrypt the source container so
+/// we can extract individual files; it must be the same key that was used to
+/// create the other pack (typically the same product/license key as the
+/// current pack).
+fn merge_pack_into(
+    other_pack: &Path,
+    entries: &mut Vec<(String, EncryptedAsset)>,
+    added_files: &mut std::collections::HashMap<String, Vec<u8>>,
+    encrypt_key: Option<&EncryptionKey>,
+    current_product: &str,
+    current_dlc_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead, Nonce};
+    use flate2::read::GzDecoder;
+    use tar::Archive;
+    use secure_gate::ExposeSecret;
+
+    let ek = encrypt_key.ok_or("encryption key required to merge")?;
+
+    let bytes = std::fs::read(other_pack)?;
+    let (other_prod, other_did, _ver, other_entries) = parse_encrypted_pack(&bytes)?;
+
+    if other_prod != current_product {
+        safe_println!("{} Merging from pack product '{}' into '{}'", "warning".yellow().bold(), other_prod, current_product);
+    }
+    if other_did != current_dlc_id {
+        safe_println!("{} Source pack DLC ID '{}' differs from working pack '{}'", "warning".yellow().bold(), other_did, current_dlc_id);
+    }
+
+    if other_entries.is_empty() {
+        return Ok(());
+    }
+
+    // decrypt blob from the other pack
+    let cipher = ek.with_secret(|s| Aes256Gcm::new_from_slice(s)).map_err(|_| "cipher init");
+    let cipher = cipher?;
+    let first = &other_entries[0].1;
+    let nonce = Nonce::from_slice(&first.nonce);
+    let pt = cipher.decrypt(nonce, first.ciphertext.as_ref()).map_err(|_| "decryption failed (key mismatch?)")?;
+    let decoder = GzDecoder::new(&pt[..]);
+    let mut archive = Archive::new(decoder);
+
+    for entry_res in archive.entries()? {
+        let mut entry = entry_res?;
+        let path = entry.path()?.to_string_lossy().to_string();
+
+        if entries.iter().any(|(p, _)| p == &path) || added_files.contains_key(&path) {
+            safe_println!("Skipping existing entry: {}", path.color(AnsiColors::Yellow));
+            continue;
+        }
+
+        let mut data = Vec::new();
+        std::io::copy(&mut entry, &mut data)?;
+
+        let mut pack_item = PackItem::new(path.clone(), data)?;
+        // preserve type_path if present in source metadata
+        if let Some((_, enc)) = other_entries.iter().find(|(p, _)| p == &path) {
+            if let Some(tp) = &enc.type_path {
+                pack_item = pack_item.with_type_path(tp);
+            }
+        }
+
+        added_files.insert(path.clone(), pack_item.plaintext().to_vec());
+        entries.push((path.clone(), EncryptedAsset {
+            dlc_id: current_dlc_id.to_string(),
+            original_extension: pack_item.ext().unwrap_or_default(),
+            type_path: pack_item.type_path(),
+            nonce: [0u8; 12],
+            ciphertext: vec![].into(),
+        }));
+        safe_println!("Merged entry: {}", path.color(AnsiColors::Green));
+    }
+
+    Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use assert_cmd::{Command, pkg_name};
+    use bevy_dlc::{DlcId, DlcKey, EncryptionKey, pack_encrypted_pack, PackItem, Product};
+
+    #[test]
+    fn merge_pack_into_adds_new_files() {
+        // prepare two simple packs with different entries
+        let dlc_key = DlcKey::generate_random();
+        let enc_key = EncryptionKey::from_random(32);
+        let product = Product::from("prod");
+
+        let item1 = PackItem::new("a.txt", b"foo".to_vec()).unwrap();
+        let bytes_a = pack_encrypted_pack(&DlcId::from("a".to_string()), &[item1], &product, &dlc_key, &enc_key).unwrap();
+
+        let item2 = PackItem::new("b.txt", b"bar".to_vec()).unwrap();
+        let bytes_b = pack_encrypted_pack(&DlcId::from("b".to_string()), &[item2], &product, &dlc_key, &enc_key).unwrap();
+
+        let dir = tempdir().unwrap();
+        let path_a = dir.path().join("a.dlcpack");
+        let path_b = dir.path().join("b.dlcpack");
+        std::fs::write(&path_a, &bytes_a).unwrap();
+        std::fs::write(&path_b, &bytes_b).unwrap();
+
+        let (_p, _id, _ver, mut entries) = parse_encrypted_pack(&bytes_a).unwrap();
+        let mut added_files = std::collections::HashMap::new();
+
+        // merge pack B into A
+        merge_pack_into(&path_b, &mut entries, &mut added_files, Some(&enc_key), "prod", "a").unwrap();
+
+        // expect the new entry to be staged
+        assert!(entries.iter().any(|(p, _)| p == "b.txt"));
+        assert!(added_files.contains_key("b.txt"));
+        // original entry remains
+        assert!(entries.iter().any(|(p, _)| p == "a.txt"));
+    }
+
+    #[test]
+    fn exit_prompt_saves_if_yes() {
+        let tmp = tempdir().unwrap();
+        let pack_path = tmp.path().join("p.dlcpack");
+        let dlc_key = DlcKey::generate_random();
+        let enc_key = EncryptionKey::from_random(32);
+        let product = Product::from("prod");
+        let item = PackItem::new("foo.txt", b"hello".to_vec()).unwrap();
+        let bytes = pack_encrypted_pack(&DlcId::from("p".to_string()), &[item], &product, &dlc_key, &enc_key).unwrap();
+        std::fs::write(&pack_path, &bytes).unwrap();
+
+        let mut cmd = Command::new(pkg_name!());
+        cmd.current_dir(tmp.path());
+        cmd.arg("edit").arg("p.dlcpack");
+        cmd.write_stdin("rm foo.txt\nexit\ny\n");
+        cmd.assert().success();
+
+        let data = std::fs::read(&pack_path).unwrap();
+        let (_p, _id, _v, entries) = parse_encrypted_pack(&data).unwrap();
+        assert!(!entries.iter().any(|(p, _)| p == "foo.txt"));
+    }
 }

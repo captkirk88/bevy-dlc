@@ -172,7 +172,7 @@ enum Commands {
     },
 
     #[command(
-        about = "Interactive REPL to edit an existing .dlcpack metadata",
+        about = "Interactive REPL to edit an existing .dlcpack metadata (add/remove entries, merge another pack, etc.)",
         long_about = "Modify the manifest of an existing .dlcpack (change types, remove entries) without re-encrypting the content. If a key/license is provided, you can also add new files."
     )]
     Edit {
