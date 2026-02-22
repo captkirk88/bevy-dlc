@@ -30,6 +30,22 @@ macro_rules! safe_print {
     }};
 }
 
+// format a byte count into a human-readable string (KB/MB/GB)
+fn human_bytes(bytes: usize) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", size as usize, UNITS[unit])
+    } else {
+        format!("{:.1} {}", size, UNITS[unit])
+    }
+}
+
 pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read(&path)?;
     let (product, mut dlc_id, version, mut entries): (String, String, usize, Vec<(String, EncryptedAsset)>) = parse_encrypted_pack(&bytes)?;
@@ -125,6 +141,8 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                         safe_println!(" Product: {}", product.color(AnsiColors::Blue));
                         safe_println!(" DLC ID: {}", dlc_id.color(AnsiColors::Magenta));
                         safe_println!(" Version: {}", version.to_string().color(AnsiColors::Yellow));
+                        let total: usize = entries.iter().map(|(_, e)| e.ciphertext.len()).sum();
+                        safe_println!(" Size: {}", human_bytes(total).color(AnsiColors::BrightYellow));
                     }
                     Some(("ls", _)) => {
                         safe_println!("Entries in {}:", dlc_id.as_str().color(AnsiColors::Magenta));
