@@ -263,8 +263,8 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                             // Staging entry for the REPL to display in 'ls'
                             entries.push((inner_path.clone(), EncryptedAsset {
                                 dlc_id: dlc_id.clone(),
-                                original_extension: pack_item.original_extension.unwrap_or_default(),
-                                type_path: pack_item.type_path,
+                                original_extension: pack_item.ext().unwrap_or_default(),
+                                type_path: pack_item.type_path(),
                                 nonce: [0u8; 12],
                                 ciphertext: vec![].into(),
                             }));

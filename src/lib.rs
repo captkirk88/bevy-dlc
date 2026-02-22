@@ -703,8 +703,8 @@ fn decrypt_with_key(
 #[derive(Clone, Debug)]
 pub struct PackItem {
     path: String,
-    pub original_extension: Option<String>,
-    pub type_path: Option<String>,
+    original_extension: Option<String>,
+    type_path: Option<String>,
     plaintext: Vec<u8>,
 }
 
@@ -778,6 +778,25 @@ impl PackItem {
     /// Return the plaintext bytes for this item. This is the data that will be encrypted and stored in the pack.
     pub fn plaintext(&self) -> &[u8] {
         &self.plaintext
+    }
+
+    pub fn ext(&self) -> Option<String> {
+        // try to infer from the current path first (useful if path was
+        // modified or normalized); fall back to any recorded original
+        // extension when the path has none or isn't valid UTF-8.
+        if let Some(ext) = std::path::Path::new(&self.path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(|s| if s.is_empty() { None } else { Some(s.to_string()) })
+        {
+            Some(ext)
+        } else {
+            self.original_extension.clone()
+        }
+    }
+
+    pub fn type_path(&self) -> Option<String> {
+        self.type_path.clone()
     }
 }
 
@@ -1474,11 +1493,7 @@ mod tests {
     }
 
     #[test]
-    fn pack_encrypted_pack_rejects_binary_data() {
-        let key = EncryptionKey::from_random(32);
-        let dlc_id = DlcId::from("pack_test");
-        let product = Product::from("test");
-        let dlc_key = DlcKey::generate_random();
+    fn packitem_rejects_binary_data() {
         let mut v = Vec::new();
         v.extend_from_slice(&[0x4D, 0x5A, 0, 0]);
         // use non-forbidden extension so PackItem::new succeeds
