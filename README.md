@@ -76,7 +76,9 @@ You can edit the contents of a `.dlcpack` with `bevy-dlc edit`:
 ```bash
 bevy-dlc edit <my_dlc>.dlcpack
 ```
-This opens an interactive REPL where you can add/remove files, list contents, or even merge entries from another `.dlcpack` (use `merge <other-pack>`).  Changes are saved back to the `.dlcpack` when you `save` and if you forget and exit, REPL will ask you.
+This opens an interactive REPL where you can add/remove files, list contents, or even merge entries from another `.dlcpack` (use `merge <other-pack>`).  Changes are saved back to the `.dlcpack` when you `save` and if you forget and exit, REPL will ask you.  REPL is not a AI.
+
+Use `help` within the REPL for available commands.
 
 ### Usage
 
@@ -84,7 +86,7 @@ Review the [examples](examples/) for a complete example (run with `cargo run --r
 
 ### API Overview
 
-* `DlcLoader` acts as a pass-through `AssetLoader` to the actual asset loader for that type (as long as it was registered).
+* `DlcLoader` is a low‑level loader that decrypts an individual file extracted from a `.dlcpack` container and then forwards the resulting bytes to whatever concrete loader would normally handle that extension. It’s largely a pass‑through wrapper, and `DlcPackLoader` uses it under the hood when you load a full `.dlcpack` with entries (`pack.dlcpack#entry.png`).
 * `DlcPack` is a custom Bevy `Asset` that represents a loaded DLC pack, and contains the decrypted asset data and metadata.  You can load it directly with `AssetServer::load("my_pack.dlcpack")`.
 * `DlcPackEntry` represents a single asset within a pack, and can be loaded with `AssetServer::load("my_pack.dlcpack#path/to/asset.png")` (note the `#` separator).  You can also query the `DlcPack` directly for its entries.
 * Events are emitted when packs and entries are loaded, so you can react to them with Bevy's event system.

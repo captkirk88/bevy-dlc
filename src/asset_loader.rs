@@ -1085,10 +1085,6 @@ where
     type Settings = ();
     type Error = DlcLoaderError;
 
-    fn extensions(&self) -> &[&str] {
-        &["dlc", "dlcenc"]
-    }
-
     async fn load(
         &self,
         reader: &mut dyn Reader,
