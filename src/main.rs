@@ -27,7 +27,7 @@ mod repl;
     author,
     version,
     about = "bevy-dlc helper: pack and unpack .dlcpack containers",
-    long_about = "Utility for creating, inspecting and extracting bevy-dlc encrypted containers."
+    long_about = "Utility for creating, inspecting and extracting bevy-dlc encrypted containers.",
 )]
 struct Cli {
     #[command(subcommand)]
@@ -185,6 +185,7 @@ enum Commands {
         #[arg(short, long, value_name = "PRODUCT")]
         product: Option<String>,
     },
+    #[command(about = "Find a .dlcpack file with specified DLC id in a directory", long_about = "Search for .dlcpack files in a directory (recursively) for a matching DLC id in their manifest. This is useful for locating files when you only have the DLC id and not the filename.")]
     Find {
         /// DLC id to search for in .dlcpack files
         #[arg(value_name = "DLC_ID")]
