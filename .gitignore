@@ -13,3 +13,6 @@
 
 # testing
 /testing
+
+# files starting with a .
+**.**.*
