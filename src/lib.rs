@@ -998,7 +998,7 @@ const FORBIDDEN_EXTENSIONS: [&str; 43] = [
 ];
 
 /// Helper: returns true if the extension (case-insensitive) is in the forbidden list.
-pub fn is_forbidden_extension(ext: &str) -> bool {
+pub(crate) fn is_forbidden_extension(ext: &str) -> bool {
     FORBIDDEN_EXTENSIONS
         .iter()
         .any(|f| f.eq_ignore_ascii_case(ext))
