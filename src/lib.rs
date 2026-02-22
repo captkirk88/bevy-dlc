@@ -16,6 +16,13 @@ mod asset_loader;
 mod encrypt_key_registry;
 mod ext;
 
+// convenience helpers shipped as macros
+mod macros;
+
+// the macros themselves are `#[macro_export]` so they are available at the
+// crate root (`bevy_dlc::pack_items!()` etc.) and do not need an explicit
+// `pub use` here.  keep the module around so it gets built.
+
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 pub use asset_loader::{DlcLoader, DlcPack, DlcPackLoader, EncryptedAsset, parse_encrypted};
 
@@ -25,6 +32,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::asset_loader::DlcPackLoaded;
+
+// expose `AppExt` at the crate root so downstream code (examples/tests/macros)
+// can refer to the trait without touching the private `ext` module.
+pub use crate::ext::AppExt;
 
 pub mod prelude {
     pub use crate::ext::*;
@@ -169,7 +180,13 @@ fn trigger_dlc_events(
 /// available.
 ///
 /// # Example
-/// ```ignore
+/// ```rust
+/// use bevy::prelude::*;
+/// use bevy_dlc::is_dlc_loaded;
+///
+/// fn spawn_dlc_content() {}
+///
+/// let mut app = App::new();
 /// app.add_systems(Update, spawn_dlc_content.run_if(is_dlc_loaded("dlcA")));
 /// ```
 pub fn is_dlc_loaded(dlc_id: impl Into<DlcId>) -> impl Fn() -> bool + Send + Sync + 'static {
@@ -496,13 +513,19 @@ impl DlcKey {
     /// remain unlocked by the new license.
     ///
     /// # Example
-    /// ```ignore
+    /// ```rust
+    /// use bevy_dlc::{DlcKey, SignedLicense, Product};
+    ///
+    /// // in a real program you would obtain a key and product from your build
+    /// // process or configuration.  we use simple constructors here so the
+    /// // example compiles without panicking.
+    /// let dlc_key: DlcKey = DlcKey::generate_random();
+    /// let product: Product = Product::from("my_game");
+    ///
     /// let old_license = SignedLicense::from("...existing token...");
-    /// let new_license = dlc_key.extend_signed_license(
-    ///     &old_license,
-    ///     &["new_expansion"],
-    ///     product,
-    /// )?;
+    /// let _new_license = dlc_key
+    ///     .extend_signed_license(&old_license, &["new_expansion"], product)
+    ///     .unwrap();
     /// ```
     pub fn extend_signed_license<D>(
         &self,

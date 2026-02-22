@@ -81,6 +81,19 @@ This opens an interactive REPL where you can add/remove files, and list contents
 
 Review the [examples](examples/) for a complete example (run with `cargo run --release --example <example>`).
 
+#### Helper macros
+
+The crate exports a few convenient macros to reduce boilerplate when dealing with
+DLC packs and assets.  They are defined in `src/macros.rs` and available at the
+crate root:
+
+* `pack_items!` – build a `Vec<PackItem>` from literal path/bytes pairs, with optional `ext=` or `type=` metadata.
+* `dlc_register_types!(app, ..)` – call `register_dlc_type` for multiple types at once.
+* `dlc_simple_asset!(Asset, Loader, Plugin, "ext"...)` – define a simple text-like asset type, its loader, and a Bevy plugin that registers both.  The examples use this macro to keep the sample assets minimal. (best for testing quickly, not recommended for production use)
+
+This convenience tooling is mostly useful for tests and small examples, but can
+also speed up rapid prototyping in your own games.
+
 ### Suggestions and Contributions
 
 Contributions are very welcome!  Please open an issue or submit a pull request with any improvements, bug fixes, or new features.

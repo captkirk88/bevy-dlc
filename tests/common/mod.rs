@@ -6,9 +6,7 @@
 pub mod app;
 
 use assert_cmd::{Command, pkg_name};
-use bevy::{asset::{AssetLoader, LoadContext, io::Reader, prelude::*}, prelude::*};
-use bevy_dlc::prelude::*;
-use serde::{Deserialize, Serialize};
+use bevy::prelude::*;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -195,58 +193,14 @@ impl CliTestCtx {
     }
 }
 
-#[derive(Asset, Reflect, Serialize, Deserialize)]
-pub struct TextAsset(pub String);
+// the helper macro defined in the crate makes it trivial to declare a
+// plain-text asset type along with its loader and plugin.  tests previously
+// replicated this boilerplate manually; using the macro keeps things
+// concise and also validates that the macro works.
 
-#[derive(Default, Reflect)]
-pub struct TextAssetLoader;
-
-impl AssetLoader for TextAssetLoader {
-    type Asset = TextAsset;
-    type Settings = ();
-    type Error = std::io::Error;
-
-    async fn load(
-        &self,
-        reader: &mut dyn Reader,
-        _settings: &(),
-        _load_context: &mut LoadContext<'_>,
-    ) -> Result<Self::Asset, Self::Error> {
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes).await?;
-        let s = String::from_utf8(bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        Ok(TextAsset(s))
-    }
-
-    fn extensions(&self) -> &[&str] {
-        &["txt"]
-    }
-}
-
-#[derive(Reflect)]
-pub struct TextAssetPlugin<A: Asset>{
-    _marker: std::marker::PhantomData<A>,
-}
-
-#[allow(unused)]
-impl <A: Asset> TextAssetPlugin<A> {
-    pub fn new() -> Self {
-        TextAssetPlugin {
-            _marker: std::marker::PhantomData,
-        }
-    }
-}
-
-impl <A: Asset> Default for TextAssetPlugin<A> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl <A> Plugin for TextAssetPlugin<A> where A: Asset {
-    fn build(&self, app: &mut App) {
-        app.register_dlc_type::<TextAsset>()
-            .register_asset_loader(TextAssetLoader::default());
-    }
-}
+bevy_dlc::dlc_simple_asset!(
+    TextAsset,
+    TextAssetLoader,
+    TextAssetPlugin,
+    "txt",
+);

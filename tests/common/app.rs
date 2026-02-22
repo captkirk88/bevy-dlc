@@ -66,8 +66,9 @@ impl TestAppBuilder {
     /// type from a DLC pack. Mirrors `AppExt::register_dlc_type` used in
     /// runtime tests.
     pub fn register_dlc_type<T: Asset + bevy::reflect::TypePath + 'static>(mut self) -> Self {
-        self.app.init_asset::<T>();
-        self.app.register_dlc_type::<T>();
+        // the helper macro can register one or more types; using it keeps the
+        // implementation concise and exercises the macro in tests.
+        bevy_dlc::dlc_register_types!(self.app, T);
         self
     }
 

@@ -1,6 +1,5 @@
 mod common;
 use common::prelude::*;
-use bevy_dlc::PackItem;
 use owo_colors::OwoColorize;
 
 #[test]
@@ -11,12 +10,12 @@ fn dlcpack_runtime_loads_and_decrypts_when_unlocked() {
     // TestApp contains a signed license that unlocks `dlcA`
     let mut t = TestAppBuilder::new("test_product", &["dlcA"])
         .with_default_plugins()
-        .add_plugins(TextAssetPlugin::<TextAsset>::default())
+        .add_plugins(TextAssetPlugin::default())
         .build();
 
     // Prepare a single plaintext entry for the pack
-    let items = vec![
-        PackItem::new("note.txt", b"hello dlc".to_vec()),
+    let items = bevy_dlc::pack_items![
+        "note.txt" => b"hello dlc".to_vec(),
     ];
 
     // create + write + load the pack via the helper
@@ -50,8 +49,8 @@ fn dlcpack_runtime_loads_but_locked_without_key() {
     let key_bytes = bevy_dlc::extract_encrypt_key_from_license(&signed).expect("key");
     let enc_key = bevy_dlc::EncryptionKey::from(key_bytes);
 
-    let items = vec![
-        PackItem::new("secret.txt", b"top secret".to_vec()).with_extension("txt"),
+    let items = bevy_dlc::pack_items![
+        "secret.txt" => b"top secret".to_vec(); ext="txt",
     ];
     let pack_bytes = pack_encrypted_pack(
         &DlcId::from("other_dlc"),
