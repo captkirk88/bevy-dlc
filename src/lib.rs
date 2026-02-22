@@ -47,7 +47,7 @@ pub mod prelude {
         DlcLoader, DlcPackLoader, EncryptedAsset, VerifiedLicense,
         
         // Utility functions and conditions
-        is_dlc_loaded, is_dlc_entry_loaded,
+        is_dlc_loaded, is_dlc_entry_loaded, is_forbidden_extension,
 
         // Events
         asset_loader::DlcPackLoaded,
@@ -780,6 +780,25 @@ pub fn pack_encrypted_pack(
                 item.path
             )));
         }
+
+        // enforce forbidden file extensions
+        if let Some(ext) = &item.original_extension {
+            if is_forbidden_extension(ext) {
+                return Err(DlcError::Other(format!(
+                    "input contains forbidden file extension (.{}): {}",
+                    ext, item.path
+                )));
+            }
+        }
+        // fallback to extension from path
+        if let Some(ext) = item.path.split('.').last() {
+            if is_forbidden_extension(ext) {
+                return Err(DlcError::Other(format!(
+                    "input path contains forbidden extension (.{}): {}",
+                    ext, item.path
+                )));
+            }
+        }
     }
 
     // Build a tar.gz archive (in-memory) containing the plaintext files at
@@ -893,6 +912,69 @@ pub const DLC_PACK_MAGIC: &[u8; 4] = b"BDLP";
 
 /// Current supported .dlcpack format version. This is stored in the container header and used to determine how to parse the contents.
 pub const DLC_PACK_VERSION: u8 = 3;
+
+/// Extensions that should never be packed into a .dlcpack. We avoid
+/// things that could execute or otherwise abuse the container; games often
+/// expose modding, so content formats like scripts or data files are allowed,
+/// but binary modules and archives are not.
+pub(crate) const FORBIDDEN_EXTENSIONS: [&str; 43] = [
+    "dlcpack",
+    "pubkey",
+    "slicense",
+    // Windows executables & installers
+    "exe",
+    "dll",
+    "sys",
+    "msi",
+    "msp",
+    "com",
+    "scr",
+    "pif",
+    "cpl",
+    "gadget",
+    // Windows scripts
+    "bat",
+    "cmd",
+    "vbs",
+    "vbe",
+    "js",  // Windows Script Host can execute .js
+    "jse",
+    "wsf",
+    "wsh",
+    "ps1",
+    "ps2",
+    "psc1",
+    "psc2",
+    // Unix/macOS binaries & scripts
+    "so",
+    "dylib",
+    "bin",
+    "sh",
+    "bash",
+    "command",
+    // Mobile/other package formats
+    "apk",
+    "ipa",
+    "jar",
+    "deb",
+    "rpm",
+    // Web/Native modules
+    "node",
+    // General archives (to prevent nested/untracked containers)
+    "zip",
+    "7z",
+    "rar",
+    "tar",
+    "gz",
+    "xz",
+];
+
+/// Helper: returns true if the extension (case-insensitive) is in the forbidden list.
+pub fn is_forbidden_extension(ext: &str) -> bool {
+    FORBIDDEN_EXTENSIONS
+        .iter()
+        .any(|f| f.eq_ignore_ascii_case(ext))
+}
 
 /// Parse a `.dlcpack` container and return product, embedded dlc_id, and a list
 /// of `(path, EncryptedAsset)` pairs. For v3 format, also validates the signature

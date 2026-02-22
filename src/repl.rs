@@ -226,10 +226,11 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                             
                             let data = std::fs::read(f_path)?;
                             
-                            if ext.eq_ignore_ascii_case("dlcpack") || data.starts_with(DLC_PACK_MAGIC) {
+                            if is_forbidden_extension(&ext) || data.starts_with(DLC_PACK_MAGIC) {
                                 safe_println!(
-                                    "{} Cannot add .dlcpack files to another pack: {}",
+                                    "{} Refusing to pack forbidden file extension (.{}) or existing .dlcpack: {}",
                                     "error".red().bold(),
+                                    ext,
                                     f.color(AnsiColors::Yellow)
                                 );
                                 continue;

@@ -17,67 +17,10 @@ use bevy::{asset::AssetServer, log::LogPlugin};
 use clap::{Parser, Subcommand};
 
 use bevy_dlc::{
-    DLC_PACK_MAGIC, DLC_PACK_VERSION, EncryptionKey, PackItem, extract_dlc_ids_from_license, pack_encrypted_pack, parse_encrypted_pack, prelude::*
+    DLC_PACK_MAGIC, DLC_PACK_VERSION, EncryptionKey, PackItem, extract_dlc_ids_from_license, pack_encrypted_pack, parse_encrypted_pack, is_forbidden_extension, prelude::*
 };
 use owo_colors::{AnsiColors, OwoColorize};
 use secure_gate::ExposeSecret;
-
-/// TODO If you find a extension that should not be allowed in a .dlcpack file for obvious reasons, PR and update this, please.
-// Extensions that should never be packed into a .dlcpack. We avoid
-// things that could execute or otherwise abuse the container; games often
-// expose modding, so content formats like scripts or data files are allowed,
-// but binary modules and archives are not.
-const FORBIDDEN_EXTENSIONS: [&str; 43] = [
-    "dlcpack",
-    "pubkey",
-    "slicense",
-    // Windows executables & installers
-    "exe",
-    "dll",
-    "sys",
-    "msi",
-    "msp",
-    "com",
-    "scr",
-    "pif",
-    "cpl",
-    "gadget",
-    // Windows scripts
-    "bat",
-    "cmd",
-    "vbs",
-    "vbe",
-    "js",  // Windows Script Host can execute .js
-    "jse",
-    "wsf",
-    "wsh",
-    "ps1",
-    "ps2",
-    "psc1",
-    "psc2",
-    // Unix/macOS binaries & scripts
-    "so",
-    "dylib",
-    "bin",
-    "sh",
-    "bash",
-    "command",
-    // Mobile/other package formats
-    "apk",
-    "ipa",
-    "jar",
-    "deb",
-    "rpm",
-    // Web/Native modules
-    "node",
-    // General archives (to prevent nested/untracked containers)
-    "zip",
-    "7z",
-    "rar",
-    "tar",
-    "gz",
-    "xz",
-];
 
 mod repl;
 
@@ -889,26 +832,26 @@ async fn pack_command(
     // Collect all input files (from files or directories)
     let mut selected_files: Vec<PathBuf> = Vec::new();
     for entry in &files {
-        if FORBIDDEN_EXTENSIONS.iter().any(|ext| {
-            entry
-                .extension()
-                .and_then(|s| s.to_str())
-                .map(|s| s.eq_ignore_ascii_case(ext))
-                .unwrap_or(false)
-        }) {
-            return Err(format!(
-                "input contains forbidden file extension ({}): {}",
-                FORBIDDEN_EXTENSIONS.join(", "),
-                entry.display()
-            )
-            .into());
-        }
         if entry.is_dir() {
             collect_files_recursive(entry, &mut selected_files, None, 10)?;
         } else if entry.is_file() {
             selected_files.push(entry.clone());
         } else {
             return Err(format!("input path not found: {}", entry.display()).into());
+        }
+    }
+
+    // Secondary check: verify that none of the collected files are forbidden
+    for entry in &selected_files {
+        if let Some(ext) = entry.extension().and_then(|s| s.to_str()) {
+            if is_forbidden_extension(ext) {
+                return Err(format!(
+                    "input contains forbidden file extension (.{}): {}",
+                    ext,
+                    entry.display()
+                )
+                .into());
+            }
         }
     }
 
