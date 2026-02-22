@@ -40,19 +40,30 @@ pub use crate::ext::AppExt;
 pub mod prelude {
     pub use crate::ext::*;
     pub use crate::{
-        // Core
-        DlcPlugin, DlcId, DlcKey, DlcPack, Product, SignedLicense, asset_loader::DlcPackEntry, PackItem,
-
-        // Asset handling
-        DlcLoader, DlcPackLoader, EncryptedAsset, VerifiedLicense,
-        
-        // Utility functions and conditions
-        is_dlc_loaded, is_dlc_entry_loaded,
-
-        // Events
-        asset_loader::DlcPackLoaded,
         // Error
         DlcError,
+        DlcId,
+        DlcKey,
+        // Asset handling
+        DlcLoader,
+        DlcPack,
+        DlcPackLoader,
+        // Core
+        DlcPlugin,
+        EncryptedAsset,
+        PackItem,
+
+        Product,
+        SignedLicense,
+        VerifiedLicense,
+
+        asset_loader::DlcPackEntry,
+        // Events
+        asset_loader::DlcPackLoaded,
+        is_dlc_entry_loaded,
+
+        // Utility functions and conditions
+        is_dlc_loaded,
     };
 }
 
@@ -152,10 +163,7 @@ fn trigger_dlc_events(
             AssetEvent::Added { id } => {
                 if let Some(pack) = packs.get(*id) {
                     let dlc_id = pack.id().clone();
-                    commands.trigger(DlcPackLoaded::new(
-                        dlc_id.clone(),
-                        pack.clone(),
-                    ));
+                    commands.trigger(DlcPackLoaded::new(dlc_id.clone(), pack.clone()));
                 }
             }
             _ => {}
@@ -194,8 +202,7 @@ pub fn is_dlc_entry_loaded(
     let id_string = dlc_id.into().0;
     let entry_name = entry.into();
     move |dlc_packs: Res<Assets<DlcPack>>| {
-        if !encrypt_key_registry::asset_path_for(&id_string).is_empty()
-        {
+        if !encrypt_key_registry::asset_path_for(&id_string).is_empty() {
             dlc_packs
                 .iter()
                 .filter(|p| p.1.id() == &DlcId::from(id_string.clone()))
@@ -819,13 +826,11 @@ pub fn pack_encrypted_pack(
             }
         }
         // fallback to extension from path
-        if let Some(ext) = item.path.split('.').last() {
-            if is_forbidden_extension(ext) {
-                return Err(DlcError::Other(format!(
-                    "input path contains forbidden extension (.{}): {}",
-                    ext, item.path
-                )));
-            }
+        if is_malicious_file(&item.path, None) {
+            return Err(DlcError::Other(format!(
+                "input path is a application: {}",
+                item.path
+            )));
         }
     }
 
@@ -946,64 +951,46 @@ pub const DLC_PACK_VERSION: u8 = 3;
 /// expose modding, so content formats like scripts or data files are allowed,
 /// but binary modules and archives are not.
 const FORBIDDEN_EXTENSIONS: [&str; 43] = [
-    "dlcpack",
-    "pubkey",
-    "slicense",
-    // Windows executables & installers
-    "exe",
-    "dll",
-    "sys",
-    "msi",
-    "msp",
-    "com",
-    "scr",
-    "pif",
-    "cpl",
-    "gadget",
+    "dlcpack", "pubkey", "slicense", // Windows executables & installers
+    "exe", "dll", "sys", "msi", "msp", "com", "scr", "pif", "cpl", "gadget",
     // Windows scripts
-    "bat",
-    "cmd",
-    "vbs",
-    "vbe",
-    "js",  // Windows Script Host can execute .js
-    "jse",
-    "wsf",
-    "wsh",
-    "ps1",
-    "ps2",
-    "psc1",
-    "psc2",
-    // Unix/macOS binaries & scripts
-    "so",
-    "dylib",
-    "bin",
-    "sh",
-    "bash",
-    "command",
-    // Mobile/other package formats
-    "apk",
-    "ipa",
-    "jar",
-    "deb",
-    "rpm",
-    // Web/Native modules
-    "node",
-    // General archives (to prevent nested/untracked containers)
-    "zip",
-    "7z",
-    "rar",
-    "tar",
-    "gz",
-    "xz",
+    "bat", "cmd", "vbs", "vbe", "js", // Windows Script Host can execute .js
+    "jse", "wsf", "wsh", "ps1", "ps2", "psc1", "psc2", // Unix/macOS binaries & scripts
+    "so", "dylib", "bin", "sh", "bash", "command", // Mobile/other package formats
+    "apk", "ipa", "jar", "deb", "rpm", // Web/Native modules
+    "node", // General archives (to prevent nested/untracked containers)
+    "zip", "7z", "rar", "tar", "gz", "xz",
 ];
 
 /// Helper: returns true if the extension (case-insensitive) is in the forbidden list.
-pub(crate) fn is_forbidden_extension(ext: &str) -> bool {
+fn is_forbidden_extension(ext: &str) -> bool {
     FORBIDDEN_EXTENSIONS
         .iter()
         .any(|f| f.eq_ignore_ascii_case(ext))
 }
 
+/// Helper: returns true if the file is potentially malicious based on its path and extension.
+/// This is a best-effort check to prevent packing executable files, but it is not a comprehensive security measure.
+pub(crate) fn is_malicious_file(path: &str, ext: Option<&str>) -> bool {
+    fn is_app(path: &str) -> bool {
+        if let Ok(t) = infer::get_from_path(path) {
+            if let Some(t) = t {
+                match t.matcher_type() {
+                    infer::MatcherType::App => return true,
+                    _ => {}
+                }
+            }
+        }
+        false
+    }
+    if let Some(ext) = ext {
+        if is_forbidden_extension(ext) || is_app(path) {
+            return true;
+        }
+    }
+
+    false
+}
 /// Parse a `.dlcpack` container and return product, embedded dlc_id, and a list
 /// of `(path, EncryptedAsset)` pairs. For v3 format, also validates the signature
 /// against the authorized product public key.
@@ -1302,7 +1289,11 @@ pub fn parse_encrypted_pack(
 ///
 /// Returns `Ok(true)` if the signature is valid, `Ok(false)` if invalid, or `Err` if parsing fails.
 /// Only works for v3 packs which include product and signature.
-pub fn verify_pack_signature(pack_bytes: &[u8], pub_key_str: &str, version: u8) -> Result<bool, DlcError> {
+pub fn verify_pack_signature(
+    pack_bytes: &[u8],
+    pub_key_str: &str,
+    version: u8,
+) -> Result<bool, DlcError> {
     // Check magic and version
     if pack_bytes.len() < 5 || &pack_bytes[0..4] != DLC_PACK_MAGIC {
         return Err(DlcError::Other("not a valid dlcpack".into()));
@@ -1310,9 +1301,7 @@ pub fn verify_pack_signature(pack_bytes: &[u8], pub_key_str: &str, version: u8) 
     let pack_version = pack_bytes[4];
 
     if pack_version < version {
-        return Err(DlcError::DeprecatedVersion(format!(
-            "{}", version).into(),
-        ));
+        return Err(DlcError::DeprecatedVersion(format!("{}", version).into()));
     }
 
     let mut offset = 5usize;

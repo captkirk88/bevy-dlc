@@ -4,7 +4,7 @@ use clap::{Arg, Command};
 use owo_colors::{AnsiColors, CssColors, OwoColorize};
 use bevy_dlc::{prelude::*, DLC_PACK_MAGIC, parse_encrypted_pack, EncryptionKey};
 
-use crate::print_error;
+use crate::{print_error, is_executable};
 
 // Helper macros that ignore broken pipe errors when writing to stdout. When a pipe is
 // closed (e.g. the parent process exits or the output is piped through a failing
@@ -222,6 +222,25 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                                 safe_println!("{} Local file not found: {}", "error".red(), f);
                                 continue;
                             }
+                            
+                            match std::fs::metadata(f_path) {
+                                Ok(meta) => {
+                                    if !meta.is_file() {
+                                        safe_println!("{} Path is not a file: {}", "error".red(), f);
+                                        continue;
+                                    }
+                                }
+                                Err(e) => {
+                                    safe_println!("{} Failed to read metadata for {}: {}", "error".red(), f, e);
+                                    continue;
+                                }
+                            }
+
+                            if is_executable(f_path) {
+                                safe_println!("{} Refusing to pack executable file: {}", "error".red(), f);
+                                continue;
+                            }
+
                             let filename = f_path.file_name().unwrap().to_string_lossy().to_string();
                             let inner_path = inner_path_arg.cloned().unwrap_or(filename);
                             

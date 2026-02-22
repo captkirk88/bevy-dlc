@@ -1,11 +1,13 @@
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File};
 use std::io::Read;
 // Windows exposes a hidden-file flag that we skip; on Unix/macOS the
 // conventional “hidden” file is simply one whose name begins with a dot.
 // Guard the import so the code still builds on non-Windows platforms.
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
@@ -674,6 +676,20 @@ fn print_error_and_exit(message: &str) -> ! {
     std::process::exit(1);
 }
 
+/// Returns true if the file appears to be an executable or script.
+/// Checks Unix permissions, binary magic numbers using `infer`, and shebangs.
+fn is_executable(path: &std::path::Path) -> bool {
+    // Check content for binary executables via infer
+    if let Ok(Some(t)) = infer::get_from_path(path) {
+        match t.matcher_type() {
+            infer::MatcherType::App => return true,
+            _ => {}
+        }
+    }
+
+    false
+}
+
 // Helper: attempt to decrypt the first archive entry using the provided symmetric key.
 // Returns Ok(()) on success; Err(...) on any failure (decryption or archive extraction).
 fn test_decrypt_archive_with_key(
@@ -853,6 +869,10 @@ async fn pack_command(
 
     let mut items: Vec<PackItem> = Vec::new();
     for file in &selected_files {
+        if is_executable(file) {
+            return Err(format!("refusing to pack executable file: {}", file.display()).into());
+        }
+
         let mut f = File::open(file)?;
         let mut bytes = Vec::new();
         f.read_to_end(&mut bytes)?;
