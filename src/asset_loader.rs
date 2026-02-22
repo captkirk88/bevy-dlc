@@ -35,6 +35,7 @@ impl DlcPackLoaded {
     }
 }
 
+#[deprecated(note = "Use DlcPackLoaded instead", since = "1.18.0")]
 #[derive(Event, Debug, Clone)]
 pub struct DlcPackEntryLoaded {
     dlc_id: DlcId,

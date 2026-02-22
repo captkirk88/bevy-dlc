@@ -81,6 +81,15 @@ This opens an interactive REPL where you can add/remove files, and list contents
 
 Review the [examples](examples/) for a complete example (run with `cargo run --release --example <example>`).
 
+### API Overview
+
+* `DlcLoader` acts as a pass-through `AssetLoader` to the actual asset loader for that type (as long as it was registered).
+* `DlcPack` is a custom Bevy `Asset` that represents a loaded DLC pack, and contains the decrypted asset data and metadata.  You can load it directly with `AssetServer::load("my_pack.dlcpack")`.
+* `DlcPackEntry` represents a single asset within a pack, and can be loaded with `AssetServer::load("my_pack.dlcpack#path/to/asset.png")` (note the `#` separator).  You can also query the `DlcPack` directly for its entries.
+* Events are emitted when packs and entries are loaded, so you can react to them with Bevy's event system.
+  - `DlcPackLoaded` — emitted when a pack is loaded and decrypted, contains the `DlcId` and `DlcPack`.
+* Finally, `DlcPlugin` is the main plugin that sets up the DLC system.  It requires a `DlcKey::Public` and `SignedLicense` to verify and unlock packs.
+
 #### Helper macros
 
 The crate exports a few convenient macros to reduce boilerplate when dealing with

@@ -156,14 +156,6 @@ fn trigger_dlc_events(
                         dlc_id.clone(),
                         pack.clone(),
                     ));
-
-                    // also trigger events for each entry in the pack
-                    for entry in pack.entries() {
-                        commands.trigger(asset_loader::DlcPackEntryLoaded::new(
-                            dlc_id.clone(),
-                            entry,
-                        ));
-                    }
                 }
             }
             _ => {}
