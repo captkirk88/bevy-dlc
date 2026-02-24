@@ -29,7 +29,6 @@ mod repl;
 #[derive(Parser)]
 #[command(
     author,
-    version,
     about = "bevy-dlc helper: pack and unpack .dlcpack containers",
     long_about = "Utility for creating, inspecting and extracting bevy-dlc encrypted containers.",
 )]
@@ -691,6 +690,7 @@ fn print_warning(message: &str) {
 
 fn print_error_and_exit(message: &str) -> ! {
     print_error(message);
+    // exit with error status so calling processes can detect failure
     std::process::exit(1);
 }
 
@@ -1181,6 +1181,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if !force {
                 if slicense_path.exists() || pubkey_path.exists() {
+                    // verify the contents of any pre‑existing file so we can warn
+                    // about corrupted/forged data instead of silently accepting it.
+                    if slicense_path.exists() {
+                        let valid = std::fs::read_to_string(&slicense_path)
+                            .ok()
+                            .and_then(|s| {
+                                let sl = bevy_dlc::SignedLicense::from(s.trim().to_string());
+                                // at minimum we must be able to extract an encrypt key
+                                bevy_dlc::extract_encrypt_key_from_license(&sl).map(|_| ())
+                            })
+                            .is_some();
+                        if !valid {
+                            print_error_and_exit(
+                                format!(
+                                    "existing {} is not a valid signed license; use --force to overwrite",
+                                    slicense_path.display()
+                                )
+                                .as_str(),
+                            );
+                        }
+                    }
+                    if pubkey_path.exists() {
+                        let valid = std::fs::read_to_string(&pubkey_path)
+                            .ok()
+                            .map(|pk| DlcKey::public(pk.trim()).is_ok())
+                            .unwrap_or(false);
+                        if !valid {
+                            print_error_and_exit(
+                                format!(
+                                    "existing {} is not a valid public key; use --force to overwrite",
+                                    pubkey_path.display()
+                                )
+                                .as_str(),
+                            );
+                        }
+                    }
+                    // both files are present and structurally valid: refuse to clobber
                     print_error_and_exit(
                         format!(
                             "'{}' or '{}' already exists; use {} to overwrite",

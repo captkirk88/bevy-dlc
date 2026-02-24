@@ -1278,6 +1278,50 @@ mod tests {
     }
 
     #[test]
+    fn generate_refuses_overwrite_with_invalid_files() {
+        let tmp = tempdir().unwrap();
+        let prod = "prod";
+        let sl = tmp.path().join("prod.slicense");
+        let pk = tmp.path().join("prod.pubkey");
+        // drop some garbage into both files
+        std::fs::write(&sl, "not-a-license").unwrap();
+        std::fs::write(&pk, "not-a-pubkey").unwrap();
+
+        let mut cmd = Command::new(pkg_name!());
+        cmd.current_dir(tmp.path());
+        cmd.arg("generate").arg(prod).arg("dlcA");
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains("not a valid"));
+
+        // force should override even though contents are invalid
+        let mut cmd2 = Command::new(pkg_name!());
+        cmd2.current_dir(tmp.path());
+        cmd2.arg("generate").arg("--force").arg(prod).arg("dlcA");
+        cmd2.assert().success();
+    }
+
+    #[test]
+    fn generate_refuses_overwrite_with_valid_files() {
+        let tmp = tempdir().unwrap();
+        let prod = "prod";
+
+        // produce a sane pair first
+        let mut cmd_gen = Command::new(pkg_name!());
+        cmd_gen.current_dir(tmp.path());
+        cmd_gen.arg("generate").arg(prod).arg("dlcA");
+        cmd_gen.assert().success();
+
+        // running again without force should emit the generic exists message
+        let mut cmd = Command::new(pkg_name!());
+        cmd.current_dir(tmp.path());
+        cmd.arg("generate").arg(prod).arg("dlcA");
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains("already exists"));
+    }
+
+    #[test]
     fn exit_prompt_saves_if_yes() {
         let tmp = tempdir().unwrap();
         let pack_path = tmp.path().join("p.dlcpack");
