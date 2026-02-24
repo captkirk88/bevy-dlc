@@ -76,7 +76,10 @@ You can edit the contents of a `.dlcpack` with `bevy-dlc edit`:
 ```bash
 bevy-dlc edit <my_dlc>.dlcpack
 ```
-This opens an interactive REPL where you can add/remove files, list contents, or even merge entries from another `.dlcpack` (use `merge <other-pack>`).  Changes are saved back to the `.dlcpack` when you `save` and if you forget and exit, REPL will ask you.  REPL is not a AI.
+
+This opens an interactive REPL where you can add/remove files, list contents, or even merge entries from another `.dlcpack`.  When merging or adding content you must supply an **Signed License** — just run `bevy-dlc edit --signed-license <token> [--pubkey <key>]` or keep `.slicense`/`.pubkey` files next to the pack (created using `bevy-dlc generate`).  Changes are saved back to the `.dlcpack` when you `save` and if you forget and exit, REPL will ask you.  REPL is not a AI.
+
+You can also use `bevy-dlc edit <mydlc>.dlcpack -- <commands>` to run REPL commands non-interactively (e.g. from a script or Makefile).
 
 Use `help` within the REPL for available commands.
 

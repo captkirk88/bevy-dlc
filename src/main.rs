@@ -34,6 +34,10 @@ mod repl;
     long_about = "Utility for creating, inspecting and extracting bevy-dlc encrypted containers.",
 )]
 struct Cli {
+    /// don't perform file changes, just show what would happen
+    #[arg(long, global = true)]
+    dry_run: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -188,6 +192,9 @@ enum Commands {
         /// Optional product name (used to find .slicense/.pubkey defaults)
         #[arg(short, long, value_name = "PRODUCT")]
         product: Option<String>,
+        /// Optional one-shot REPL command (e.g. `ls`); use `--` to separate from flags
+        #[arg(value_name = "REPL_CMD", last=true)]
+        command: Vec<String>,
     },
     #[command(about = "Find a .dlcpack file with specified DLC id in a directory", long_about = "Search for .dlcpack files in a directory (recursively) for a matching DLC id in their manifest. This is useful for locating files when you only have the DLC id and not the filename.")]
     Find {
@@ -496,6 +503,7 @@ fn handle_license_output(
     product: &str,
     dlc_id_str: &str,
     signer_key: Option<&DlcKey>,
+    write_files: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(sup_license) = signed_license {
         if let Some(pubkey_str) = pubkey {
@@ -561,7 +569,9 @@ fn handle_license_output(
                 SignedLicense::from(sup_license.to_string())
             };
 
-            final_license.with_secret(|s| println!("{}:\n{}", "SIGNED LICENSE:".green().bold(), s));
+            final_license.with_secret(|s| {
+                println!("{}:\n{}", "SIGNED LICENSE:".green().bold(), s);
+            });
         }
     } else {
         // Use the provided signer key (the key that signed the pack) when available
@@ -571,7 +581,11 @@ fn handle_license_output(
                 Product::from(product.to_string()),
             )?;
             signedlicense.with_secret(|s| {
-                print_signed_license_and_pubkey(s.as_str(), dlc_key, false, Some(product))
+                if write_files {
+                    print_signed_license_and_pubkey(s.as_str(), dlc_key, false, Some(product))
+                } else {
+                    println!("{}:\n{}", "SIGNED LICENSE".green().bold(), s);
+                }
             });
         } else {
             let dlc_key = DlcKey::generate_random();
@@ -580,7 +594,11 @@ fn handle_license_output(
                 Product::from(product.to_string()),
             )?;
             signedlicense.with_secret(|s| {
-                print_signed_license_and_pubkey(s.as_str(), &dlc_key, true, Some(product))
+                if write_files {
+                    print_signed_license_and_pubkey(s.as_str(), &dlc_key, true, Some(product))
+                } else {
+                    println!("{}:\n{}", "SIGNED LICENSE".green().bold(), s);
+                }
             });
         }
     }
@@ -841,6 +859,7 @@ async fn pack_command(
     types: Option<Vec<String>>,
     pubkey: Option<String>,
     signed_license: Option<String>,
+    dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // extracted from main::Commands::Pack
     let (pubkey, signed_license) = resolve_pubkey_and_license(pubkey, signed_license, &product);
@@ -935,6 +954,7 @@ async fn pack_command(
         &product,
         &dlc_id_str,
         Some(&dlc_key),
+        !dry_run,
     )?;
 
     if list {
@@ -948,8 +968,8 @@ async fn pack_command(
         if path.exists() && path.is_dir() {
             // explicit existing directory
             path.join(format!("{}.dlcpack", dlc_id_str))
-        } else if path.extension().is_some() {
-            // path *looks like* a file (has an extension) — treat as file path
+        } else if path.is_file(){
+            // explicit file
             path
         } else {
             // no extension: treat as directory (create it if necessary)
@@ -961,8 +981,12 @@ async fn pack_command(
     } else {
         PathBuf::from(format!("{}.dlcpack", dlc_id_str))
     };
-    std::fs::write(&out_path, &container)?;
-    println!("created dlcpack: {}", out_path.display());
+    if dry_run {
+        print_warning(format!("dry-run: would create dlcpack: {}", out_path.display()).as_str());
+    } else {
+        std::fs::write(&out_path, &container)?;
+        println!("created dlcpack: {}", out_path.display());
+    }
     Ok(())
 }
 
@@ -1043,6 +1067,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 types,
                 pubkey,
                 signed_license,
+                cli.dry_run,
             )
             .await?;
         }
@@ -1168,9 +1193,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // print token + pubkey to stdout and write <product>.slicense / <product>.pubkey
+            // print token + pubkey to stdout; only write files when not in dry-run mode
+            let write_files = !cli.dry_run;
             signedlicense.with_secret(|s| {
-                print_signed_license_and_pubkey(s.as_str(), &dlc_key, true, Some(product.as_str()))
+                print_signed_license_and_pubkey(s.as_str(), &dlc_key, write_files, Some(product.as_str()))
             });
 
             // optionally emit a random 32-byte AES key (base64url)
@@ -1185,11 +1211,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
             }
 
-            println!(
-                "Wrote {} and {}",
-                slicense_path.display(),
-                pubkey_path.display()
-            );
+            if cli.dry_run {
+                print_warning(format!("dry-run: would write {} and {}", slicense_path.display(), pubkey_path.display()).as_str());
+            } else {
+                println!(
+                    "Wrote {} and {}",
+                    slicense_path.display(),
+                    pubkey_path.display()
+                );
+            }
             return Ok(());
         }
         Commands::Edit {
@@ -1197,6 +1227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             signed_license,
             pubkey,
             product,
+            command,
         } => {
             // read container bytes to get embedded product/dlc id
             let bytes = std::fs::read(&dlc)?;
@@ -1215,9 +1246,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 extract_encrypt_key_from_token(lic).ok().flatten()
             } else {
                 None
-            }.map(|k| EncryptionKey::from(k));
+            }
+            .map(|k| EncryptionKey::from(k));
 
-            repl::run_edit_repl(dlc, encrypt_key)?;
+            // pass along any trailing arguments as a one-shot command
+            let initial = if command.is_empty() { None } else { Some(command.clone()) };
+            repl::run_edit_repl(dlc, encrypt_key, initial, cli.dry_run)?;
         },
         Commands::Find { dlc_id, dir, max_depth } =>{
             match find_dlcpack(&dir, dlc_id.clone(), Some(max_depth)) {

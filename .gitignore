@@ -1,9 +1,6 @@
 /target
 *.lock
 
-# rules
-/.github/*[.md|.yml]
-
 # publish script
 *.sh
 
@@ -14,5 +11,7 @@
 # testing
 /testing
 
+# folders starting with a .
+**/.**
 # files starting with a .
 **.**.*

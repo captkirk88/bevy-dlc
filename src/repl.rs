@@ -1,6 +1,6 @@
 use std::io::{Write, stdin, stdout, ErrorKind};
 use std::path::{PathBuf, Path};
-use clap::{Arg, Command};
+use clap::{Arg, Command, ArgAction};
 use owo_colors::{AnsiColors, CssColors, OwoColorize};
 use bevy_dlc::{prelude::*, DLC_PACK_MAGIC, DLC_PACK_VERSION, parse_encrypted_pack, EncryptionKey};
 
@@ -107,7 +107,7 @@ fn remove_stray_entries_from_pack(
     Ok(())
 }
 
-use crate::{print_error, is_executable};
+use crate::{extract_encrypt_key_from_token, is_executable, print_error, resolve_keys};
 
 // Helper macros that ignore broken pipe errors when writing to stdout. When a pipe is
 // closed (e.g. the parent process exits or the output is piped through a failing
@@ -117,7 +117,10 @@ macro_rules! safe_println {
         let res = writeln!(stdout(), $($arg)*);
         if let Err(e) = res {
             if e.kind() == ErrorKind::BrokenPipe {
-                return Ok(());
+                // return with the default value for the surrounding function's
+                // Result<_, _> so that both `Result<(), _>` and
+                // `Result<bool, _>` callers compile.
+                return Ok(Default::default());
             }
         }
     }};
@@ -129,7 +132,7 @@ macro_rules! safe_print {
         let res = write!(stdout(), $($arg)*);
         if let Err(e) = res {
             if e.kind() == ErrorKind::BrokenPipe {
-                return Ok(());
+                return Ok(Default::default());
             }
         }
     }};
@@ -151,9 +154,15 @@ fn human_bytes(bytes: usize) -> String {
     }
 }
 
-pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_edit_repl(
+    path: PathBuf,
+    mut encrypt_key: Option<EncryptionKey>,
+    initial_command: Option<Vec<String>>, // new parameter for one-shot commands
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read(&path)?;
-    let (product, mut dlc_id, version, mut entries): (String, String, usize, Vec<(String, EncryptedAsset)>) = parse_encrypted_pack(&bytes)?;
+    let (product, mut dlc_id, version, mut entries): (String, String, usize, Vec<(String, EncryptedAsset)>) =
+        parse_encrypted_pack(&bytes)?;
 
     safe_println!(
         "{} {} (v{}, {}: {}, dlc: {})",
@@ -166,73 +175,78 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
     );
 
     if encrypt_key.is_some() {
-        safe_println!("{} Encryption key available (adding new files enabled).", "".green());
+        // TODO "enabled" shold be green, the rest of the text should be default
+        safe_println!(
+            "{} Encryption key available (adding new files enabled).",
+            "".green()
+        );
     } else {
-        safe_println!("{} No encryption key provided (adding new files disabled).", "".yellow());
+        safe_println!(
+            "{} No encryption key provided (adding new files disabled).",
+            "".yellow()
+        );
     }
     safe_println!("Type 'help' for commands.");
 
     let mut dirty = false;
-    let mut added_files: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+    let mut added_files: std::collections::HashMap<String, Vec<u8>> =
+        std::collections::HashMap::new();
 
-    loop {
-        safe_print!("{} ", ">".color(AnsiColors::Magenta).bold());
-        if let Err(e) = stdout().flush() {
-            if e.kind() == ErrorKind::BrokenPipe {
-                stdout().flush().ok(); // Attempt to flush any remaining output, ignoring errors
-                return Ok(());
-            } else {
-                return Err(e.into());
-            }
-        }
-        let mut input = String::new();
-        stdin().read_line(&mut input)?;
-        let trimmed = input.trim();
-        if trimmed.trim().is_empty() {
-            continue;
-        }
-
-        let parts: Vec<String> = trimmed.split_whitespace().map(|s| s.to_string()).collect();
-        if parts.is_empty() {
-            continue;
-        }
-
-        let cmd = Command::new("repl")
+    // helper to build the command parser so we can reuse it both in the
+    // interactive loop and for the one-shot invocation.
+    let build_repl_cli = || {
+        Command::new("repl")
             .no_binary_name(true)
             .subcommand(Command::new("info").about("Show pack info"))
-            .subcommand(Command::new("ls").about("List all entries and their types").visible_alias("list"))
+            .subcommand(
+                Command::new("ls")
+                    .about("List all entries and their types")
+                    .visible_alias("list"),
+            )
             .subcommand(
                 Command::new("type")
                     .about("Set type_path for entry")
-                    .visible_alias("set-type")
+                    .visible_alias("ty")
                     .arg(Arg::new("id").help("Index or path of the entry").required(true))
-                    .arg(Arg::new("type").help("New TypePath").required(true))
+                    .arg(Arg::new("type").help("New TypePath").required(true)),
             )
             .subcommand(
                 Command::new("rm")
                     .about("Remove entry from manifest")
                     .visible_alias("remove")
-                    .arg(Arg::new("id").help("Index or path of the entry").required(true))
+                    .arg(Arg::new("id").help("Index or path of the entry").required(true)),
             )
             .subcommand(
                 Command::new("add")
                     .about("Add new local file to the pack (requires encryption key)")
                     .visible_alias("new")
                     .arg(Arg::new("file").help("Local filesystem path").required(true).num_args(1..))
-                    .arg(Arg::new("inner_path").short('p').long("path").help("Archive-internal path (defaults to filename)"))
-                    .arg(Arg::new("type").short('t').long("type").help("TypePath override"))
+                    .arg(
+                        Arg::new("inner_path")
+                            .short('p')
+                            .long("path")
+                            .help("Archive-internal path (defaults to filename)"),
+                    )
+                    .arg(
+                        Arg::new("type")
+                            .short('t')
+                            .long("type")
+                            .help("TypePath override"),
+                    ),
             )
             .subcommand(
                 Command::new("id")
                     .about("Set the DLC ID for this pack")
                     .visible_alias("set-id")
-                    .arg(Arg::new("new_id").help("The new DLC ID").required(true))
+                    .arg(
+                        Arg::new("new_id").help("The new DLC ID").required(true),
+                    ),
             )
             .subcommand(
                 Command::new("export")
                     .about("Export (decrypt and save) an entry to a local file")
                     .arg(Arg::new("id").help("Index or path of the entry").required(true))
-                    .arg(Arg::new("out").help("Optional output destination path (defaults to entry name)"))
+                    .arg(Arg::new("out").help("Optional output destination path (defaults to entry name)")),
             )
             .subcommand(Command::new("cls").about("Clear the console").visible_alias("clear"))
             .subcommand(Command::new("save").about("Write changes back to disk"))
@@ -240,9 +254,34 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                 Command::new("merge")
                     .about("Merge entries from another .dlcpack into the current one")
                     .arg(Arg::new("file").help("Path to other dlcpack").required(true))
+                    .arg(
+                        Arg::new("signed_license")
+                            .long("signed-license")
+                            .help("SignedLicense token for the source pack")
+                            .value_name("SIGNED_LICENSE"),
+                    )
+                    .arg(
+                        Arg::new("pubkey")
+                            .long("pubkey")
+                            .help("Public key to verify the supplied license")
+                            .value_name("PUBKEY"),
+                    )
+                    .arg(
+                        Arg::new("delete_source")
+                            .long("delete")
+                            .short('d')
+                            .help("Remove source pack file after successful merge")
+                            .action(ArgAction::SetTrue),
+                    ),
             )
-            .subcommand(Command::new("exit").about("Exit the editor").visible_alias("quit"));
+            .subcommand(Command::new("exit").about("Exit the editor").visible_alias("quit").visible_alias("q"))
+    };
 
+    // wrapper that executes a single parsed command. returns `true` if we
+    // should break out of the interactive loop (i.e. exit requested), false
+    // means continue.
+    let mut execute = |parts: Vec<String>| -> Result<bool, Box<dyn std::error::Error>> {
+        let cmd = build_repl_cli();
         match cmd.try_get_matches_from(parts) {
             Ok(matches) => {
                 match matches.subcommand() {
@@ -251,17 +290,19 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                         safe_println!(" Product: {}", product.color(AnsiColors::Blue));
                         safe_println!(" DLC ID: {}", dlc_id.color(AnsiColors::Magenta));
                         safe_println!(" Version: {}", version.to_string().color(AnsiColors::Yellow));
-                        // we used to sum ciphertext lengths here, but for v2+ packs each
-                        // entry points at the same blob, so the sum would be N×actual
-                        // size. instead report the container size on disk which matches the
-                        // file the user passed in.
-                        if let Some((_,enc)) = entries.first() {
-                            safe_println!(" Content Size: {}", human_bytes(enc.ciphertext.len()).color(CssColors::SlateGray));
+                        if let Some((_, enc)) = entries.first() {
+                            safe_println!(
+                                " Content Size: {}",
+                                human_bytes(enc.ciphertext.len()).color(CssColors::SlateGray),
+                            );
                         } else {
-                            // fallback if metadata fails – should be rare
                             let total: usize = entries.iter().map(|(_, e)| e.ciphertext.len()).sum();
-                            safe_println!(" Content Size (approx): {}", human_bytes(total).color(CssColors::SlateGray));
+                            safe_println!(
+                                " Content Size (approx): {}",
+                                human_bytes(total).color(CssColors::SlateGray),
+                            );
                         }
+                        return Ok(false);
                     }
                     Some(("ls", _)) => {
                         safe_println!("Entries in {}:", dlc_id.as_str().color(AnsiColors::Magenta));
@@ -271,27 +312,34 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                                 i.color(AnsiColors::Cyan),
                                 p.as_str().color(AnsiColors::Green),
                                 enc.original_extension.as_str().color(AnsiColors::Yellow),
-                                enc.type_path.as_deref().unwrap_or("None").color(AnsiColors::Yellow)
+                                enc.type_path
+                                    .as_deref()
+                                    .unwrap_or("None")
+                                    .color(AnsiColors::Yellow),
                             );
                         }
+                        return Ok(false);
                     }
                     Some(("type", sub)) => {
                         let id = sub.get_one::<String>("id").unwrap();
                         let new_type = sub.get_one::<String>("type").unwrap();
-
                         let target = if let Ok(idx) = id.parse::<usize>() {
                             entries.get_mut(idx)
                         } else {
                             entries.iter_mut().find(|(p, _)| p == id)
                         };
-
                         if let Some((p, enc)) = target {
                             enc.type_path = Some(new_type.to_string());
-                            safe_println!("Updated type for {} to {}", p.color(AnsiColors::Green), new_type.color(AnsiColors::Yellow));
+                            safe_println!(
+                                "Updated type for {} to {}",
+                                p.color(AnsiColors::Green),
+                                new_type.color(AnsiColors::Yellow),
+                            );
                             dirty = true;
                         } else {
                             safe_println!("Entry not found: {}", id);
                         }
+                        return Ok(false);
                     }
                     Some(("rm", sub)) => {
                         let id = sub.get_one::<String>("id").unwrap();
@@ -300,12 +348,14 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                         } else {
                             entries.iter().position(|(p, _)| p == id)
                         };
-
                         if let Some(i) = idx {
                             if i < entries.len() {
                                 let (p, _) = entries.remove(i);
                                 added_files.remove(&p);
-                                safe_println!("Removed entry from manifest: {}", p.color(AnsiColors::Green));
+                                safe_println!(
+                                    "Removed entry from manifest: {}",
+                                    p.color(AnsiColors::Green),
+                                );
                                 dirty = true;
                             } else {
                                 safe_println!("Index out of bounds: {}", i);
@@ -313,47 +363,57 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                         } else {
                             safe_println!("Entry not found: {}", id);
                         }
+                        return Ok(false);
                     }
                     Some(("add", sub)) => {
                         if encrypt_key.is_none() {
-                            safe_println!("{} Command 'add' requires an encryption key. Provide a --signed-license or --aes-key to use this.", "error".red().bold());
-                            continue;
+                            safe_println!(
+                                "{} Command 'add' requires an encryption key. Provide a --signed-license (and optionally --pubkey) when launching the editor.",
+                                "error".red().bold(),
+                            );
+                            return Ok(false);
                         }
-
                         let files = sub.get_many::<String>("file").unwrap();
                         let type_override = sub.get_one::<String>("type");
                         let inner_path_arg = sub.get_one::<String>("inner_path");
-
                         for f in files {
                             let f_path = Path::new(f);
                             if !f_path.exists() {
                                 safe_println!("{} Local file not found: {}", "error".red(), f);
                                 continue;
                             }
-                            
                             match std::fs::metadata(f_path) {
                                 Ok(meta) => {
                                     if !meta.is_file() {
-                                        safe_println!("{} Path is not a file: {}", "error".red(), f);
+                                        safe_println!(
+                                            "{} Path is not a file: {}",
+                                            "error".red(),
+                                            f,
+                                        );
                                         continue;
                                     }
                                 }
                                 Err(e) => {
-                                    safe_println!("{} Failed to read metadata for {}: {}", "error".red(), f, e);
+                                    safe_println!(
+                                        "{} Failed to read metadata for {}: {}",
+                                        "error".red(),
+                                        f,
+                                        e,
+                                    );
                                     continue;
                                 }
                             }
-
                             if is_executable(f_path) {
-                                safe_println!("{} Refusing to pack executable file: {}", "error".red(), f);
+                                safe_println!(
+                                    "{} Refusing to pack a executable file: {}",
+                                    "error".red(),
+                                    f,
+                                );
                                 continue;
                             }
-
                             let filename = f_path.file_name().unwrap().to_string_lossy().to_string();
                             let inner_path = inner_path_arg.cloned().unwrap_or(filename);
-                            
                             let data = std::fs::read(f_path)?;
-                            
                             let mut pack_item = match PackItem::new(inner_path.clone(), data) {
                                 Ok(item) => item,
                                 Err(e) => {
@@ -361,90 +421,118 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                                     continue;
                                 }
                             };
-
                             if let Some(tp) = type_override {
                                 pack_item = pack_item.with_type_path(tp);
                             }
-
                             added_files.insert(inner_path.clone(), pack_item.plaintext().to_vec());
-                            
-                            // Staging entry for the REPL to display in 'ls'
-                            entries.push((inner_path.clone(), EncryptedAsset {
-                                dlc_id: dlc_id.clone(),
-                                original_extension: pack_item.ext().unwrap_or_default(),
-                                type_path: pack_item.type_path(),
-                                nonce: [0u8; 12],
-                                ciphertext: vec![].into(),
-                            }));
-                            
-                            safe_println!("Added local file to staging: {} -> {}", f.color(AnsiColors::Cyan), inner_path.color(AnsiColors::Green));
+                            entries.push((
+                                inner_path.clone(),
+                                EncryptedAsset {
+                                    dlc_id: dlc_id.clone(),
+                                    original_extension: pack_item.ext().unwrap_or_default(),
+                                    type_path: pack_item.type_path(),
+                                    nonce: [0u8; 12],
+                                    ciphertext: vec![].into(),
+                                },
+                            ));
+                            safe_println!(
+                                "Added local file to staging: {} -> {}",
+                                f.color(AnsiColors::Cyan),
+                                inner_path.color(AnsiColors::Green),
+                            );
                         }
                         dirty = true;
                     }
                     Some(("id", sub)) => {
                         let new_id = sub.get_one::<String>("new_id").unwrap();
-                        safe_println!("Renaming pack DLC ID: {} -> {}", dlc_id.color(AnsiColors::Magenta), new_id.color(AnsiColors::Magenta).bold());
+                        safe_println!(
+                            "Renaming pack DLC ID: {} -> {}",
+                            dlc_id.color(AnsiColors::Magenta),
+                            new_id.color(AnsiColors::Magenta).bold(),
+                        );
                         dlc_id = new_id.clone();
                         dirty = true;
+                        return Ok(false);
                     }
                     Some(("export", sub)) => {
                         let id = sub.get_one::<String>("id").unwrap();
                         let out_path_str = sub.get_one::<String>("out");
-
                         let target_path = if let Ok(idx) = id.parse::<usize>() {
                             entries.get(idx).map(|(p, _)| p.clone())
                         } else {
-                            entries.iter().find(|(p, _)| p == id).map(|(p, _)| p.clone())
+                            entries
+                                .iter()
+                                .find(|(p, _)| p == id)
+                                .map(|(p, _)| p.clone())
                         };
-
                         if let Some(p) = target_path {
-                            let mut out_dest = out_path_str.map(PathBuf::from).unwrap_or_else(|| PathBuf::from(&p));
-                            // If user provided a path that looks like a directory (exists or ends in slash), append the entry filename
-                            if out_dest.is_dir() || out_path_str.map(|s| s.ends_with('/') || s.ends_with('\\')).unwrap_or(false) {
+                            let mut out_dest = out_path_str
+                                .map(PathBuf::from)
+                                .unwrap_or_else(|| PathBuf::from(&p));
+                            if out_dest.is_dir()
+                                || out_path_str
+                                    .map(|s| s.ends_with('/') || s.ends_with('\\'))
+                                    .unwrap_or(false)
+                            {
                                 if !out_dest.exists() {
                                     std::fs::create_dir_all(&out_dest)?;
                                 }
                                 out_dest.push(&p);
                             }
-
-                            // Ensure parent exists
                             if let Some(parent) = out_dest.parent() {
                                 std::fs::create_dir_all(parent)?;
                             }
-
                             if let Some(ek) = encrypt_key.as_ref() {
                                 if let Some(data) = added_files.get(&p) {
                                     std::fs::write(&out_dest, data)?;
-                                    safe_println!("Exported (staged) file to {}", out_dest.display().to_string().color(AnsiColors::Cyan));
+                                    safe_println!(
+                                        "Exported (staged) file to {}",
+                                        out_dest
+                                            .display()
+                                            .to_string()
+                                            .color(AnsiColors::Cyan),
+                                    );
                                 } else {
-                                    // Must extract from the original pack bytes
-                                    use flate2::read::GzDecoder;
-                                    use tar::Archive;
                                     use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead, Nonce};
+                                    use flate2::read::GzDecoder;
                                     use secure_gate::ExposeSecret;
-
-                                    let cipher = ek.with_secret(|s| Aes256Gcm::new_from_slice(s)).map_err(|_| "Invalid key")?;
+                                    use tar::Archive;
+                                    let cipher = ek
+                                        .with_secret(|s| Aes256Gcm::new_from_slice(s))
+                                        .map_err(|_| "Invalid key")?;
                                     let mut found = false;
-                                    
                                     if let Some((_, first)) = entries.first() {
                                         let nonce = Nonce::from_slice(&first.nonce);
-                                        let pt = cipher.decrypt(nonce, first.ciphertext.as_ref()).map_err(|_| "Decryption failed")?;
+                                        let pt = cipher
+                                            .decrypt(nonce, first.ciphertext.as_ref())
+                                            .map_err(|_| "Decryption failed")?;
                                         let decoder = GzDecoder::new(&pt[..]);
                                         let mut archive = Archive::new(decoder);
-                                        
                                         for entry_res in archive.entries()? {
                                             let mut entry = entry_res?;
                                             if entry.path()?.to_string_lossy() == p {
-                                                let mut out_file = std::fs::File::create(&out_dest)?;
+                                                let mut out_file =
+                                                    std::fs::File::create(&out_dest)?;
                                                 std::io::copy(&mut entry, &mut out_file)?;
-                                                safe_println!("Exported {} to {}", p.color(AnsiColors::Green), out_dest.display().to_string().color(AnsiColors::Cyan));
+                                                safe_println!(
+                                                    "Exported {} to {}",
+                                                    p.color(AnsiColors::Green),
+                                                    out_dest
+                                                        .display()
+                                                        .to_string()
+                                                        .color(AnsiColors::Cyan),
+                                                );
                                                 found = true;
                                                 break;
                                             }
                                         }
                                     }
                                     if !found {
-                                        safe_println!("{} Entry {} not found in archive.", "error".red(), p);
+                                        safe_println!(
+                                            "{} Entry {} not found in archive.",
+                                            "error".red(),
+                                            p,
+                                        );
                                     }
                                 }
                             } else {
@@ -453,38 +541,90 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                         } else {
                             safe_println!("{} Entry not found: {}", "error".red(), id);
                         }
+                        return Ok(false);
                     }
                     Some(("cls", _)) => {
                         safe_print!("\x1B[2J\x1B[1;1H");
                         if let Err(e) = stdout().flush() {
                             if e.kind() == ErrorKind::BrokenPipe {
-                                return Ok(());
+                                return Ok(true);
                             } else {
                                 return Err(e.into());
                             }
                         }
+                        return Ok(false);
                     }
                     Some(("save", _)) => {
                         if !dirty {
                             safe_println!("No changes to save.");
+                        } else if dry_run {
+                            safe_println!("dry-run: would save changes to {}", path.display().to_string().color(AnsiColors::Cyan));
                         } else {
-                            save_pack_optimized(&path, &bytes, version, &product, &dlc_id, &entries, &added_files, encrypt_key.as_ref())?;
-                            safe_println!("Saved changes to {}", path.display().to_string().color(AnsiColors::Cyan));
+                            save_pack_optimized(
+                                &path,
+                                &bytes,
+                                version,
+                                &product,
+                                &dlc_id,
+                                &entries,
+                                &added_files,
+                                encrypt_key.as_ref(),
+                            )?;
+                            safe_println!(
+                                "Saved changes to {}",
+                                path.display()
+                                    .to_string()
+                                    .color(AnsiColors::Cyan),
+                            );
                             dirty = false;
                             added_files.clear();
                         }
+                        return Ok(false);
                     }
                     Some(("merge", sub)) => {
                         let file = sub.get_one::<String>("file").unwrap();
                         let other_path = Path::new(file);
+                        let delete_source = sub.get_flag("delete_source");
+
                         if !other_path.exists() {
                             safe_println!("{} file not found: {}", "error".red(), file);
-                            continue;
+                            return Ok(false);
                         }
+
+                        // try to resolve encryption key if we don't already have one
                         if encrypt_key.is_none() {
-                            safe_println!("{}: merging packs requires an encryption key", "error".red());
-                            continue;
+                            // parse other pack to get product for heuristics
+                            if let Ok(bytes) = std::fs::read(other_path) {
+                                if let Ok((other_prod, _other_did, _ver, _ents)) = 
+                                    parse_encrypted_pack(&bytes)
+                                {
+                                    let (_resolved_pubkey, resolved_license): (Option<String>, Option<String>) = resolve_keys(
+                                        sub.get_one::<String>("pubkey").cloned(),
+                                        sub.get_one::<String>("signed_license").cloned(),
+                                        Some(other_prod.clone()),
+                                        None,
+                                    );
+                                    if encrypt_key.is_none() {
+                                        if let Some(lic) = resolved_license.as_deref() {
+                                            if let Ok(Some(kb)) =
+                                                extract_encrypt_key_from_token(lic)
+                                            {
+                                                encrypt_key = Some(EncryptionKey::from(kb));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
+
+                        if encrypt_key.is_none() {
+                            safe_println!(
+                                "{}: merging packs requires an encryption key",
+                                "error".red(),
+                            );
+                            return Ok(false);
+                        }
+
                         if let Err(e) = merge_pack_into(
                             other_path,
                             &mut entries,
@@ -496,17 +636,42 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                             safe_println!("{}: failed to merge: {}", "error".red(), e);
                         } else {
                             dirty = true;
+                            if delete_source {
+                                if !dry_run {
+                                    let _ = std::fs::remove_file(other_path);
+                                }
+                            }
                         }
+                        return Ok(false);
                     }
                     Some(("exit", _)) => {
                         if dirty {
-                            safe_print!("You have unsaved changes. {}? ({}/{}) ", "Save before exiting".yellow(), 'y'.green(), 'n'.red());
+                            safe_print!(
+                                "You have unsaved changes. {}? ({}/{}) ",
+                                "Save before exiting".yellow(),
+                                'y'.green(),
+                                'n'.red(),
+                            );
                             if let Err(e) = stdout().flush() {
                                 if e.kind() == ErrorKind::BrokenPipe {
-                                    save_pack_optimized(&path, &bytes, version, &product, &dlc_id, &entries, &added_files, encrypt_key.as_ref())?;
-                                    safe_println!("Saved changes to {}", path.display().to_string().color(AnsiColors::Cyan));
+                                    save_pack_optimized(
+                                        &path,
+                                        &bytes,
+                                        version,
+                                        &product,
+                                        &dlc_id,
+                                        &entries,
+                                        &added_files,
+                                        encrypt_key.as_ref(),
+                                    )?;
+                                    safe_println!(
+                                        "Saved changes to {}",
+                                        path.display()
+                                            .to_string()
+                                            .color(AnsiColors::Cyan),
+                                    );
                                     added_files.clear();
-                                    return Ok(());
+                                    return Ok(true);
                                 } else {
                                     return Err(e.into());
                                 }
@@ -514,12 +679,26 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                             let mut confirm = String::new();
                             stdin().read_line(&mut confirm)?;
                             if confirm.trim().eq_ignore_ascii_case("y") {
-                                save_pack_optimized(&path, &bytes, version, &product, &dlc_id, &entries, &added_files, encrypt_key.as_ref())?;
-                                safe_println!("Saved changes to {}", path.display().to_string().color(AnsiColors::Cyan));
+                                save_pack_optimized(
+                                    &path,
+                                    &bytes,
+                                    version,
+                                    &product,
+                                    &dlc_id,
+                                    &entries,
+                                    &added_files,
+                                    encrypt_key.as_ref(),
+                                )?;
+                                safe_println!(
+                                    "Saved changes to {}",
+                                    path.display()
+                                        .to_string()
+                                        .color(AnsiColors::Cyan),
+                                );
                                 added_files.clear();
                             }
                         }
-                        return Ok(());
+                        return Ok(true);
                     }
                     _ => {}
                 }
@@ -528,7 +707,43 @@ pub fn run_edit_repl(path: PathBuf, encrypt_key: Option<EncryptionKey>) -> Resul
                 safe_println!("{}", e);
             }
         }
+        Ok(false)
+    };
+
+    // if a one-shot command was provided via the CLI, execute it and return
+    if let Some(cmd_parts) = initial_command {
+        // pass the raw arguments directly; the parser is configured with
+        // `no_binary_name(true)` so no leading name should be supplied.
+        let _ = execute(cmd_parts)?;
+        return Ok(());
     }
+
+    // interactive loop
+    loop {
+        safe_print!("{} ", ">".color(AnsiColors::Magenta).bold());
+        if let Err(e) = stdout().flush() {
+            if e.kind() == ErrorKind::BrokenPipe {
+                stdout().flush().ok();
+                return Ok(());
+            } else {
+                return Err(e.into());
+            }
+        }
+        let mut input = String::new();
+        stdin().read_line(&mut input)?;
+        let trimmed = input.trim();
+        if trimmed.trim().is_empty() {
+            continue;
+        }
+        let parts: Vec<String> = trimmed.split_whitespace().map(|s| s.to_string()).collect();
+        if parts.is_empty() {
+            continue;
+        }
+        if execute(parts)? {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Save function that attempts to optimize for the case where no files were added/removed, since we can just update the manifest and headers without touching the archive content. If files were added, we have to re-pack the archive which requires the encryption key.
@@ -743,13 +958,10 @@ fn merge_pack_into(
     let ek = encrypt_key.ok_or("encryption key required to merge")?;
 
     let bytes = std::fs::read(other_pack)?;
-    let (other_prod, other_did, _ver, other_entries) = parse_encrypted_pack(&bytes)?;
+    let (other_prod, _other_did, _ver, other_entries) = parse_encrypted_pack(&bytes)?;
 
     if other_prod != current_product {
-        safe_println!("{} Merging from pack product '{}' into '{}'", "warning".yellow().bold(), other_prod, current_product);
-    }
-    if other_did != current_dlc_id {
-        safe_println!("{} Source pack DLC ID '{}' differs from working pack '{}'", "warning".yellow().bold(), other_did, current_dlc_id);
+        return Err(format!("cannot merge two different products '{}' into '{}'", other_prod, current_product).into());
     }
 
     if other_entries.is_empty() {
@@ -820,7 +1032,11 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     use assert_cmd::{Command, pkg_name};
+    use predicates::prelude::*;
     use bevy_dlc::{DlcId, DlcKey, EncryptionKey, pack_encrypted_pack, PackItem, Product};
+    use secure_gate::ExposeSecret;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
 
     #[test]
     fn merge_pack_into_adds_new_files() {
@@ -910,6 +1126,155 @@ mod tests {
             }
         }
         assert!(!found_in_disk, "test.lua should have been stripped from on-disk pack");
+    }
+
+    #[test]
+    fn edit_one_shot_ls() {
+        // verify that providing a command after '--' runs it and exits
+        let dlc_key = DlcKey::generate_random();
+        let enc_key = EncryptionKey::from_random(32);
+        let product = Product::from("prod");
+        let item = PackItem::new("foo.txt", b"hello".to_vec()).unwrap();
+        let bytes = pack_encrypted_pack(&DlcId::from("p".to_string()), &[item], &product, &dlc_key, &enc_key).unwrap();
+
+        let tmp = tempdir().unwrap();
+        let pack_path = tmp.path().join("p.dlcpack");
+        std::fs::write(&pack_path, &bytes).unwrap();
+
+        let mut cmd = Command::new(pkg_name!());
+        cmd.current_dir(tmp.path());
+        cmd.arg("edit").arg("p.dlcpack").arg("--").arg("ls");
+        cmd.assert()
+            .success()
+            // color codes may surround the DLC ID so just look for the prefix
+            .stdout(
+            predicates::str::contains("Entries in ")
+                .and(predicates::str::contains("foo.txt")),
+        );
+    }
+
+    #[test]
+    fn edit_dry_run_save_does_not_modify() {
+        let tmp = tempdir().unwrap();
+        let pack_path = tmp.path().join("p.dlcpack");
+        let dlc_key = DlcKey::generate_random();
+        let enc_key = EncryptionKey::from_random(32);
+        let product = Product::from("prod");
+        let item = PackItem::new("foo.txt", b"hello".to_vec()).unwrap();
+        let bytes = pack_encrypted_pack(&DlcId::from("p".to_string()), &[item], &product, &dlc_key, &enc_key).unwrap();
+        std::fs::write(&pack_path, &bytes).unwrap();
+
+        let mut cmd = Command::new(pkg_name!());
+        cmd.current_dir(tmp.path());
+        cmd.arg("--dry-run").arg("edit").arg("p.dlcpack");
+        cmd.write_stdin("rm foo.txt\nsave\nexit\n");
+        cmd.assert().success();
+
+        let data = std::fs::read(&pack_path).unwrap();
+        let (_p, _id, _v, entries) = parse_encrypted_pack(&data).unwrap();
+        assert!(entries.iter().any(|(p, _)| p == "foo.txt"));
+    }
+
+    #[test]
+    fn merge_with_delete_and_dry_run_behaviour() {
+        let dlc_key = DlcKey::generate_random();
+        let product = Product::from("prod");
+
+        // create a signed license for pack B and compute the corresponding
+        // encryption key; we'll use the same key for both packs so the merge
+        // helper can decrypt the source using the license token.
+        let signed_b = dlc_key
+            .create_signed_license(&[DlcId::from("b".to_string())], product.clone())
+            .unwrap();
+        let enc_key: EncryptionKey = bevy_dlc::extract_encrypt_key_from_license(&signed_b)
+            .expect("license should contain encrypt_key");
+
+        let item_a = PackItem::new("a.txt", b"foo".to_vec()).unwrap();
+        let bytes_a = pack_encrypted_pack(&DlcId::from("a".to_string()), &[item_a], &product, &dlc_key, &enc_key).unwrap();
+        let item_b = PackItem::new("b.txt", b"bar".to_vec()).unwrap();
+        let bytes_b = pack_encrypted_pack(&DlcId::from("b".to_string()), &[item_b], &product, &dlc_key, &enc_key).unwrap();
+
+        let tmp = tempdir().unwrap();
+        let path_a = tmp.path().join("a.dlcpack");
+        let path_b = tmp.path().join("b.dlcpack");
+        std::fs::write(&path_a, &bytes_a).unwrap();
+        std::fs::write(&path_b, &bytes_b).unwrap();
+
+        // convert the previously-created license token into strings we can
+        // pass on the CLI.
+        let mut lic_str = String::new();
+        signed_b.with_secret(|s| lic_str = s.to_string());
+        let pub_b64 = URL_SAFE_NO_PAD.encode(dlc_key.get_public_key().get());
+
+        // normal merge with delete
+        let mut cmd = Command::new(pkg_name!());
+        cmd.current_dir(tmp.path());
+        cmd.arg("edit")
+            .arg("a.dlcpack")
+            .arg("--")
+            .arg("merge")
+            .arg("b.dlcpack")
+            .arg("--signed-license")
+            .arg(&lic_str)
+            .arg("--pubkey")
+            .arg(&pub_b64)
+            .arg("-d");
+        cmd.assert().success();
+        let output = cmd.output().expect("failed to read output");
+        eprintln!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+        assert!(!path_b.exists());
+
+        // recreate b and perform dry-run merge+delete
+        std::fs::write(&path_b, &bytes_b).unwrap();
+        let mut cmd2 = Command::new(pkg_name!());
+        cmd2.current_dir(tmp.path());
+        cmd2.arg("--dry-run")
+            .arg("edit")
+            .arg("a.dlcpack")
+            .arg("--")
+            .arg("merge")
+            .arg("b.dlcpack")
+            .arg("--signed-license")
+            .arg(&lic_str)
+            .arg("--pubkey")
+            .arg(&pub_b64)
+            .arg("-d");
+        cmd2.assert().success();
+        assert!(path_b.exists());
+    }
+
+    #[test]
+    fn pack_and_generate_dry_run() {
+        let tmp = tempdir().unwrap();
+        let file_path = tmp.path().join("foo.txt");
+        std::fs::write(&file_path, b"data").unwrap();
+
+        // pack dry-run
+        let mut cmd = Command::new(pkg_name!());
+        cmd.current_dir(tmp.path());
+        cmd.arg("--dry-run").arg("pack").arg("mypack").arg("--product").arg("prod")
+            .arg("--types").arg("txt=DummyType")
+            .arg("--").arg(file_path.to_str().unwrap());
+        // run pack command with dry-run; we don't need to examine stderr in
+        // the final test version since functionality is covered by earlier
+        // debugging.
+        let mut cmd = Command::new(pkg_name!());
+        cmd.current_dir(tmp.path());
+        cmd.arg("--dry-run").arg("pack").arg("mypack").arg("--product").arg("prod")
+            .arg("--types").arg("txt=DummyType")
+            .arg("--").arg(file_path.to_str().unwrap());
+        cmd.assert().success();
+        assert!(!tmp.path().join("mypack.dlcpack").exists());
+        assert!(!tmp.path().join("prod.slicense").exists());
+        assert!(!tmp.path().join("prod.pubkey").exists());
+
+        // generate dry-run
+        let mut cmd2 = Command::new(pkg_name!());
+        cmd2.current_dir(tmp.path());
+        cmd2.arg("--dry-run").arg("generate").arg("prod").arg("dlc1");
+        cmd2.assert().success();
+        assert!(!tmp.path().join("prod.slicense").exists());
+        assert!(!tmp.path().join("prod.pubkey").exists());
     }
 
     #[test]
