@@ -131,9 +131,6 @@ enum Commands {
     },
 
     /// Validate a `.dlcpack` against a signed license / public key.
-    /// If the license carries an embedded `encrypt_key `, the command will
-    /// attempt to decrypt the container and report success or the failure
-    /// reason (useful for CI or debugging packaging tokens).
     Validate {
         /// path to a .dlcpack file
         #[arg(value_name = "DLC")]
