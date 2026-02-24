@@ -174,18 +174,13 @@ pub fn run_edit_repl(
         dlc_id.as_str().color(AnsiColors::Magenta).bold()
     );
 
-    if encrypt_key.is_some() {
-        // TODO "enabled" shold be green, the rest of the text should be default
-        safe_println!(
-            "{} Encryption key available (adding new files enabled).",
-            "".green()
-        );
+    let adding_enabled = if encrypt_key.is_some() {
+        format!("{}","(adding new files enabled)".green())
     } else {
-        safe_println!(
-            "{} No encryption key provided (adding new files disabled).",
-            "".yellow()
-        );
-    }
+        format!("{}","(adding new files disabled)".yellow())
+    };
+
+    safe_println!("Encryption key available {}.",adding_enabled);
     safe_println!("Type 'help' for commands.");
 
     let mut dirty = false;
