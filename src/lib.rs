@@ -1,8 +1,3 @@
-//! bevy-dlc — DLC gating utilities for Bevy 0.18
-//!
-//! Preload encrypted assets and unlock them using offline-signed (Ed25519)
-//! tokens. See `DlcKey` and `DlcPack` for the runtime API and examples.
-
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bevy::prelude::*;
@@ -14,50 +9,25 @@ mod asset_loader;
 mod encrypt_key_registry;
 mod ext;
 
-// convenience helpers shipped as macros
 mod macros;
 
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 pub use asset_loader::{DlcLoader, DlcPack, DlcPackLoader, EncryptedAsset, parse_encrypted};
 
-// ring is used directly for Ed25519 operations — no external signer trait.
 use serde::{Deserialize, Serialize};
 
 use thiserror::Error;
 
 use crate::asset_loader::DlcPackLoaded;
 
-// expose `AppExt` at the crate root so downstream code (examples/tests/macros)
-// can refer to the trait without touching the private `ext` module.
 pub use crate::ext::AppExt;
 
 pub mod prelude {
     pub use crate::ext::*;
     pub use crate::{
-        // Error
-        DlcError,
-        DlcId,
-        DlcKey,
-        // Asset handling
-        DlcLoader,
-        DlcPack,
-        DlcPackLoader,
-        // Core
-        DlcPlugin,
-        EncryptedAsset,
-        PackItem,
-
-        Product,
-        SignedLicense,
-        VerifiedLicense,
-
-        asset_loader::DlcPackEntry,
-        // Events
-        asset_loader::DlcPackLoaded,
-        is_dlc_entry_loaded,
-
-        // Utility functions and conditions
-        is_dlc_loaded,
+        DlcError, DlcId, DlcKey, DlcLoader, DlcPack, DlcPackLoader, DlcPlugin, EncryptedAsset,
+        PackItem, Product, SignedLicense, VerifiedLicense, asset_loader::DlcPackEntry,
+        asset_loader::DlcPackLoaded, is_dlc_entry_loaded, is_dlc_loaded,
     };
 }
 
@@ -77,11 +47,8 @@ pub mod prelude {
 /// license token (for example, from your platform or the CLI pack output)
 /// to the plugin; the plugin will extract and register encryption keys from it.
 pub struct DlcPlugin {
-    // keep the provided key (public or private) so `build` can insert it into
-    // app resources; field is private to avoid exposing internals.
     dlc_key: DlcKey,
-    // Signed license token provided at construction; applied during `build`
-    // to extract and register the encryption key.
+
     signed_license: SignedLicense,
 }
 
@@ -100,11 +67,9 @@ impl DlcPlugin {
 
 impl Plugin for DlcPlugin {
     fn build(&self, app: &mut App) {
-        // Extract and register the encryption key from the signed license
         if let Some(encrypt_key) = extract_encrypt_key_from_license(&self.signed_license) {
             let dlcs = extract_dlc_ids_from_license(&self.signed_license);
             for dlc_id in dlcs {
-                // Register the encryption key for each DLC ID
                 let key_for_dlc = encrypt_key.with_secret(|kb| EncryptionKey::from(kb.to_vec()));
                 encrypt_key_registry::insert(&dlc_id, key_for_dlc);
             }
@@ -112,7 +77,6 @@ impl Plugin for DlcPlugin {
 
         app.init_resource::<asset_loader::DlcPackRegistrarFactories>();
 
-        // Insert provided key + manager so other systems/resources can access them
         app.insert_resource(self.dlc_key.clone())
             .init_asset_loader::<asset_loader::DlcLoader<Image>>()
             .init_asset_loader::<asset_loader::DlcLoader<Scene>>()
@@ -128,7 +92,6 @@ impl Plugin for DlcPlugin {
             .init_asset_loader::<asset_loader::DlcLoader<AnimationClip>>()
             .init_asset_loader::<asset_loader::DlcLoader<AnimationGraph>>();
 
-        // Build `DlcPackLoader`
         let factories = app
             .world()
             .get_resource::<asset_loader::DlcPackRegistrarFactories>()
@@ -141,7 +104,6 @@ impl Plugin for DlcPlugin {
         app.register_asset_loader(pack_loader);
         app.init_asset::<asset_loader::DlcPack>();
 
-        // Trigger events for DLC packs and entries when they are added to Assets
         app.add_systems(Update, trigger_dlc_events);
     }
 }
@@ -230,7 +192,6 @@ impl std::fmt::Display for DlcId {
     }
 }
 
-// secure-gate aliases for secrets used with `DlcKey`
 fixed_alias!(pub PrivateKey, 32, "A secure wrapper for a 32-byte Ed25519 signing seed (private key) used to create signed licenses. This should be protected and never exposed in logs or error messages.");
 
 /// PublicKey wrapper (32 bytes)
@@ -255,10 +216,7 @@ impl std::fmt::Debug for PublicKey {
     }
 }
 
-// `SignedLicense` — secure, heap-backed string wrapper (secure-gate)
 dynamic_alias!(pub SignedLicense, String, "A compact offline-signed token containing DLC ids and an optional embedded encrypt key. Treat as sensitive and do not leak raw secrets in logs.  This ");
-
-// `ExposeSecret` methods are provided by the alias; keeps the same public API surface.
 
 /// Extract the embedded encryption key from a signed license's payload (base64url-encoded).
 /// Returns `None` if the token is malformed or contains no encrypt_key.
@@ -324,8 +282,6 @@ impl From<&str> for Product {
     }
 }
 
-// `ContentKey`: secure heap-backed secret for symmetric keys
-// use secure-gate's `Dynamic<Vec<u8>>` API (methods are provided by the alias)
 dynamic_alias!(pub EncryptionKey, Vec<u8>, "A secure encrypt key (symmetric key for encrypting DLC pack entries). This should be protected and never exposed in logs or error messages.");
 
 /// Client-side wrapper for Ed25519 key operations: verify tokens and (when
@@ -391,8 +347,6 @@ impl DlcKey {
         privkey: PrivateKey,
         publickey: PublicKey,
     ) -> Result<Self, DlcError> {
-        // derive public bytes from the protected seed and validate via
-        // `from_seed_and_public_key` so we never sign using only the seed
         let kp = privkey
             .with_secret(|priv_bytes| {
                 Ed25519KeyPair::from_seed_and_public_key(priv_bytes, publickey.get())
@@ -401,7 +355,6 @@ impl DlcKey {
         let mut pub_bytes = [0u8; 32];
         pub_bytes.copy_from_slice(kp.public_key().as_ref());
 
-        // validate construction using both seed + public (preferred API)
         privkey
             .with_secret(|priv_bytes| {
                 Ed25519KeyPair::from_seed_and_public_key(priv_bytes, &pub_bytes)
@@ -418,9 +371,8 @@ impl DlcKey {
     ///
     /// The public key is derived from the generated seed so the keypair is valid.
     pub fn generate_random() -> Self {
-        // generate a random seed and derive the matching public key from it
         let privkey: PrivateKey = PrivateKey::from_random();
-        // derive public bytes from the seed using ring
+
         let pair = privkey
             .with_secret(|priv_bytes| Ed25519KeyPair::from_seed_unchecked(priv_bytes))
             .expect("derive public key from seed");
@@ -461,36 +413,32 @@ impl DlcKey {
             ),
         );
 
-        // product is required and always embedded
         payload.insert(
             "product".to_string(),
             serde_json::Value::String(product.get().to_string()),
         );
 
         match self {
-            DlcKey::Private { privkey, pubkey } => {
-                privkey.with_secret(|encrypt_key_bytes| {
-                    // use the private seed itself as the symmetric encrypt key
-                    payload.insert(
-                        "encrypt_key".to_string(),
-                        serde_json::Value::String(URL_SAFE_NO_PAD.encode(encrypt_key_bytes)),
-                    );
+            DlcKey::Private { privkey, pubkey } => privkey.with_secret(|encrypt_key_bytes| {
+                payload.insert(
+                    "encrypt_key".to_string(),
+                    serde_json::Value::String(URL_SAFE_NO_PAD.encode(encrypt_key_bytes)),
+                );
 
-                    let payload_value = serde_json::Value::Object(payload);
-                    let payload_bytes = serde_json::to_vec(&payload_value)
-                        .map_err(|e| DlcError::TokenCreationFailed(e.to_string()))?;
+                let payload_value = serde_json::Value::Object(payload);
+                let payload_bytes = serde_json::to_vec(&payload_value)
+                    .map_err(|e| DlcError::TokenCreationFailed(e.to_string()))?;
 
-                    let pair =
-                        Ed25519KeyPair::from_seed_and_public_key(encrypt_key_bytes, pubkey.get())
-                            .map_err(|e| DlcError::CryptoError(format!("keypair: {:?}", e)))?;
-                    let sig = pair.sign(&payload_bytes);
-                    Ok(SignedLicense::from(format!(
-                        "{}.{}",
-                        URL_SAFE_NO_PAD.encode(&payload_bytes),
-                        URL_SAFE_NO_PAD.encode(sig.as_ref())
-                    )))
-                })
-            }
+                let pair =
+                    Ed25519KeyPair::from_seed_and_public_key(encrypt_key_bytes, pubkey.get())
+                        .map_err(|e| DlcError::CryptoError(format!("{}", e)))?;
+                let sig = pair.sign(&payload_bytes);
+                Ok(SignedLicense::from(format!(
+                    "{}.{}",
+                    URL_SAFE_NO_PAD.encode(&payload_bytes),
+                    URL_SAFE_NO_PAD.encode(sig.as_ref())
+                )))
+            }),
             DlcKey::Public { .. } => Err(DlcError::PrivateKeyRequired),
         }
     }
@@ -529,7 +477,6 @@ impl DlcKey {
     where
         D: std::fmt::Display,
     {
-        // Extract dlc_ids from existing license without verification
         let mut combined_dlcs: Vec<String> = existing.with_secret(|token_str| {
             let parts: Vec<&str> = token_str.split('.').collect();
             if parts.len() != 2 {
@@ -551,7 +498,6 @@ impl DlcKey {
             Vec::new()
         });
 
-        // Merge in new DLC ids (with deduplication)
         for new_dlc in new_dlcs {
             let dlc_str = new_dlc.to_string();
             if !combined_dlcs.contains(&dlc_str) {
@@ -559,7 +505,6 @@ impl DlcKey {
             }
         }
 
-        // Create new signed license with combined dlc_ids
         self.create_signed_license(combined_dlcs, product)
     }
 
@@ -599,8 +544,6 @@ impl DlcKey {
             let lic: LicensePayload = serde_json::from_slice(&payload)
                 .map_err(|e| DlcError::PayloadInvalid(e.to_string()))?;
 
-            // Ignore any embedded `encrypt_key` in the token here — `verify_signed_license`
-            // only validates signature and returns the logical license fields.
             Ok(VerifiedLicense {
                 dlcs: lic.dlcs,
                 iat: lic.iat,
@@ -611,19 +554,13 @@ impl DlcKey {
     }
 }
 
-// Manual Clone impl to allow `DlcKey` to be duplicated while keeping the
-// secret data zeroized in the new copy (we cannot rely on secure-gate's
-// `Clone` impl for aliases because inner types are not `CloneableSecret`).
 impl Clone for DlcKey {
     fn clone(&self) -> Self {
         match self {
-            DlcKey::Private { privkey, pubkey } => {
-                // copy the seed bytes into a new `PrivateKey`
-                privkey.with_secret(|s| DlcKey::Private {
-                    privkey: PrivateKey::new(*s),
-                    pubkey: *pubkey,
-                })
-            }
+            DlcKey::Private { privkey, pubkey } => privkey.with_secret(|s| DlcKey::Private {
+                privkey: PrivateKey::new(*s),
+                pubkey: *pubkey,
+            }),
             DlcKey::Public { pubkey } => DlcKey::Public { pubkey: *pubkey },
         }
     }
@@ -664,7 +601,6 @@ pub struct VerifiedLicense {
     pub product: String,
 }
 
-// AES-GCM helper used to decrypt shipped assets once the DLC is unlocked.
 fn decrypt_with_key(
     key: &EncryptionKey,
     ciphertext: &[u8],
@@ -775,13 +711,16 @@ impl PackItem {
     }
 
     pub fn ext(&self) -> Option<String> {
-        // try to infer from the current path first (useful if path was
-        // modified or normalized); fall back to any recorded original
-        // extension when the path has none or isn't valid UTF-8.
         if let Some(ext) = std::path::Path::new(&self.path)
             .extension()
             .and_then(|e| e.to_str())
-            .and_then(|s| if s.is_empty() { None } else { Some(s.to_string()) })
+            .and_then(|s| {
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.to_string())
+                }
+            })
         {
             Some(ext)
         } else {
@@ -841,7 +780,6 @@ pub fn pack_encrypted_pack(
         ));
     }
 
-    // Get the private key for signing
     let privkey_bytes = match dlc_key {
         DlcKey::Private { privkey, .. } => privkey,
         DlcKey::Public { .. } => {
@@ -851,7 +789,6 @@ pub fn pack_encrypted_pack(
         }
     };
 
-    // refuse inputs that already look like an existing pack container
     for item in items {
         if item.plaintext.len() >= 4 && item.plaintext.starts_with(DLC_PACK_MAGIC) {
             return Err(DlcError::Other(format!(
@@ -860,15 +797,11 @@ pub fn pack_encrypted_pack(
             )));
         }
 
-        // refuse inputs with forbidden extensions or paths that look like applications
-        // not fool-proof but provides a basic sanity check to prevent common mistakes like packing an executable or another pack as an item.
         if is_malicious_file(&item.path, item.original_extension.as_deref()) {
             return Err(DlcError::Other(format!("file not allowed: {}", item.path)));
         }
     }
 
-    // Build a tar.gz archive (in-memory) containing the plaintext files at
-    // their requested relative paths.
     use flate2::{Compression, write::GzEncoder};
     use tar::Builder;
 
@@ -881,7 +814,7 @@ pub fn pack_encrypted_pack(
             header.set_size(item.plaintext.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
-            // append_data takes a reader; Cursor over the slice is convenient
+
             tar.append_data(
                 &mut header,
                 &item.path,
@@ -889,26 +822,24 @@ pub fn pack_encrypted_pack(
             )
             .map_err(|e| DlcError::Other(e.to_string()))?;
         }
-        // finish the tar builder to flush into the gzip encoder
+
         let enc = tar
             .into_inner()
             .map_err(|e| DlcError::Other(e.to_string()))?;
-        // finish the gzip encoder explicitly to ensure all data is written
+
         let _ = enc.finish().map_err(|e| DlcError::Other(e.to_string()))?;
     }
 
-    // produce AES-GCM ciphertext for the whole compressed archive
     let cipher = key.with_secret(|kb| {
         Aes256Gcm::new_from_slice(kb.as_slice()).map_err(|e| DlcError::CryptoError(e.to_string()))
     })?;
-    // generate a random nonce for this encryption (12 bytes for AES-GCM)
+
     let nonce_bytes: [u8; 12] = rand::random();
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
         .encrypt(nonce, tar_gz.as_slice())
         .map_err(|_| DlcError::EncryptionFailed("encryption failed".into()))?;
 
-    // prepare manifest (JSON) with per-entry metadata
     #[derive(serde::Serialize)]
     struct ManifestEntry<'a> {
         path: &'a str,
@@ -929,8 +860,6 @@ pub fn pack_encrypted_pack(
     let manifest_bytes =
         serde_json::to_vec(&manifest).map_err(|e| DlcError::Other(e.to_string()))?;
 
-    // Sign the metadata (product + dlc_id) with the private key
-    // This proves the DLC belongs to the authorized product
     let product_str = product.get();
     let dlc_id_str = dlc_id.to_string();
     let signature = privkey_bytes.with_secret(|priv_bytes| {
@@ -942,7 +871,6 @@ pub fn pack_encrypted_pack(
         Ok::<_, DlcError>(pair.sign(&signature_preimage).as_ref().to_vec())
     })?;
 
-    // serialize BDLP v3: magic | version | product_len | product | signature(64) | dlc_len | dlc_id | manifest_len | manifest | nonce | ciphertext_len | ciphertext
     let mut out = Vec::new();
     out.extend_from_slice(DLC_PACK_MAGIC);
     out.push(3u8); // version 3 (with signature + product)
@@ -981,18 +909,9 @@ pub const DLC_PACK_VERSION: u8 = 3;
 
 /// Extensions that should never be packed into a .dlcpack. We avoid
 /// things that could execute or otherwise abuse the container; games often
-/// expose modding, so content formats like scripts or data files are allowed,
-/// but binary modules and archives are not.
-const FORBIDDEN_EXTENSIONS: [&str; 43] = [
-    "dlcpack", "pubkey", "slicense", // Windows executables & installers
-    "exe", "dll", "sys", "msi", "msp", "com", "scr", "pif", "cpl", "gadget",
-    // Windows scripts
-    "bat", "cmd", "vbs", "vbe", "js", // Windows Script Host can execute .js
-    "jse", "wsf", "wsh", "ps1", "ps2", "psc1", "psc2", // Unix/macOS binaries & scripts
-    "so", "dylib", "bin", "sh", "bash", "command", // Mobile/other package formats
-    "apk", "ipa", "jar", "deb", "rpm",  // Web/Native modules
-    "node", // General archives (to prevent nested/untracked containers)
-    "zip", "7z", "rar", "tar", "gz", "xz",
+/// expose modding, so content formats like scripts or data files are allowed.
+const FORBIDDEN_EXTENSIONS: [&str; 241] = [
+"7z", "accda", "accdb", "accde", "accdr", "ace", "ade", "adp", "app", "appinstaller", "application", "appref", "appx", "appxbundle", "arj", "asax", "asd", "ashx", "asp", "aspx", "b64", "bas", "bat", "bgi", "bin", "btm", "bz", "bz2", "bzip", "bzip2", "cab", "cer", "cfg", "chi", "chm", "cla", "class", "cmd", "com", "cpi", "cpio", "cpl", "crt", "crx", "csh", "der", "desktopthemefile", "diagcab", "diagcfg", "diagpkg", "dll", "dmg", "doc", "docm", "docx", "dotm", "drv", "eml", "exe", "fon", "fxp", "gadget", "grp", "gz", "gzip", "hlp", "hta", "htc", "htm", "html", "htt", "ics", "img", "ini", "ins", "inx", "iqy", "iso", "isp", "isu", "jar", "jnlp", "job", "js", "jse", "ksh", "lha", "lnk", "local", "lz", "lzh", "lzma", "mad", "maf", "mag", "mam", "manifest", "maq", "mar", "mas", "mat", "mav", "maw", "mda", "mdb", "mde", "mdt", "mdw", "mdz", "mht", "mhtml", "mmc", "msc", "msg", "msh", "msh1", "msh1xml", "msh2", "msh2xml", "mshxml", "msi", "msix", "msixbundle", "msm", "msp", "mst", "msu", "ocx", "odt", "one", "onepkg", "onetoc", "onetoc2", "ops", "oxps", "oxt", "paf", "partial", "pcd", "pdf", "pif", "pl", "plg", "pol", "potm", "ppam", "ppkg", "ppsm", "ppt", "pptm", "pptx", "prf", "prg", "ps1", "ps1xml", "ps2", "ps2xml", "psc1", "psc2", "psm1", "pst", "r00", "r01", "r02", "r03", "rar", "reg", "rels", "rev", "rgs", "rpm", "rtf", "scf", "scr", "sct", "search", "settingcontent", "settingscontent", "sh", "shb", "sldm", "slk", "svg", "swf", "sys", "tar", "tbz", "tbz2", "tgz", "tlb", "url", "uue", "vb", "vbe", "vbs", "vbscript", "vdx", "vhd", "vhdx", "vsdm", "vsdx", "vsmacros", "vss", "vssm", "vssx", "vst", "vstm", "vstx", "vsw", "vsx", "vtx", "wbk", "webarchive", "website", "wml", "ws", "wsc", "wsf", "wsh", "xar", "xbap", "xdp", "xlam", "xll", "xlm", "xls", "xlsb", "xlsm", "xlsx", "xltm", "xlw", "xml", "xnk", "xps", "xrm", "xsd", "xsl", "xxe", "xz", "z", "zip",
 ];
 
 /// Helper: returns true if the extension (case-insensitive) is in the forbidden list.
@@ -1025,7 +944,6 @@ pub(crate) fn is_malicious_file(path: &str, ext: Option<&str>) -> bool {
         false
     }
 
-    // Check the extension first (if provided), then fall back to content-based checks.
     if let Some(ext) = ext {
         if is_forbidden_extension(ext) || is_app(path) {
             return true;
@@ -1052,7 +970,6 @@ pub fn parse_encrypted_pack(
 > {
     use std::io::ErrorKind;
 
-    // basic validation and header parsing
     if bytes.len() < 4 + 1 {
         return Err(std::io::Error::new(
             ErrorKind::InvalidData,
@@ -1068,7 +985,6 @@ pub fn parse_encrypted_pack(
     let version = bytes[4];
     let mut offset = 5usize;
 
-    // v3: product | signature(64) | dlc_len | dlc_id | ...
     let product_str = if version == DLC_PACK_VERSION {
         if offset + 2 > bytes.len() {
             return Err(std::io::Error::new(
@@ -1088,7 +1004,6 @@ pub fn parse_encrypted_pack(
             .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
         offset += product_len;
 
-        // read signature (64 bytes for ed25519)
         if offset + 64 > bytes.len() {
             return Err(std::io::Error::new(
                 ErrorKind::InvalidData,
@@ -1097,12 +1012,9 @@ pub fn parse_encrypted_pack(
         }
         let _signature = &bytes[offset..offset + 64].to_vec();
         offset += 64;
-        // Signature validation would happen in loader/manager with public key
-        // For now, we parse and store it but don't verify (verification happens at load time)
 
         prod
     } else if version < DLC_PACK_VERSION {
-        // v1/v2 formats are product-less (legacy); treat as empty/unknown product
         String::new()
     } else {
         return Err(std::io::Error::new(
@@ -1111,7 +1023,6 @@ pub fn parse_encrypted_pack(
         ));
     };
 
-    // read dlc_id (remains same for all versions)
     let dlc_len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
     offset += 2;
     if offset + dlc_len > bytes.len() {
@@ -1124,9 +1035,7 @@ pub fn parse_encrypted_pack(
         .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
     offset += dlc_len;
 
-    // Versioned parsing: v1 = per-entry encrypted items, v2 = single encrypted gzip archive + plaintext manifest
     if version == 1 {
-        // legacy format
         let entry_count = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
         offset += 2;
 
@@ -1176,7 +1085,6 @@ pub fn parse_encrypted_pack(
                 s
             };
 
-            // version 1+ stores an optional serialized type identifier per entry
             let original_type = if version >= 1 {
                 if offset + 2 > bytes.len() {
                     return Err(std::io::Error::new(
@@ -1241,7 +1149,6 @@ pub fn parse_encrypted_pack(
 
         Ok((product_str, dlc_id, 1usize, entries))
     } else if version >= 2 {
-        // new archive-encrypted format: read manifest (u32 len + JSON), then nonce + ciphertext
         if offset + 4 > bytes.len() {
             return Err(std::io::Error::new(
                 ErrorKind::InvalidData,
@@ -1290,7 +1197,6 @@ pub fn parse_encrypted_pack(
         }
         let ciphertext: std::sync::Arc<[u8]> = bytes[offset..offset + ciphertext_len].into();
 
-        // Construct per-entry metadata entries that reference the shared ciphertext
         let mut entries = Vec::with_capacity(manifest.len());
         for v in manifest.into_iter() {
             let path = v
@@ -1337,7 +1243,6 @@ pub fn verify_pack_signature(
     pub_key_str: &str,
     version: u8,
 ) -> Result<bool, DlcError> {
-    // Check magic and version
     if pack_bytes.len() < 5 || &pack_bytes[0..4] != DLC_PACK_MAGIC {
         return Err(DlcError::Other("not a valid dlcpack".into()));
     }
@@ -1349,7 +1254,6 @@ pub fn verify_pack_signature(
 
     let mut offset = 5usize;
 
-    // Extract product
     if offset + 2 > pack_bytes.len() {
         return Err(DlcError::Other("truncated pack format".into()));
     }
@@ -1362,14 +1266,12 @@ pub fn verify_pack_signature(
         .map_err(|_| DlcError::Other("product not valid UTF-8".into()))?;
     offset += product_len;
 
-    // Extract signature (64 bytes)
     if offset + 64 > pack_bytes.len() {
         return Err(DlcError::Other("truncated signature".into()));
     }
     let signature_bytes = pack_bytes[offset..offset + 64].to_vec();
     offset += 64;
 
-    // Extract dlc_id
     if offset + 2 > pack_bytes.len() {
         return Err(DlcError::Other("truncated dlc_id length".into()));
     }
@@ -1381,7 +1283,6 @@ pub fn verify_pack_signature(
     let dlc_id_str = String::from_utf8(pack_bytes[offset..offset + dlc_len].to_vec())
         .map_err(|_| DlcError::Other("dlc_id not valid UTF-8".into()))?;
 
-    // Verify signature: signature is over (product + dlc_id)
     let verifier = DlcKey::public(pub_key_str)?;
     let mut preimage = Vec::new();
     preimage.extend_from_slice(product_str.as_bytes());
@@ -1406,7 +1307,6 @@ pub enum DlcError {
     #[error("payload parse failed: {0}")]
     PayloadInvalid(String),
 
-    // private key / crypto specific
     #[error("private key creation failed: {0}")]
     TokenCreationFailed(String),
     #[error("private key required for this operation")]
@@ -1416,7 +1316,6 @@ pub enum DlcError {
     #[error("crypto error: {0}")]
     CryptoError(String),
 
-    // encryption / decryption
     #[error("encryption failed: {0}")]
     EncryptionFailed(String),
     #[error("{0}")]
@@ -1426,7 +1325,6 @@ pub enum DlcError {
     #[error("invalid nonce: {0}")]
     InvalidNonce(String),
 
-    // DLC / encrypt-key state
     #[error("dlc locked: {0}")]
     DlcLocked(String),
     #[error("no encrypt key for dlc: {0}")]
@@ -1440,7 +1338,6 @@ pub enum DlcError {
     #[error("deprecated version: v{0}")]
     DeprecatedVersion(String),
 
-    // fallback
     #[error("{0}")]
     Other(String),
 }
@@ -1453,8 +1350,6 @@ mod tests {
 
     #[test]
     fn pack_encrypted_pack_rejects_nested_dlc() {
-        // PackItem constructor now rejects payloads starting with container magic,
-        // so we assert that directly rather than invoking pack_encrypted_pack.
         let mut v = Vec::new();
         v.extend_from_slice(DLC_PACK_MAGIC);
         v.extend_from_slice(b"inner");
@@ -1490,7 +1385,7 @@ mod tests {
     fn packitem_rejects_binary_data() {
         let mut v = Vec::new();
         v.extend_from_slice(&[0x4D, 0x5A, 0, 0]);
-        // use non-forbidden extension so PackItem::new succeeds
+
         let pack_item = PackItem::new("evil.dat", v);
         assert!(pack_item.is_err());
     }
@@ -1509,17 +1404,14 @@ mod tests {
         let product = Product::from("test_product");
         let dlc_key = DlcKey::generate_random();
 
-        // Create initial license with two DLC ids
         let initial = dlc_key
             .create_signed_license(&["expansion_a", "expansion_b"], product.clone())
             .expect("create initial license");
 
-        // Extend with a new DLC id
         let extended = dlc_key
             .extend_signed_license(&initial, &["expansion_c"], product.clone())
             .expect("extend license");
 
-        // Verify the extended license contains all three DLC ids
         let verified = dlc_key
             .verify_signed_license(&extended)
             .expect("verify extended license");
@@ -1534,17 +1426,14 @@ mod tests {
         let product = Product::from("test_product");
         let dlc_key = DlcKey::generate_random();
 
-        // Create initial license with a DLC id
         let initial = dlc_key
             .create_signed_license(&["expansion_a"], product.clone())
             .expect("create initial license");
 
-        // Try to extend with the same DLC id (should deduplicate)
         let extended = dlc_key
             .extend_signed_license(&initial, &["expansion_a"], product.clone())
             .expect("extend license");
 
-        // Verify there's only one instance of expansion_a
         let verified = dlc_key
             .verify_signed_license(&extended)
             .expect("verify extended license");
@@ -1611,7 +1500,6 @@ mod tests {
 
     #[test]
     fn real_application_is_malicious() {
-        // This test relies on the presence of a real executable file. We can use the current Rust binary itself as a test case.
         let current_exe = std::env::current_exe().expect("should get current exe path");
         let path_str = current_exe
             .to_str()
@@ -1622,10 +1510,6 @@ mod tests {
         ));
     }
 }
-
-// ============================================================================
-// Test helpers
-// ============================================================================
 
 /// Test helpers for integration tests. These provide controlled access to the
 /// internal registry to support test scenarios. Do not use in production code.

@@ -1,13 +1,13 @@
 use std::collections::HashMap;
-use std::fs::{File};
+use std::fs::File;
 use std::io::Read;
 // Windows exposes a hidden-file flag that we skip; on Unix/macOS the
 // conventional “hidden” file is simply one whose name begins with a dot.
 // Guard the import so the code still builds on non-Windows platforms.
-#[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
@@ -19,7 +19,8 @@ use bevy::{asset::AssetServer, log::LogPlugin};
 use clap::{Parser, Subcommand};
 
 use bevy_dlc::{
-    DLC_PACK_VERSION, EncryptionKey, PackItem, extract_dlc_ids_from_license, pack_encrypted_pack, parse_encrypted_pack, prelude::*
+    DLC_PACK_VERSION, EncryptionKey, PackItem, extract_dlc_ids_from_license, pack_encrypted_pack,
+    parse_encrypted_pack, prelude::*,
 };
 use owo_colors::{AnsiColors, OwoColorize};
 use secure_gate::ExposeSecret;
@@ -30,7 +31,7 @@ mod repl;
 #[command(
     author,
     about = "bevy-dlc helper: pack and unpack .dlcpack containers",
-    long_about = "Utility for creating, inspecting and extracting bevy-dlc encrypted containers.",
+    long_about = "Utility for creating, inspecting and extracting bevy-dlc encrypted containers."
 )]
 struct Cli {
     /// don't perform file changes, just show what would happen
@@ -47,7 +48,7 @@ enum Commands {
     Version {
         /// Optional path to a .dlcpack file; when supplied the command will
         /// also report the encrypted-pack version embedded in the file.
-        #[arg(value_name = "DLC", help = "Optional .dlcpack path")] 
+        #[arg(value_name = "DLC", help = "Optional .dlcpack path")]
         dlc: Option<PathBuf>,
     },
     #[command(
@@ -131,7 +132,7 @@ enum Commands {
     },
 
     /// Validate a `.dlcpack` against a signed license / public key.
-    Validate {
+    Check {
         /// path to a .dlcpack file
         #[arg(value_name = "DLC")]
         dlc: PathBuf,
@@ -189,10 +190,13 @@ enum Commands {
         #[arg(short, long, value_name = "PRODUCT")]
         product: Option<String>,
         /// Optional one-shot REPL command (e.g. `ls`); use `--` to separate from flags
-        #[arg(value_name = "REPL_CMD", last=true)]
+        #[arg(value_name = "REPL_CMD", last = true)]
         command: Vec<String>,
     },
-    #[command(about = "Find a .dlcpack file with specified DLC id in a directory", long_about = "Search for .dlcpack files in a directory (recursively) for a matching DLC id in their manifest. This is useful for locating files when you only have the DLC id and not the filename.")]
+    #[command(
+        about = "Find a .dlcpack file with specified DLC id in a directory",
+        long_about = "Search for .dlcpack files in a directory (recursively) for a matching DLC id in their manifest. This is useful for locating files when you only have the DLC id and not the filename."
+    )]
     Find {
         /// DLC id to search for in .dlcpack files
         #[arg(value_name = "DLC_ID")]
@@ -203,7 +207,7 @@ enum Commands {
         /// Max depth for recursive search (default: 5)
         #[arg(short = 'd', long, default_value_t = 5)]
         max_depth: usize,
-    }
+    },
 }
 
 /// Recursively collect files under `dir`. If `ext_filter` is Some(ext), only
@@ -821,10 +825,19 @@ fn validate_dlc_file(
 }
 
 /// Helper: search for a .dlcpack file with the specified dlc_id under root_path (recursive, up to depth)
-fn find_dlcpack(root_path: &Path, dlc_id: impl Into<DlcId>, depth: Option<usize>) -> Result<(PathBuf, usize, DlcPack), Box<dyn std::error::Error>> {
+fn find_dlcpack(
+    root_path: &Path,
+    dlc_id: impl Into<DlcId>,
+    depth: Option<usize>,
+) -> Result<(PathBuf, usize, DlcPack), Box<dyn std::error::Error>> {
     let dlc_id = dlc_id.into();
     let mut candidates: Vec<PathBuf> = Vec::new();
-    collect_files_recursive(root_path, &mut candidates, Some("dlcpack"), depth.unwrap_or(5))?;
+    collect_files_recursive(
+        root_path,
+        &mut candidates,
+        Some("dlcpack"),
+        depth.unwrap_or(5),
+    )?;
     let mut best_match: Option<(PathBuf, usize, DlcPack)> = None;
     for p in candidates {
         let bytes = std::fs::read(&p)?;
@@ -834,8 +847,8 @@ fn find_dlcpack(root_path: &Path, dlc_id: impl Into<DlcId>, depth: Option<usize>
         if did != dlc_id {
             continue;
         }
-        
-        let pack = DlcPack::from((did,ents));
+
+        let pack = DlcPack::from((did, ents));
         best_match = Some((p, version, pack));
         break;
     }
@@ -913,7 +926,7 @@ async fn pack_command(
             .and_then(|s| s.to_str())
             .map(|s| s.to_string());
         let type_path = type_path_map.get(file).cloned();
-        
+
         let mut item = PackItem::new(rel.clone(), bytes.clone())?;
         if let Some(e) = ext {
             item = item.with_extension(e)?;
@@ -965,7 +978,7 @@ async fn pack_command(
         if path.exists() && path.is_dir() {
             // explicit existing directory
             path.join(format!("{}.dlcpack", dlc_id_str))
-        } else if path.is_file(){
+        } else if path.is_file() {
             // explicit file
             path
         } else {
@@ -1018,26 +1031,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match std::fs::read(&path) {
                     Ok(bytes) => match parse_encrypted_pack(&bytes) {
                         Ok((_prod, did, version, _ents)) => {
-                            println!(
-                                "{} -> {} (pack v{})",
-                                path.display(),
-                                did.as_str(),
-                                version
-                            );
+                            println!("{} -> {} (pack v{})", path.display(), did.as_str(), version);
                         }
                         Err(e) => {
                             print_error(&format!(
                                 "failed to parse dlcpack '{}': {}",
-                                path.display(), e
+                                path.display(),
+                                e
                             ));
                             std::process::exit(1);
                         }
                     },
                     Err(e) => {
-                        print_error(&format!(
-                            "error reading '{}': {}",
-                            path.display(), e
-                        ));
+                        print_error(&format!("error reading '{}': {}", path.display(), e));
                         std::process::exit(1);
                     }
                 }
@@ -1082,7 +1088,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!(
                         "{} -> {} {} (v{}) entries: {}",
                         "dlcpack:".color(AnsiColors::Blue),
-                         did.as_str().color(AnsiColors::Magenta).bold(),
+                        did.as_str().color(AnsiColors::Magenta).bold(),
                         file.display(),
                         version,
                         ents.len()
@@ -1106,7 +1112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
 
-        Commands::Validate {
+        Commands::Check {
             dlc,
             product,
             signed_license,
@@ -1230,7 +1236,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // print token + pubkey to stdout; only write files when not in dry-run mode
             let write_files = !cli.dry_run;
             signedlicense.with_secret(|s| {
-                print_signed_license_and_pubkey(s.as_str(), &dlc_key, write_files, Some(product.as_str()))
+                print_signed_license_and_pubkey(
+                    s.as_str(),
+                    &dlc_key,
+                    write_files,
+                    Some(product.as_str()),
+                )
             });
 
             // optionally emit a random 32-byte AES key (base64url)
@@ -1246,7 +1257,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if cli.dry_run {
-                print_warning(format!("dry-run: would write {} and {}", slicense_path.display(), pubkey_path.display()).as_str());
+                print_warning(
+                    format!(
+                        "dry-run: would write {} and {}",
+                        slicense_path.display(),
+                        pubkey_path.display()
+                    )
+                    .as_str(),
+                );
             } else {
                 println!(
                     "Wrote {} and {}",
@@ -1266,14 +1284,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // read container bytes to get embedded product/dlc id
             let bytes = std::fs::read(&dlc)?;
             let (emb_prod, _emb_did, _v, _ents) = parse_encrypted_pack(&bytes)?;
-            
+
             // resolve pubkey and signed license with fallback to embedded product
-            let (_, sup_lic) = resolve_keys(
-                pubkey,
-                signed_license,
-                product,
-                Some(emb_prod),
-            );
+            let (_, sup_lic) = resolve_keys(pubkey, signed_license, product, Some(emb_prod));
 
             // extract the encryption key from the license if present
             let encrypt_key = if let Some(lic) = sup_lic.as_deref() {
@@ -1284,19 +1297,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|k| EncryptionKey::from(k));
 
             // pass along any trailing arguments as a one-shot command
-            let initial = if command.is_empty() { None } else { Some(command.clone()) };
+            let initial = if command.is_empty() {
+                None
+            } else {
+                Some(command.clone())
+            };
             repl::run_edit_repl(dlc, encrypt_key, initial, cli.dry_run)?;
-        },
-        Commands::Find { dlc_id, dir, max_depth } =>{
-            match find_dlcpack(&dir, dlc_id.clone(), Some(max_depth)) {
-                Ok((path, _version, _pack)) => {
-                    println!("Found .dlcpack at: {}", path.display().bold());
-                },
-                Err(e) => {
-                    print_error(&e.to_string());
-                }
-            }
         }
+        Commands::Find {
+            dlc_id,
+            dir,
+            max_depth,
+        } => match find_dlcpack(&dir, dlc_id.clone(), Some(max_depth)) {
+            Ok((path, _version, _pack)) => {
+                println!("Found .dlcpack at: {}", path.display().bold());
+            }
+            Err(e) => {
+                print_error(&e.to_string());
+            }
+        },
     }
 
     Ok(())

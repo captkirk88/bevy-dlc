@@ -14,7 +14,7 @@ use bevy_dlc::{EncryptedAsset, parse_encrypted_pack};
 
 #[allow(unused)]
 pub mod prelude {
-    pub use super::{app::*, CliTestCtx, TextAsset, TextAssetLoader, TextAssetPlugin};
+    pub use super::{CliTestCtx, TextAsset, TextAssetLoader, TextAssetPlugin, app::*};
 }
 
 /// Lightweight test context to run `bevy-dlc` CLI commands and manage a
@@ -198,9 +198,4 @@ impl CliTestCtx {
 // replicated this boilerplate manually; using the macro keeps things
 // concise and also validates that the macro works.
 
-bevy_dlc::dlc_simple_asset!(
-    TextAsset,
-    TextAssetLoader,
-    TextAssetPlugin,
-    "txt",
-);
+bevy_dlc::dlc_simple_asset!(TextAsset, TextAssetLoader, TextAssetPlugin, "txt",);

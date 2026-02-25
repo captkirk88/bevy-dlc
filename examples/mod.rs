@@ -2,13 +2,7 @@ use bevy::prelude::*;
 
 // A simple text/string asset used in the examples.  the helper macro generates
 // the struct, a loader, and a plugin that registers the loader + DLC type.
-bevy_dlc::dlc_simple_asset!(
-    TextAsset,
-    TextAssetLoader,
-    TextAssetPlugin,
-    "txt",
-    "json",
-);
+bevy_dlc::dlc_simple_asset!(TextAsset, TextAssetLoader, TextAssetPlugin, "txt", "json",);
 
 #[derive(serde::Serialize, serde::Deserialize, Reflect, Clone, Debug)]
 pub struct Person {

@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use bevy::{app::{Plugins, ScheduleRunnerPlugin}, prelude::*};
+use bevy::{
+    app::{Plugins, ScheduleRunnerPlugin},
+    prelude::*,
+};
 use secure_gate::ExposeSecret;
 use tempfile::TempDir;
 
@@ -33,7 +36,10 @@ impl TestAppBuilder {
     }
 
     pub fn with_default_plugins(mut self) -> Self {
-        self.app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / 60.0))));
+        self.app
+            .add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(
+                Duration::from_secs_f64(1.0 / 60.0),
+            )));
         self.app.add_plugins(bevy::window::WindowPlugin {
             primary_window: None,
             ..default()
@@ -83,10 +89,8 @@ impl TestAppBuilder {
             .expect("create signed license");
         let signed_license_for_testapp =
             SignedLicense::from(signed_license.expose_secret().as_str());
-        self.app.add_plugins(DlcPlugin::new(
-            self.dlc_key.clone(),
-            signed_license,
-        ));
+        self.app
+            .add_plugins(DlcPlugin::new(self.dlc_key.clone(), signed_license));
         let mut app = TestApp {
             app: self.app,
             dlc_key: self.dlc_key,
@@ -346,11 +350,14 @@ impl TestApp {
             .to_string_lossy()
             .to_string();
 
-        let item = PackItem::new(filename.clone(), file_bytes).expect("create pack item")
-            .with_extension(original_ext.unwrap_or_default()).expect("valid extension");
+        let item = PackItem::new(filename.clone(), file_bytes)
+            .expect("create pack item")
+            .with_extension(original_ext.unwrap_or_default())
+            .expect("valid extension");
         // derive encryption key and pack same as before
         let signed: SignedLicense = self.signed_license();
-        let enc_key = bevy_dlc::extract_encrypt_key_from_license(&signed).expect("encrypt_key in license");
+        let enc_key =
+            bevy_dlc::extract_encrypt_key_from_license(&signed).expect("encrypt_key in license");
 
         let pack_bytes = pack_encrypted_pack(
             &DlcId::from(dlc_id.to_string()),
@@ -369,14 +376,11 @@ impl TestApp {
     }
 
     /// Original helper maintaining previous signature (items list)
-    pub fn pack_and_load(
-        &mut self,
-        dlc_id: &str,
-        items: &[PackItem],
-    ) -> Handle<bevy_dlc::DlcPack> {
+    pub fn pack_and_load(&mut self, dlc_id: &str, items: &[PackItem]) -> Handle<bevy_dlc::DlcPack> {
         // derive the encryption key embedded in the signed license
         let signed: SignedLicense = self.signed_license();
-        let enc_key: EncryptionKey = bevy_dlc::extract_encrypt_key_from_license(&signed).expect("encrypt_key in license");
+        let enc_key: EncryptionKey =
+            bevy_dlc::extract_encrypt_key_from_license(&signed).expect("encrypt_key in license");
 
         let pack_bytes = pack_encrypted_pack(
             &DlcId::from(dlc_id.to_string()),

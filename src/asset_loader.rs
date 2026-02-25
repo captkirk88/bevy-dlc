@@ -326,7 +326,10 @@ impl DlcPackEntry {
             .replace("\\", "/");
 
             for entry in archive.entries().map_err(|e| {
-                DlcLoaderError::DecryptionFailed(format!("entry='{}' archive read failed: {}", self.path, e))
+                DlcLoaderError::DecryptionFailed(format!(
+                    "entry='{}' archive read failed: {}",
+                    self.path, e
+                ))
             })? {
                 let mut file = entry.map_err(|e| {
                     DlcLoaderError::DecryptionFailed(format!(
@@ -335,18 +338,24 @@ impl DlcPackEntry {
                     ))
                 })?;
                 let path = file.path().map_err(|e| {
-                    DlcLoaderError::DecryptionFailed(format!("entry='{}' archive path error: {}", self.path, e))
+                    DlcLoaderError::DecryptionFailed(format!(
+                        "entry='{}' archive path error: {}",
+                        self.path, e
+                    ))
                 })?;
                 let path_str = path.to_string_lossy().replace("\\", "/");
                 if path_str == subpath {
                     let mut buf = Vec::new();
                     file.read_to_end(&mut buf).map_err(|e| {
-                        DlcLoaderError::DecryptionFailed(format!("entry='{}' read file failed: {}", self.path, e))
+                        DlcLoaderError::DecryptionFailed(format!(
+                            "entry='{}' read file failed: {}",
+                            self.path, e
+                        ))
                     })?;
                     return Ok(buf);
                 }
             }
-            
+
             return Err(DlcLoaderError::DecryptionFailed(format!(
                 "entry='{}' not found in archive",
                 self.path
@@ -374,7 +383,6 @@ impl From<(String, EncryptedAsset)> for DlcPackEntry {
         DlcPackEntry { path, encrypted }
     }
 }
-
 
 /// Represents a `.dlcpack` bundle (multiple encrypted entries).
 #[derive(Asset, TypePath, Clone, Debug)]
@@ -687,8 +695,9 @@ impl AssetLoader for DlcPackLoader {
                     // attempt to find a matching registrar and load directly using
                     // that type. This bypasses extension-based dispatch entirely.
                     if let Some(tp) = type_path {
-                        if let Some(registrar) =
-                            regs.iter().find(|r| fuzzy_type_path_match(r.asset_type_path(), tp))
+                        if let Some(registrar) = regs
+                            .iter()
+                            .find(|r| fuzzy_type_path_match(r.asset_type_path(), tp))
                         {
                             match registrar
                                 .load_direct(
@@ -988,9 +997,7 @@ mod tests {
     fn decrypt_pack_entries_without_key_returns_locked_error() {
         crate::encrypt_key_registry::clear_all();
         let dlc_id = crate::DlcId::from("locked_dlc");
-        let items = vec![
-            PackItem::new("a.txt", b"hello".to_vec()).expect("pack item"),
-        ];
+        let items = vec![PackItem::new("a.txt", b"hello".to_vec()).expect("pack item")];
         let key = EncryptionKey::from_random(32);
         let dlc_key = crate::DlcKey::generate_random();
         let product = crate::Product::from("test");
@@ -1008,9 +1015,7 @@ mod tests {
     fn decrypt_pack_entries_with_wrong_key_reports_entry_and_dlc() {
         crate::encrypt_key_registry::clear_all();
         let dlc_id = crate::DlcId::from("badkey_dlc");
-        let items = vec![
-            PackItem::new("b.txt", b"world".to_vec()).expect("pack item"),
-        ];
+        let items = vec![PackItem::new("b.txt", b"world".to_vec()).expect("pack item")];
         let real_key = EncryptionKey::from_random(32);
         let dlc_key = crate::DlcKey::generate_random();
         let product = crate::Product::from("test");
@@ -1183,10 +1188,12 @@ where
             if let Ok(erased) = attempt {
                 match erased.downcast::<A>() {
                     Ok(loaded) => return Ok(loaded.take()),
-                    Err(_) => return Err(DlcLoaderError::DecryptionFailed(format!(
-                        "dlc loader: extension-based load succeeded but downcast to '{}' failed",
-                        A::type_path(),
-                    ))),
+                    Err(_) => {
+                        return Err(DlcLoaderError::DecryptionFailed(format!(
+                            "dlc loader: extension-based load succeeded but downcast to '{}' failed",
+                            A::type_path(),
+                        )));
+                    }
                 }
             } else if let Err(e) = attempt {
                 return Err(DlcLoaderError::DecryptionFailed(e.to_string()));
@@ -1198,7 +1205,12 @@ where
         // already logged a warning, so just surface a generic message.
         Err(DlcLoaderError::DecryptionFailed(format!(
             "dlc loader: unable to load decrypted asset as {}{}",
-            A::type_path(), if ext.is_empty() { "" } else { " (extension fallback also failed)" }
+            A::type_path(),
+            if ext.is_empty() {
+                ""
+            } else {
+                " (extension fallback also failed)"
+            }
         )))
     }
 }

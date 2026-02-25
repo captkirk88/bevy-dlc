@@ -1,8 +1,8 @@
-use std::io::{Write, stdin, stdout, ErrorKind};
-use std::path::{PathBuf, Path};
-use clap::{Arg, Command, ArgAction};
+use bevy_dlc::{DLC_PACK_MAGIC, DLC_PACK_VERSION, EncryptionKey, parse_encrypted_pack, prelude::*};
+use clap::{Arg, ArgAction, Command};
 use owo_colors::{AnsiColors, CssColors, OwoColorize};
-use bevy_dlc::{prelude::*, DLC_PACK_MAGIC, DLC_PACK_VERSION, parse_encrypted_pack, EncryptionKey};
+use std::io::{ErrorKind, Write, stdin, stdout};
+use std::path::{Path, PathBuf};
 
 // Helper that rewrites a `.dlcpack` container to strip out any files that are
 // present in the encrypted tar archive but not mentioned in the manifest.  The
@@ -13,19 +13,23 @@ fn remove_stray_entries_from_pack(
     pack_path: &Path,
     encrypt_key: &EncryptionKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead, Nonce};
-    use flate2::{read::GzDecoder, write::GzEncoder, Compression};
-    use tar::Archive;
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+    use flate2::{Compression, read::GzDecoder, write::GzEncoder};
     use secure_gate::ExposeSecret;
+    use tar::Archive;
 
     let bytes = std::fs::read(pack_path)?;
     let (product, did, ver, entries) = parse_encrypted_pack(&bytes)?;
 
     // decrypt archive blob
-    let cipher = encrypt_key.with_secret(|s| Aes256Gcm::new_from_slice(s)).map_err(|_| "cipher init")?;
+    let cipher = encrypt_key
+        .with_secret(|s| Aes256Gcm::new_from_slice(s))
+        .map_err(|_| "cipher init")?;
     let first = &entries[0].1;
     let nonce = Nonce::from_slice(&first.nonce);
-    let pt = cipher.decrypt(nonce, first.ciphertext.as_ref()).map_err(|_| "decryption failed")?;
+    let pt = cipher
+        .decrypt(nonce, first.ciphertext.as_ref())
+        .map_err(|_| "decryption failed")?;
     let decoder = GzDecoder::new(&pt[..]);
     let mut archive = Archive::new(decoder);
 
@@ -64,8 +68,12 @@ fn remove_stray_entries_from_pack(
     let compressed = gz.finish()?;
 
     let nonce_bytes: [u8; 12] = rand::random();
-    let cipher = encrypt_key.with_secret(|s| Aes256Gcm::new_from_slice(s)).map_err(|_| "cipher init")?;
-    let ciphertext = cipher.encrypt(Nonce::from_slice(&nonce_bytes), compressed.as_ref()).map_err(|_| "encryption failed")?;
+    let cipher = encrypt_key
+        .with_secret(|s| Aes256Gcm::new_from_slice(s))
+        .map_err(|_| "cipher init")?;
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), compressed.as_ref())
+        .map_err(|_| "encryption failed")?;
 
     let mut out = Vec::new();
     out.extend_from_slice(DLC_PACK_MAGIC);
@@ -161,8 +169,12 @@ pub fn run_edit_repl(
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read(&path)?;
-    let (product, mut dlc_id, version, mut entries): (String, String, usize, Vec<(String, EncryptedAsset)>) =
-        parse_encrypted_pack(&bytes)?;
+    let (product, mut dlc_id, version, mut entries): (
+        String,
+        String,
+        usize,
+        Vec<(String, EncryptedAsset)>,
+    ) = parse_encrypted_pack(&bytes)?;
 
     safe_println!(
         "{} {} (v{}, {}: {}, dlc: {})",
@@ -175,12 +187,12 @@ pub fn run_edit_repl(
     );
 
     let adding_enabled = if encrypt_key.is_some() {
-        format!("{}","(adding new files enabled)".green())
+        format!("{}", "(adding new files enabled)".green())
     } else {
-        format!("{}","(adding new files disabled)".yellow())
+        format!("{}", "(adding new files disabled)".yellow())
     };
 
-    safe_println!("Encryption key available {}.",adding_enabled);
+    safe_println!("Encryption key available {}.", adding_enabled);
     safe_println!("Type 'help' for commands.");
 
     let mut dirty = false;
@@ -190,7 +202,7 @@ pub fn run_edit_repl(
     // helper to build the command parser so we can reuse it both in the
     // interactive loop and for the one-shot invocation.
     let build_repl_cli = || {
-        Command::new("repl")
+        Command::new("edit")
             .no_binary_name(true)
             .subcommand(Command::new("info").about("Show pack info"))
             .subcommand(
@@ -202,20 +214,33 @@ pub fn run_edit_repl(
                 Command::new("type")
                     .about("Set type_path for entry")
                     .visible_alias("ty")
-                    .arg(Arg::new("id").help("Index or path of the entry").required(true))
+                    .arg(
+                        Arg::new("id")
+                            .help("Index or path of the entry")
+                            .required(true),
+                    )
                     .arg(Arg::new("type").help("New TypePath").required(true)),
             )
             .subcommand(
                 Command::new("rm")
                     .about("Remove entry from manifest")
                     .visible_alias("remove")
-                    .arg(Arg::new("id").help("Index or path of the entry").required(true)),
+                    .arg(
+                        Arg::new("id")
+                            .help("Index or path of the entry")
+                            .required(true),
+                    ),
             )
             .subcommand(
                 Command::new("add")
                     .about("Add new local file to the pack (requires encryption key)")
                     .visible_alias("new")
-                    .arg(Arg::new("file").help("Local filesystem path").required(true).num_args(1..))
+                    .arg(
+                        Arg::new("file")
+                            .help("Local filesystem path")
+                            .required(true)
+                            .num_args(1..),
+                    )
                     .arg(
                         Arg::new("inner_path")
                             .short('p')
@@ -233,22 +258,35 @@ pub fn run_edit_repl(
                 Command::new("id")
                     .about("Set the DLC ID for this pack")
                     .visible_alias("set-id")
-                    .arg(
-                        Arg::new("new_id").help("The new DLC ID").required(true),
-                    ),
+                    .arg(Arg::new("new_id").help("The new DLC ID").required(true)),
             )
             .subcommand(
                 Command::new("export")
                     .about("Export (decrypt and save) an entry to a local file")
-                    .arg(Arg::new("id").help("Index or path of the entry").required(true))
-                    .arg(Arg::new("out").help("Optional output destination path (defaults to entry name)")),
+                    .arg(
+                        Arg::new("id")
+                            .help("Index or path of the entry")
+                            .required(true),
+                    )
+                    .arg(
+                        Arg::new("out")
+                            .help("Optional output destination path (defaults to entry name)"),
+                    ),
             )
-            .subcommand(Command::new("cls").about("Clear the console").visible_alias("clear"))
+            .subcommand(
+                Command::new("cls")
+                    .about("Clear the console")
+                    .visible_alias("clear"),
+            )
             .subcommand(Command::new("save").about("Write changes back to disk"))
             .subcommand(
                 Command::new("merge")
                     .about("Merge entries from another .dlcpack into the current one")
-                    .arg(Arg::new("file").help("Path to other dlcpack").required(true))
+                    .arg(
+                        Arg::new("file")
+                            .help("Path to other dlcpack")
+                            .required(true),
+                    )
                     .arg(
                         Arg::new("signed_license")
                             .long("signed-license")
@@ -269,7 +307,12 @@ pub fn run_edit_repl(
                             .action(ArgAction::SetTrue),
                     ),
             )
-            .subcommand(Command::new("exit").about("Exit the editor").visible_alias("quit").visible_alias("q"))
+            .subcommand(
+                Command::new("exit")
+                    .about("Exit the editor")
+                    .visible_alias("quit")
+                    .visible_alias("q"),
+            )
     };
 
     // wrapper that executes a single parsed command. returns `true` if we
@@ -281,17 +324,24 @@ pub fn run_edit_repl(
             Ok(matches) => {
                 match matches.subcommand() {
                     Some(("info", _)) => {
-                        safe_println!("Pack info: {}", path.display().to_string().color(AnsiColors::Cyan));
+                        safe_println!(
+                            "Pack info: {}",
+                            path.display().to_string().color(AnsiColors::Cyan)
+                        );
                         safe_println!(" Product: {}", product.color(AnsiColors::Blue));
                         safe_println!(" DLC ID: {}", dlc_id.color(AnsiColors::Magenta));
-                        safe_println!(" Version: {}", version.to_string().color(AnsiColors::Yellow));
+                        safe_println!(
+                            " Version: {}",
+                            version.to_string().color(AnsiColors::Yellow)
+                        );
                         if let Some((_, enc)) = entries.first() {
                             safe_println!(
                                 " Content Size: {}",
                                 human_bytes(enc.ciphertext.len()).color(CssColors::SlateGray),
                             );
                         } else {
-                            let total: usize = entries.iter().map(|(_, e)| e.ciphertext.len()).sum();
+                            let total: usize =
+                                entries.iter().map(|(_, e)| e.ciphertext.len()).sum();
                             safe_println!(
                                 " Content Size (approx): {}",
                                 human_bytes(total).color(CssColors::SlateGray),
@@ -406,7 +456,8 @@ pub fn run_edit_repl(
                                 );
                                 continue;
                             }
-                            let filename = f_path.file_name().unwrap().to_string_lossy().to_string();
+                            let filename =
+                                f_path.file_name().unwrap().to_string_lossy().to_string();
                             let inner_path = inner_path_arg.cloned().unwrap_or(filename);
                             let data = std::fs::read(f_path)?;
                             let mut pack_item = match PackItem::new(inner_path.clone(), data) {
@@ -482,13 +533,10 @@ pub fn run_edit_repl(
                                     std::fs::write(&out_dest, data)?;
                                     safe_println!(
                                         "Exported (staged) file to {}",
-                                        out_dest
-                                            .display()
-                                            .to_string()
-                                            .color(AnsiColors::Cyan),
+                                        out_dest.display().to_string().color(AnsiColors::Cyan),
                                     );
                                 } else {
-                                    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead, Nonce};
+                                    use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
                                     use flate2::read::GzDecoder;
                                     use secure_gate::ExposeSecret;
                                     use tar::Archive;
@@ -531,7 +579,10 @@ pub fn run_edit_repl(
                                     }
                                 }
                             } else {
-                                safe_println!("{} Exporting requires an encryption key.", "error".red());
+                                safe_println!(
+                                    "{} Exporting requires an encryption key.",
+                                    "error".red()
+                                );
                             }
                         } else {
                             safe_println!("{} Entry not found: {}", "error".red(), id);
@@ -553,7 +604,10 @@ pub fn run_edit_repl(
                         if !dirty {
                             safe_println!("No changes to save.");
                         } else if dry_run {
-                            safe_println!("dry-run: would save changes to {}", path.display().to_string().color(AnsiColors::Cyan));
+                            safe_println!(
+                                "dry-run: would save changes to {}",
+                                path.display().to_string().color(AnsiColors::Cyan)
+                            );
                         } else {
                             save_pack_optimized(
                                 &path,
@@ -567,9 +621,7 @@ pub fn run_edit_repl(
                             )?;
                             safe_println!(
                                 "Saved changes to {}",
-                                path.display()
-                                    .to_string()
-                                    .color(AnsiColors::Cyan),
+                                path.display().to_string().color(AnsiColors::Cyan),
                             );
                             dirty = false;
                             added_files.clear();
@@ -590,10 +642,13 @@ pub fn run_edit_repl(
                         if encrypt_key.is_none() {
                             // parse other pack to get product for heuristics
                             if let Ok(bytes) = std::fs::read(other_path) {
-                                if let Ok((other_prod, _other_did, _ver, _ents)) = 
+                                if let Ok((other_prod, _other_did, _ver, _ents)) =
                                     parse_encrypted_pack(&bytes)
                                 {
-                                    let (_resolved_pubkey, resolved_license): (Option<String>, Option<String>) = resolve_keys(
+                                    let (_resolved_pubkey, resolved_license): (
+                                        Option<String>,
+                                        Option<String>,
+                                    ) = resolve_keys(
                                         sub.get_one::<String>("pubkey").cloned(),
                                         sub.get_one::<String>("signed_license").cloned(),
                                         Some(other_prod.clone()),
@@ -661,9 +716,7 @@ pub fn run_edit_repl(
                                     )?;
                                     safe_println!(
                                         "Saved changes to {}",
-                                        path.display()
-                                            .to_string()
-                                            .color(AnsiColors::Cyan),
+                                        path.display().to_string().color(AnsiColors::Cyan),
                                     );
                                     added_files.clear();
                                     return Ok(true);
@@ -686,9 +739,7 @@ pub fn run_edit_repl(
                                 )?;
                                 safe_println!(
                                     "Saved changes to {}",
-                                    path.display()
-                                        .to_string()
-                                        .color(AnsiColors::Cyan),
+                                    path.display().to_string().color(AnsiColors::Cyan),
                                 );
                                 added_files.clear();
                             }
@@ -750,14 +801,14 @@ fn save_pack_optimized(
     dlc_id: &str,
     entries: &[(String, EncryptedAsset)],
     added_files: &std::collections::HashMap<String, Vec<u8>>,
-    encrypt_key: Option<&EncryptionKey>
+    encrypt_key: Option<&EncryptionKey>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
     use flate2::Compression;
     use flate2::read::GzDecoder;
     use flate2::write::GzEncoder;
-    use tar::{Archive, Builder};
-    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead, Nonce};
     use secure_gate::ExposeSecret;
+    use tar::{Archive, Builder};
 
     // If no files were ADDED, we can just update the manifest and headers without re-encrypting the archive.
     if added_files.is_empty() {
@@ -765,36 +816,41 @@ fn save_pack_optimized(
     }
 
     // Re-packing requires the key
-    let ek = encrypt_key.ok_or("Re-packing with new files requires an signed license (--signed-license)")?;
-    
+    let ek = encrypt_key
+        .ok_or("Re-packing with new files requires an signed license (--signed-license)")?;
+
     // 1. Recover old archive content
     let (_old_prod, _old_did, _old_v, old_entries) = parse_encrypted_pack(bytes)?;
-    
+
     let mut new_tar_buffer = Vec::new();
     {
         let mut builder = Builder::new(&mut new_tar_buffer);
-        
+
         // 1a. Extract and add existing files from original archive
         if let Some((_, first)) = old_entries.first() {
-            let cipher = ek.with_secret(|s| Aes256Gcm::new_from_slice(s)).map_err(|_| "Invalid key")?;
+            let cipher = ek
+                .with_secret(|s| Aes256Gcm::new_from_slice(s))
+                .map_err(|_| "Invalid key")?;
             let nonce = Nonce::from_slice(&first.nonce);
-            let pt = cipher.decrypt(nonce, first.ciphertext.as_ref()).map_err(|_| "Decryption failed (key may be incorrect for this pack)")?;
-            
+            let pt = cipher
+                .decrypt(nonce, first.ciphertext.as_ref())
+                .map_err(|_| "Decryption failed (key may be incorrect for this pack)")?;
+
             let mut decoder = GzDecoder::new(&pt[..]);
             let mut archive = Archive::new(&mut decoder);
-            
+
             for entry in archive.entries()? {
                 let mut entry = entry?;
                 let path = entry.path()?.to_path_buf();
                 let path_str = path.to_string_lossy().to_string();
-                
+
                 // Only keep it if it wasn't REMOVED in the REPL
                 if entries.iter().any(|(p, _)| p == &path_str) {
                     builder.append_data(&mut entry.header().clone(), &path, &mut entry)?;
                 }
             }
         }
-        
+
         // 1b. Add newly staged files
         for (p, data) in added_files {
             let mut header = tar::Header::new_gnu();
@@ -815,8 +871,12 @@ fn save_pack_optimized(
         n.copy_from_slice(&kb[0..12]);
         n
     });
-    let cipher = ek.with_secret(|s| Aes256Gcm::new_from_slice(s)).map_err(|_| "Cipher error")?;
-    let ciphertext = cipher.encrypt(Nonce::from_slice(&nonce_bytes), compressed.as_ref()).map_err(|_| "Encryption error")?;
+    let cipher = ek
+        .with_secret(|s| Aes256Gcm::new_from_slice(s))
+        .map_err(|_| "Cipher error")?;
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), compressed.as_ref())
+        .map_err(|_| "Encryption error")?;
 
     // 3. Assemble final container
     let mut out = Vec::new();
@@ -827,7 +887,7 @@ fn save_pack_optimized(
         let prod_bytes = product.as_bytes();
         out.extend_from_slice(&(prod_bytes.len() as u16).to_be_bytes());
         out.extend_from_slice(prod_bytes);
-        
+
         let sig_offset = 4 + 1 + 2 + prod_bytes.len();
         out.extend_from_slice(&bytes[sig_offset..sig_offset + 64]);
     }
@@ -845,10 +905,15 @@ fn save_pack_optimized(
         type_path: Option<&'a str>,
     }
 
-    let manifest: Vec<ManifestEntry<'_>> = entries.iter().map(|(p, enc)| {
-        ManifestEntry { path: p, original_extension: Some(&enc.original_extension), type_path: enc.type_path.as_deref() }
-    }).collect();
-    
+    let manifest: Vec<ManifestEntry<'_>> = entries
+        .iter()
+        .map(|(p, enc)| ManifestEntry {
+            path: p,
+            original_extension: Some(&enc.original_extension),
+            type_path: enc.type_path.as_deref(),
+        })
+        .collect();
+
     let manifest_bytes = serde_json::to_vec(&manifest)?;
     out.extend_from_slice(&(manifest_bytes.len() as u32).to_be_bytes());
     out.extend_from_slice(&manifest_bytes);
@@ -868,7 +933,7 @@ fn update_manifest(
     version: usize,
     product: &str,
     dlc_id: &str,
-    entries: &[(String, EncryptedAsset)]
+    entries: &[(String, EncryptedAsset)],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut out = Vec::new();
     out.extend_from_slice(DLC_PACK_MAGIC);
@@ -878,7 +943,7 @@ fn update_manifest(
         let prod_bytes = product.as_bytes();
         out.extend_from_slice(&(prod_bytes.len() as u16).to_be_bytes());
         out.extend_from_slice(prod_bytes);
-        
+
         let sig_offset = 4 + 1 + 2 + prod_bytes.len();
         out.extend_from_slice(&bytes[sig_offset..sig_offset + 64]);
     }
@@ -896,14 +961,15 @@ fn update_manifest(
         type_path: Option<&'a str>,
     }
 
-    let manifest: Vec<ManifestEntry<'_>> = entries.iter().map(|(p, enc)| {
-        ManifestEntry {
+    let manifest: Vec<ManifestEntry<'_>> = entries
+        .iter()
+        .map(|(p, enc)| ManifestEntry {
             path: p,
             original_extension: Some(&enc.original_extension),
             type_path: enc.type_path.as_deref(),
-        }
-    }).collect();
-    
+        })
+        .collect();
+
     let manifest_bytes = serde_json::to_vec(&manifest)?;
     out.extend_from_slice(&(manifest_bytes.len() as u32).to_be_bytes());
     out.extend_from_slice(&manifest_bytes);
@@ -945,10 +1011,10 @@ fn merge_pack_into(
     current_product: &str,
     current_dlc_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead, Nonce};
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
     use flate2::read::GzDecoder;
-    use tar::Archive;
     use secure_gate::ExposeSecret;
+    use tar::Archive;
 
     let ek = encrypt_key.ok_or("encryption key required to merge")?;
 
@@ -956,7 +1022,11 @@ fn merge_pack_into(
     let (other_prod, _other_did, _ver, other_entries) = parse_encrypted_pack(&bytes)?;
 
     if other_prod != current_product {
-        return Err(format!("cannot merge two different products '{}' into '{}'", other_prod, current_product).into());
+        return Err(format!(
+            "cannot merge two different products '{}' into '{}'",
+            other_prod, current_product
+        )
+        .into());
     }
 
     if other_entries.is_empty() {
@@ -964,11 +1034,15 @@ fn merge_pack_into(
     }
 
     // decrypt blob from the other pack
-    let cipher = ek.with_secret(|s| Aes256Gcm::new_from_slice(s)).map_err(|_| "cipher init");
+    let cipher = ek
+        .with_secret(|s| Aes256Gcm::new_from_slice(s))
+        .map_err(|_| "cipher init");
     let cipher = cipher?;
     let first = &other_entries[0].1;
     let nonce = Nonce::from_slice(&first.nonce);
-    let pt = cipher.decrypt(nonce, first.ciphertext.as_ref()).map_err(|_| "decryption failed (key mismatch?)")?;
+    let pt = cipher
+        .decrypt(nonce, first.ciphertext.as_ref())
+        .map_err(|_| "decryption failed (key mismatch?)")?;
     let decoder = GzDecoder::new(&pt[..]);
     let mut archive = Archive::new(decoder);
 
@@ -1003,13 +1077,16 @@ fn merge_pack_into(
         }
 
         added_files.insert(path.clone(), pack_item.plaintext().to_vec());
-        entries.push((path.clone(), EncryptedAsset {
-            dlc_id: current_dlc_id.to_string(),
-            original_extension: pack_item.ext().unwrap_or_default(),
-            type_path: pack_item.type_path(),
-            nonce: [0u8; 12],
-            ciphertext: vec![].into(),
-        }));
+        entries.push((
+            path.clone(),
+            EncryptedAsset {
+                dlc_id: current_dlc_id.to_string(),
+                original_extension: pack_item.ext().unwrap_or_default(),
+                type_path: pack_item.type_path(),
+                nonce: [0u8; 12],
+                ciphertext: vec![].into(),
+            },
+        ));
         safe_println!("Merged entry: {}", path.color(AnsiColors::Green));
     }
 
@@ -1021,17 +1098,16 @@ fn merge_pack_into(
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use assert_cmd::{Command, pkg_name};
-    use predicates::prelude::*;
-    use bevy_dlc::{DlcId, DlcKey, EncryptionKey, pack_encrypted_pack, PackItem, Product};
-    use secure_gate::ExposeSecret;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use bevy_dlc::{DlcId, DlcKey, EncryptionKey, PackItem, Product, pack_encrypted_pack};
+    use predicates::prelude::*;
+    use secure_gate::ExposeSecret;
+    use tempfile::tempdir;
 
     #[test]
     fn merge_pack_into_adds_new_files() {
@@ -1041,10 +1117,24 @@ mod tests {
         let product = Product::from("prod");
 
         let item1 = PackItem::new("a.txt", b"foo".to_vec()).unwrap();
-        let bytes_a = pack_encrypted_pack(&DlcId::from("a".to_string()), &[item1], &product, &dlc_key, &enc_key).unwrap();
+        let bytes_a = pack_encrypted_pack(
+            &DlcId::from("a".to_string()),
+            &[item1],
+            &product,
+            &dlc_key,
+            &enc_key,
+        )
+        .unwrap();
 
         let item2 = PackItem::new("b.txt", b"bar".to_vec()).unwrap();
-        let bytes_b = pack_encrypted_pack(&DlcId::from("b".to_string()), &[item2], &product, &dlc_key, &enc_key).unwrap();
+        let bytes_b = pack_encrypted_pack(
+            &DlcId::from("b".to_string()),
+            &[item2],
+            &product,
+            &dlc_key,
+            &enc_key,
+        )
+        .unwrap();
 
         let dir = tempdir().unwrap();
         let path_a = dir.path().join("a.dlcpack");
@@ -1056,7 +1146,15 @@ mod tests {
         let mut added_files = std::collections::HashMap::new();
 
         // merge pack B into A
-        merge_pack_into(&path_b, &mut entries, &mut added_files, Some(&enc_key), "prod", "a").unwrap();
+        merge_pack_into(
+            &path_b,
+            &mut entries,
+            &mut added_files,
+            Some(&enc_key),
+            "prod",
+            "a",
+        )
+        .unwrap();
 
         // expect the new entry to be staged
         assert!(entries.iter().any(|(p, _)| p == "b.txt"));
@@ -1089,9 +1187,20 @@ mod tests {
 
         // merge the copy into itself; stray entries should be skipped and the
         // pack file rewritten to remove them.
-        merge_pack_into(&tmp_pack, &mut entries, &mut added_files, Some(&enc_key), "example", "dlcA").unwrap();
+        merge_pack_into(
+            &tmp_pack,
+            &mut entries,
+            &mut added_files,
+            Some(&enc_key),
+            "example",
+            "dlcA",
+        )
+        .unwrap();
 
-        assert!(!entries.iter().any(|(p, _)| p == "test.lua"), "unexpected unmanifested entry added");
+        assert!(
+            !entries.iter().any(|(p, _)| p == "test.lua"),
+            "unexpected unmanifested entry added"
+        );
         assert!(!added_files.contains_key("test.lua"));
 
         // verify the on-disk copy no longer contains the stray file
@@ -1099,12 +1208,14 @@ mod tests {
         let mut found_in_disk = false;
         // decrypt and scan archive directly
         {
-            use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead, Nonce};
+            use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
             use flate2::read::GzDecoder;
-            use tar::Archive;
             use secure_gate::ExposeSecret;
+            use tar::Archive;
 
-            let cipher = enc_key.with_secret(|s| Aes256Gcm::new_from_slice(s)).unwrap();
+            let cipher = enc_key
+                .with_secret(|s| Aes256Gcm::new_from_slice(s))
+                .unwrap();
             let (_, _, _, disk_entries) = parse_encrypted_pack(&cleaned_bytes).unwrap();
             if let Some((_, first)) = disk_entries.first() {
                 let nonce = Nonce::from_slice(&first.nonce);
@@ -1120,7 +1231,10 @@ mod tests {
                 }
             }
         }
-        assert!(!found_in_disk, "test.lua should have been stripped from on-disk pack");
+        assert!(
+            !found_in_disk,
+            "test.lua should have been stripped from on-disk pack"
+        );
     }
 
     #[test]
@@ -1130,7 +1244,14 @@ mod tests {
         let enc_key = EncryptionKey::from_random(32);
         let product = Product::from("prod");
         let item = PackItem::new("foo.txt", b"hello".to_vec()).unwrap();
-        let bytes = pack_encrypted_pack(&DlcId::from("p".to_string()), &[item], &product, &dlc_key, &enc_key).unwrap();
+        let bytes = pack_encrypted_pack(
+            &DlcId::from("p".to_string()),
+            &[item],
+            &product,
+            &dlc_key,
+            &enc_key,
+        )
+        .unwrap();
 
         let tmp = tempdir().unwrap();
         let pack_path = tmp.path().join("p.dlcpack");
@@ -1143,9 +1264,8 @@ mod tests {
             .success()
             // color codes may surround the DLC ID so just look for the prefix
             .stdout(
-            predicates::str::contains("Entries in ")
-                .and(predicates::str::contains("foo.txt")),
-        );
+                predicates::str::contains("Entries in ").and(predicates::str::contains("foo.txt")),
+            );
     }
 
     #[test]
@@ -1156,7 +1276,14 @@ mod tests {
         let enc_key = EncryptionKey::from_random(32);
         let product = Product::from("prod");
         let item = PackItem::new("foo.txt", b"hello".to_vec()).unwrap();
-        let bytes = pack_encrypted_pack(&DlcId::from("p".to_string()), &[item], &product, &dlc_key, &enc_key).unwrap();
+        let bytes = pack_encrypted_pack(
+            &DlcId::from("p".to_string()),
+            &[item],
+            &product,
+            &dlc_key,
+            &enc_key,
+        )
+        .unwrap();
         std::fs::write(&pack_path, &bytes).unwrap();
 
         let mut cmd = Command::new(pkg_name!());
@@ -1185,9 +1312,23 @@ mod tests {
             .expect("license should contain encrypt_key");
 
         let item_a = PackItem::new("a.txt", b"foo".to_vec()).unwrap();
-        let bytes_a = pack_encrypted_pack(&DlcId::from("a".to_string()), &[item_a], &product, &dlc_key, &enc_key).unwrap();
+        let bytes_a = pack_encrypted_pack(
+            &DlcId::from("a".to_string()),
+            &[item_a],
+            &product,
+            &dlc_key,
+            &enc_key,
+        )
+        .unwrap();
         let item_b = PackItem::new("b.txt", b"bar".to_vec()).unwrap();
-        let bytes_b = pack_encrypted_pack(&DlcId::from("b".to_string()), &[item_b], &product, &dlc_key, &enc_key).unwrap();
+        let bytes_b = pack_encrypted_pack(
+            &DlcId::from("b".to_string()),
+            &[item_b],
+            &product,
+            &dlc_key,
+            &enc_key,
+        )
+        .unwrap();
 
         let tmp = tempdir().unwrap();
         let path_a = tmp.path().join("a.dlcpack");
@@ -1247,17 +1388,29 @@ mod tests {
         // pack dry-run
         let mut cmd = Command::new(pkg_name!());
         cmd.current_dir(tmp.path());
-        cmd.arg("--dry-run").arg("pack").arg("mypack").arg("--product").arg("prod")
-            .arg("--types").arg("txt=DummyType")
-            .arg("--").arg(file_path.to_str().unwrap());
+        cmd.arg("--dry-run")
+            .arg("pack")
+            .arg("mypack")
+            .arg("--product")
+            .arg("prod")
+            .arg("--types")
+            .arg("txt=DummyType")
+            .arg("--")
+            .arg(file_path.to_str().unwrap());
         // run pack command with dry-run; we don't need to examine stderr in
         // the final test version since functionality is covered by earlier
         // debugging.
         let mut cmd = Command::new(pkg_name!());
         cmd.current_dir(tmp.path());
-        cmd.arg("--dry-run").arg("pack").arg("mypack").arg("--product").arg("prod")
-            .arg("--types").arg("txt=DummyType")
-            .arg("--").arg(file_path.to_str().unwrap());
+        cmd.arg("--dry-run")
+            .arg("pack")
+            .arg("mypack")
+            .arg("--product")
+            .arg("prod")
+            .arg("--types")
+            .arg("txt=DummyType")
+            .arg("--")
+            .arg(file_path.to_str().unwrap());
         cmd.assert().success();
         assert!(!tmp.path().join("mypack.dlcpack").exists());
         assert!(!tmp.path().join("prod.slicense").exists());
@@ -1266,7 +1419,10 @@ mod tests {
         // generate dry-run
         let mut cmd2 = Command::new(pkg_name!());
         cmd2.current_dir(tmp.path());
-        cmd2.arg("--dry-run").arg("generate").arg("prod").arg("dlc1");
+        cmd2.arg("--dry-run")
+            .arg("generate")
+            .arg("prod")
+            .arg("dlc1");
         cmd2.assert().success();
         assert!(!tmp.path().join("prod.slicense").exists());
         assert!(!tmp.path().join("prod.pubkey").exists());
@@ -1324,7 +1480,14 @@ mod tests {
         let enc_key = EncryptionKey::from_random(32);
         let product = Product::from("prod");
         let item = PackItem::new("foo.txt", b"hello".to_vec()).unwrap();
-        let bytes = pack_encrypted_pack(&DlcId::from("p".to_string()), &[item], &product, &dlc_key, &enc_key).unwrap();
+        let bytes = pack_encrypted_pack(
+            &DlcId::from("p".to_string()),
+            &[item],
+            &product,
+            &dlc_key,
+            &enc_key,
+        )
+        .unwrap();
         std::fs::write(&pack_path, &bytes).unwrap();
 
         let mut cmd = Command::new(pkg_name!());

@@ -22,22 +22,28 @@ fn main() -> AppExit {
     // This is the RECOMMENDED approach:
     // Create cryptographically secure license key that can't be decrypted from your compiled binary (game).
     secure::include_secure_str_aes!(
-        "example.slicense",
+        "example_keys/example.slicense",
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
         "example_license"
     );
 
-    let dlc_key =
-        DlcKey::public(include_str!("../../example.pubkey")).expect("invalid example pubkey");
+    let dlc_key = DlcKey::public(include_str!("../../example_keys/example.pubkey"))
+        .expect("invalid example pubkey");
 
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(DlcPlugin::new(dlc_key, SignedLicense::from(get_example_license())))
+        .add_plugins(DlcPlugin::new(
+            dlc_key,
+            SignedLicense::from(get_example_license()),
+        ))
         .init_asset_loader::<TextAssetLoader>()
         .register_dlc_type::<TextAsset>()
         .init_resource::<DlcPacks>()
         .add_systems(Startup, startup)
-        .add_systems(Update, display_loaded_text.run_if(is_dlc_entry_loaded("dlcA", "test.txt")))
+        .add_systems(
+            Update,
+            display_loaded_text.run_if(is_dlc_entry_loaded("dlcA", "test.txt")),
+        )
         .add_observer(on_dlc_pack_loaded)
         .run()
 }

@@ -14,23 +14,25 @@ use bevy_dlc::prelude::*;
 mod examples;
 use examples::JsonAsset;
 
-
 fn main() -> AppExit {
     // DO NOT USE ABCD... as your choice of secure key. This is just a placeholder for the example.
     // This is the RECOMMENDED approach:
     // Create cryptographically secure license key that can't be decrypted from your compiled binary (game).
     secure::include_secure_str_aes!(
-        "example.slicense",
+        "example_keys/example.slicense",
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
         "example_license"
     );
 
-    let dlc_key =
-        DlcKey::public(include_str!("../../example.pubkey")).expect("invalid example pubkey");
+    let dlc_key = DlcKey::public(include_str!("../../example_keys/example.pubkey"))
+        .expect("invalid example pubkey");
 
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(DlcPlugin::new(dlc_key, SignedLicense::from(get_example_license())))
+        .add_plugins(DlcPlugin::new(
+            dlc_key,
+            SignedLicense::from(get_example_license()),
+        ))
         .init_resource::<DlcPacks>()
         .add_plugins(JsonAssetPlugin::<JsonAsset>::new(&["json"]))
         .register_dlc_type::<JsonAsset>()
@@ -40,13 +42,13 @@ fn main() -> AppExit {
         .run()
 }
 
-#[derive(Resource,Default)]
+#[derive(Resource, Default)]
 struct DlcPacks(Vec<Handle<DlcPack>>);
 
 #[derive(Component)]
 struct LoadedJson(Handle<JsonAsset>);
 
-fn startup(asset_server: Res<AssetServer>,mut packs: ResMut<DlcPacks>, mut commands: Commands) {
+fn startup(asset_server: Res<AssetServer>, mut packs: ResMut<DlcPacks>, mut commands: Commands) {
     packs.0.push(asset_server.load::<DlcPack>("dlcA.dlcpack"));
     commands.spawn(Camera2d);
 }
@@ -57,7 +59,7 @@ fn on_dlc_pack_loaded(
     mut commands: Commands,
 ) {
     let pack = event.pack();
-    
+
     for entry in pack.entries() {
         info!(
             "DLC Pack contains asset: {} of type {}",
@@ -76,7 +78,6 @@ fn on_dlc_pack_loaded(
         commands.spawn(LoadedJson(json_asset));
     }
 }
-
 
 fn display_loaded_text(
     json_assets: Res<Assets<JsonAsset>>,
