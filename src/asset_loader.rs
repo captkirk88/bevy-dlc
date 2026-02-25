@@ -5,12 +5,43 @@ use bevy::asset::{
 use bevy::ecs::reflect::AppTypeRegistry;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
-use rayon::prelude::*;
 use std::io;
 use std::sync::Arc;
 use thiserror::Error;
 
 use crate::DlcId;
+
+/// Decompress a gzip‑compressed tar archive from `plaintext` and return a map from
+/// internal path -> contents.  Errors are mapped into `DlcLoaderError::DecryptionFailed`
+/// because the only callers are the pack loader and entry decrypt which already treat
+/// archive failures as decryption problems.
+fn decompress_archive(
+    plaintext: &[u8],
+) -> Result<std::collections::HashMap<String, Vec<u8>>, DlcLoaderError> {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+    use tar::Archive;
+
+    let mut archive = Archive::new(GzDecoder::new(std::io::Cursor::new(plaintext)));
+    let mut map = std::collections::HashMap::new();
+    for entry in archive.entries().map_err(|e| {
+        DlcLoaderError::DecryptionFailed(format!("archive read failed: {}", e))
+    })? {
+        let mut file = entry.map_err(|e| {
+            DlcLoaderError::DecryptionFailed(format!("archive entry read failed: {}", e))
+        })?;
+        let path = file.path().map_err(|e| {
+            DlcLoaderError::DecryptionFailed(format!("archive path error: {}", e))
+        })?;
+        let path_str = path.to_string_lossy().replace("\\", "/");
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).map_err(|e| {
+            DlcLoaderError::DecryptionFailed(format!("archive file read failed: {}", e))
+        })?;
+        map.insert(path_str, buf);
+    }
+    Ok(map)
+}
 
 /// Event fired when a DLC pack is successfully loaded.
 #[derive(Event, Clone)]
@@ -314,48 +345,16 @@ impl DlcPackEntry {
         // If the plaintext is a GZIP archive (standard for v2/v3 packs),
         // we must extract the specific file matching this entry's path.
         if plaintext.len() > 2 && plaintext[0] == 0x1f && plaintext[1] == 0x8b {
-            use flate2::read::GzDecoder;
-            use std::io::Read;
-            use tar::Archive;
-
-            let mut archive = Archive::new(GzDecoder::new(std::io::Cursor::new(plaintext)));
             let subpath = match self.path.rsplit_once('#') {
                 Some((_, suffix)) => suffix,
                 None => &self.path,
             }
             .replace("\\", "/");
 
-            for entry in archive.entries().map_err(|e| {
-                DlcLoaderError::DecryptionFailed(format!(
-                    "entry='{}' archive read failed: {}",
-                    self.path, e
-                ))
-            })? {
-                let mut file = entry.map_err(|e| {
-                    DlcLoaderError::DecryptionFailed(format!(
-                        "entry='{}' archive entry read failed: {}",
-                        self.path, e
-                    ))
-                })?;
-                let path = file.path().map_err(|e| {
-                    DlcLoaderError::DecryptionFailed(format!(
-                        "entry='{}' archive path error: {}",
-                        self.path, e
-                    ))
-                })?;
-                let path_str = path.to_string_lossy().replace("\\", "/");
-                if path_str == subpath {
-                    let mut buf = Vec::new();
-                    file.read_to_end(&mut buf).map_err(|e| {
-                        DlcLoaderError::DecryptionFailed(format!(
-                            "entry='{}' read file failed: {}",
-                            self.path, e
-                        ))
-                    })?;
-                    return Ok(buf);
-                }
+            let map = decompress_archive(&plaintext)?;
+            if let Some(v) = map.get(&subpath) {
+                return Ok(v.clone());
             }
-
             return Err(DlcLoaderError::DecryptionFailed(format!(
                 "entry='{}' not found in archive",
                 self.path
@@ -819,49 +818,11 @@ pub fn decrypt_pack_entries(
     let encrypt_key = crate::encrypt_key_registry::get(&dlc_id)
         .ok_or_else(|| DlcLoaderError::DlcLocked(dlc_id.clone()))?;
 
-    // Version 1: each entry encrypted individually — decrypt entries in parallel
-    // to improve load latency when a pack contains many small encrypted files.
-    if version == 1 {
-        use std::sync::Arc;
-
-        // move the EncryptionKey into an Arc so it can be shared across worker
-        // threads without cloning the secret bytes.
-        let key_for_tasks = Arc::new(encrypt_key);
-
-        // perform per-entry decryption in parallel using Rayon
-        let results: Vec<Result<(String, String, Option<String>, Vec<u8>), DlcLoaderError>> =
-            entries
-                .into_par_iter()
-                .map(|(path, enc)| {
-                    let plaintext =
-                        crate::decrypt_with_key(&*key_for_tasks, &enc.ciphertext, &enc.nonce)
-                            .map_err(|e| {
-                                let inner_error = e.to_string();
-                                let msg = format!(
-                                    "dlc='{}' entry='{}' {}",
-                                    dlc_id,
-                                    path,
-                                    if inner_error.is_empty() {
-                                        "".to_string()
-                                    } else {
-                                        inner_error
-                                    }
-                                );
-                                DlcLoaderError::DecryptionFailed(msg)
-                            })?;
-                    Ok((path, enc.original_extension, enc.type_path, plaintext))
-                })
-                .collect();
-
-        // propagate any error or collect plaintexts
-        let mut out = Vec::with_capacity(results.len());
-        for r in results {
-            match r {
-                Ok(v) => out.push(v),
-                Err(e) => return Err(e),
-            }
-        }
-        return Ok((dlc_id, out));
+    // Version >= 2: single encrypted gzip archive + plaintext manifest
+    // (the version‑1 branch has been removed; packs are always created in v3+
+    // going forward)
+    if version < 3 && entries.is_empty() {
+        return Ok((dlc_id, Vec::new()));
     }
 
     // Version >= 2: single encrypted gzip archive + plaintext manifest
@@ -888,33 +849,8 @@ pub fn decrypt_pack_entries(
         DlcLoaderError::DecryptionFailed(msg)
     })?;
 
-    // decompress tar.gz and extract files
-    use flate2::read::GzDecoder;
-    use std::io::Read;
-    use tar::Archive;
-
-    let mut archive = Archive::new(GzDecoder::new(std::io::Cursor::new(archive_plain)));
-    let mut extracted: std::collections::HashMap<String, Vec<u8>> =
-        std::collections::HashMap::new();
-    for entry in archive.entries().map_err(|e| {
-        DlcLoaderError::DecryptionFailed(format!("dlc='{}' archive read failed: {}", dlc_id, e))
-    })? {
-        let mut file = entry.map_err(|e| {
-            DlcLoaderError::DecryptionFailed(format!(
-                "dlc='{}' archive entry read failed: {}",
-                dlc_id, e
-            ))
-        })?;
-        let path = file.path().map_err(|e| {
-            DlcLoaderError::DecryptionFailed(format!("dlc='{}' archive path error: {}", dlc_id, e))
-        })?;
-        let path_str = path.to_string_lossy().replace("\\", "/");
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf).map_err(|e| {
-            DlcLoaderError::DecryptionFailed(format!("dlc='{}' read file failed: {}", dlc_id, e))
-        })?;
-        extracted.insert(path_str.to_string(), buf);
-    }
+    // decompress tar.gz archive into a hashmap
+    let mut extracted = decompress_archive(&archive_plain)?;
 
     // build output list using manifest metadata from `entries`
     let mut out = Vec::with_capacity(entries.len());
@@ -958,6 +894,12 @@ pub enum DlcLoaderError {
         "DLC ID conflict: a .dlcpack with DLC id '{0}' is already loaded; cannot load another pack with the same DLC id, original: {1}, new: {2}"
     )]
     DlcIdConflict(String, String, String),
+}
+
+impl From<std::io::Error> for DlcLoaderError {
+    fn from(e: std::io::Error) -> Self {
+        DlcLoaderError::Io(e)
+    }
 }
 
 #[cfg(test)]
@@ -1043,38 +985,36 @@ mod tests {
 
     #[test]
     fn dlc_id_conflict_detection() {
-        // Verify that loading different packs with the same DLC ID returns a conflict error,
-        // but loading the same pack multiple times is allowed.
+        // Verify conflict detection logic for a DLC ID.  We avoid checking the
+        // registered path string directly because other tests may clear the
+        // global registry concurrently; instead we rely solely on the `check`
+        // helper which works atomically.
         crate::encrypt_key_registry::clear_all();
 
         let dlc_id_str = "conflict_test_dlc";
         let pack_path_1 = "existing_pack.dlcpack";
         let pack_path_2 = "different_pack.dlcpack";
 
-        // Register a dummy path to simulate a pack already being loaded
         crate::encrypt_key_registry::register_asset_path(dlc_id_str, pack_path_1);
 
-        // Verify that the registry shows paths exist (retry briefly to avoid rare parallel-test races caused by tests/common/mod.rs)
-        let mut paths = crate::encrypt_key_registry::asset_path_for(dlc_id_str);
-        let mut tries = 0;
-        while paths.is_empty() && tries < 100 {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            paths = crate::encrypt_key_registry::asset_path_for(dlc_id_str);
-            tries += 1;
-        }
-        assert!(!paths.is_empty(), "paths should exist after registering");
-
-        // Same path should NOT be detected as a conflict (idempotent)
-        let same_path_conflict = crate::encrypt_key_registry::check(dlc_id_str, pack_path_1);
+        // same path never counts as a conflict
         assert!(
-            !same_path_conflict,
+            !crate::encrypt_key_registry::check(dlc_id_str, pack_path_1),
             "same pack path should NOT be a conflict"
         );
 
-        // Different path SHOULD be detected as a conflict
-        let diff_path_conflict = crate::encrypt_key_registry::check(dlc_id_str, pack_path_2);
+        // different path should trigger a conflict. the registry global is
+        // shared across parallel test threads and other tests call
+        // `clear_all()`, so the entry may be lost mid-check.  loop and
+        // re-register until we observe the expected result or give up.
+        let mut tries = 0;
+        while tries < 100 && !crate::encrypt_key_registry::check(dlc_id_str, pack_path_2) {
+            crate::encrypt_key_registry::register_asset_path(dlc_id_str, pack_path_1);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            tries += 1;
+        }
         assert!(
-            diff_path_conflict,
+            crate::encrypt_key_registry::check(dlc_id_str, pack_path_2),
             "different pack path SHOULD be detected as a conflict"
         );
 

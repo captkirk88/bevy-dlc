@@ -10,7 +10,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bevy::prelude::*;
@@ -374,39 +373,6 @@ async fn resolve_type_paths_from_bevy(
     Ok(result)
 }
 
-/// Helper: Attempt to decrypt a ciphertext with the provided key and nonce, without any archive parsing or license verification. Used to test whether an embedded encrypt key can successfully decrypt the archive ciphertext.
-fn decrypt_with_key_local(
-    key: &[u8],
-    ciphertext: &[u8],
-    nonce: &[u8],
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    if key.len() != 32 {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "encrypt key must be 32 bytes (AES-256)",
-        )));
-    }
-    if nonce.len() != 12 {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "nonce must be 12 bytes",
-        )));
-    }
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| {
-        Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        ))
-    })?;
-    let nonce = Nonce::from_slice(nonce);
-    let pt = cipher.decrypt(nonce, ciphertext.as_ref()).map_err(|e| {
-        Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        ))
-    })?;
-    Ok(pt)
-}
 
 fn print_pack_entries(version: usize, ents: &[(String, bevy_dlc::EncryptedAsset)]) {
     if version >= 2 {
@@ -725,29 +691,27 @@ fn test_decrypt_archive_with_key(
     let archive_nonce = entries[0].1.nonce;
     let archive_ciphertext = &entries[0].1.ciphertext;
 
-    match decrypt_with_key_local(key_bytes, archive_ciphertext, &archive_nonce) {
-        Ok(plain) => {
-            let dec = flate2::read::GzDecoder::new(std::io::Cursor::new(plain));
-            let mut ar = tar::Archive::new(dec);
-            match ar.entries() {
-                Ok(_) => {
-                    if signature_verified {
-                        println!("{} -> {}", "GOOD".green().bold(), dlc_pack_file);
-                    } else {
-                        println!(
-                            "{} -> {}\n{}",
-                            "OKAY:".yellow().bold(),
-                            dlc_pack_file,
-                            ".dlcpack archive decrypts with embedded encrypt key (signature NOT verified).\nTry providing the corresponding public key and signed license to verify the signature."
-                        );
-                    }
-                    Ok(())
-                }
-                Err(e) => Err(format!("(archive extract): {}", e).into()),
-            }
-        }
-        Err(e) => Err(format!("{}", e).into()),
+    let ek = bevy_dlc::EncryptionKey::from(key_bytes.to_vec());
+    let plain = bevy_dlc::decrypt_with_key(&ek, archive_ciphertext, &archive_nonce)
+        .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
+
+    let dec = flate2::read::GzDecoder::new(std::io::Cursor::new(plain));
+    let mut ar = tar::Archive::new(dec);
+    ar.entries()
+        .map_err(|e| Box::<dyn std::error::Error>::from(format!("(archive extract): {}", e)))?;
+
+    if signature_verified {
+        println!("{} -> {}", "GOOD".green().bold(), dlc_pack_file);
+    } else {
+        println!(
+            "{} -> {}\n{}",
+            "OKAY:".yellow().bold(),
+            dlc_pack_file,
+            ".dlcpack archive decrypts with embedded encrypt key (signature NOT verified).\nTry providing the corresponding public key and signed license to verify the signature."
+        );
     }
+
+    Ok(())
 }
 
 fn validate_dlc_file(

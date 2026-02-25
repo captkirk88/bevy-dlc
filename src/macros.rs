@@ -5,6 +5,37 @@
 //! The macros are all exported at the crate root so you can invoke them as
 //! `bevy_dlc::pack_items!()`, `bevy_dlc::dlc_register_types!()`, etc.
 
+/// format a byte count into a human-readable string (KB/MB/GB)
+///
+/// The macro returns a `String`; the formatting matches the previous
+/// `human_bytes` helper, using two decimal places of precision for units
+/// greater than bytes.
+///
+/// Example usage (hidden from docs):
+/// ```ignore
+/// use bevy_dlc::human_bytes;
+/// let s = human_bytes!(123456);
+/// ```
+#[macro_export]
+#[doc(hidden)]
+macro_rules! human_bytes {
+    ($bytes:expr) => {{
+        let bytes: usize = $bytes;
+        const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+        let mut size = bytes as f64;
+        let mut unit = 0;
+        while size >= 1024.0 && unit < UNITS.len() - 1 {
+            size /= 1024.0;
+            unit += 1;
+        }
+        if unit == 0 {
+            format!("{} {}", size as usize, UNITS[unit])
+        } else {
+            format!("{:.2} {}", size, UNITS[unit])
+        }
+    }};
+}
+
 /// Builds a `Vec<PackItem>` from a list of entries.  Each entry specifies a
 /// path and its raw contents; optional query-style suffixes allow specifying an
 /// explicit original extension or a type path as well.

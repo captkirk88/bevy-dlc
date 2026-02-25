@@ -1,6 +1,6 @@
 [package]
 name = "bevy-dlc"
-version = "1.18.8"
+version = "1.18.9"
 edition = "2024"
 rust-version = "1.93"
 authors = ["Kirk <github.com/captkirk88>"]

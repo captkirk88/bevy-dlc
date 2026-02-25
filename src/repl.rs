@@ -1,119 +1,14 @@
-use bevy_dlc::{DLC_PACK_MAGIC, DLC_PACK_VERSION, EncryptionKey, parse_encrypted_pack, prelude::*};
+use bevy_dlc::{
+    DLC_PACK_MAGIC,
+    EncryptionKey,
+    parse_encrypted_pack,
+    prelude::*,
+};
 use clap::{Arg, ArgAction, Command};
 use owo_colors::{AnsiColors, CssColors, OwoColorize};
 use std::io::{ErrorKind, Write, stdin, stdout};
 use std::path::{Path, PathBuf};
 
-// Helper that rewrites a `.dlcpack` container to strip out any files that are
-// present in the encrypted tar archive but not mentioned in the manifest.  The
-// provided `encrypt_key` must be able to decrypt the pack.  Returns `Ok(())`
-// and rewrites the file in place when cleaning is required; if the pack already
-// matched its manifest the function is effectively a no-op.
-fn remove_stray_entries_from_pack(
-    pack_path: &Path,
-    encrypt_key: &EncryptionKey,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
-    use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-    use secure_gate::ExposeSecret;
-    use tar::Archive;
-
-    let bytes = std::fs::read(pack_path)?;
-    let (product, did, ver, entries) = parse_encrypted_pack(&bytes)?;
-
-    // decrypt archive blob
-    let cipher = encrypt_key
-        .with_secret(|s| Aes256Gcm::new_from_slice(s))
-        .map_err(|_| "cipher init")?;
-    let first = &entries[0].1;
-    let nonce = Nonce::from_slice(&first.nonce);
-    let pt = cipher
-        .decrypt(nonce, first.ciphertext.as_ref())
-        .map_err(|_| "decryption failed")?;
-    let decoder = GzDecoder::new(&pt[..]);
-    let mut archive = Archive::new(decoder);
-
-    // collect plaintext only for manifest paths; skipping any others implicitly
-    // removes stray files.
-    let mut manifest_contents: Vec<(String, Vec<u8>)> = Vec::new();
-    for entry_res in archive.entries()? {
-        let mut entry = entry_res?;
-        let path = entry.path()?.to_string_lossy().to_string();
-        if entries.iter().any(|(p, _)| p == &path) {
-            let mut data = Vec::new();
-            std::io::copy(&mut entry, &mut data)?;
-            manifest_contents.push((path, data));
-        }
-    }
-
-    // if archive already matched manifest we have nothing to do
-    if manifest_contents.len() == entries.len() {
-        return Ok(());
-    }
-
-    // rebuild the container using same headers/manifest but fresh archive blob
-    let mut new_tar = Vec::new();
-    {
-        let mut builder = tar::Builder::new(&mut new_tar);
-        for (p, data) in &manifest_contents {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(data.len() as u64);
-            header.set_cksum();
-            builder.append_data(&mut header, p, &data[..])?;
-        }
-        builder.finish()?;
-    }
-    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
-    gz.write_all(&new_tar)?;
-    let compressed = gz.finish()?;
-
-    let nonce_bytes: [u8; 12] = rand::random();
-    let cipher = encrypt_key
-        .with_secret(|s| Aes256Gcm::new_from_slice(s))
-        .map_err(|_| "cipher init")?;
-    let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce_bytes), compressed.as_ref())
-        .map_err(|_| "encryption failed")?;
-
-    let mut out = Vec::new();
-    out.extend_from_slice(DLC_PACK_MAGIC);
-    out.push(ver as u8);
-    if ver == DLC_PACK_VERSION as usize {
-        let prod_bytes = product.as_bytes();
-        out.extend_from_slice(&(prod_bytes.len() as u16).to_be_bytes());
-        out.extend_from_slice(prod_bytes);
-        let sig_offset = 4 + 1 + 2 + prod_bytes.len();
-        out.extend_from_slice(&bytes[sig_offset..sig_offset + 64]);
-    }
-    let dlc_bytes = did.as_bytes();
-    out.extend_from_slice(&(dlc_bytes.len() as u16).to_be_bytes());
-    out.extend_from_slice(dlc_bytes);
-    #[derive(serde::Serialize)]
-    struct ManifestEntry<'a> {
-        path: &'a str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        original_extension: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        type_path: Option<&'a str>,
-    }
-    let manifest: Vec<ManifestEntry<'_>> = entries
-        .iter()
-        .map(|(p, enc)| ManifestEntry {
-            path: p,
-            original_extension: Some(&enc.original_extension),
-            type_path: enc.type_path.as_deref(),
-        })
-        .collect();
-    let manifest_bytes = serde_json::to_vec(&manifest)?;
-    out.extend_from_slice(&(manifest_bytes.len() as u32).to_be_bytes());
-    out.extend_from_slice(&manifest_bytes);
-    out.extend_from_slice(&nonce_bytes);
-    out.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
-    out.extend_from_slice(&ciphertext);
-
-    std::fs::write(pack_path, &out)?;
-    Ok(())
-}
 
 use crate::{extract_encrypt_key_from_token, is_executable, print_error, resolve_keys};
 
@@ -146,21 +41,6 @@ macro_rules! safe_print {
     }};
 }
 
-// format a byte count into a human-readable string (KB/MB/GB)
-fn human_bytes(bytes: usize) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut size = bytes as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{} {}", size as usize, UNITS[unit])
-    } else {
-        format!("{:.1} {}", size, UNITS[unit])
-    }
-}
 
 pub fn run_edit_repl(
     path: PathBuf,
@@ -334,19 +214,18 @@ pub fn run_edit_repl(
                             " Version: {}",
                             version.to_string().color(AnsiColors::Yellow)
                         );
-                        if let Some((_, enc)) = entries.first() {
-                            safe_println!(
-                                " Content Size: {}",
-                                human_bytes(enc.ciphertext.len()).color(CssColors::SlateGray),
-                            );
-                        } else {
-                            let total: usize =
-                                entries.iter().map(|(_, e)| e.ciphertext.len()).sum();
-                            safe_println!(
-                                " Content Size (approx): {}",
-                                human_bytes(total).color(CssColors::SlateGray),
-                            );
-                        }
+                        // report both the encrypted archive blob length and the
+                        // actual file size on disk.  if the user saved without a key
+                        // (manifest-only change) then only the manifest shrinks and the
+                        // archive bytes stay the same.
+                        let archive_size =
+                            entries.get(0).map(|(_, e)| e.ciphertext.len()).unwrap_or(0);
+
+                        safe_println!(
+                            " Archive Size: {} ({} bytes)",
+                            bevy_dlc::human_bytes!(archive_size).color(CssColors::SlateGray),
+                            archive_size,
+                        );
                         return Ok(false);
                     }
                     Some(("ls", _)) => {
@@ -810,14 +689,28 @@ fn save_pack_optimized(
     use secure_gate::ExposeSecret;
     use tar::{Archive, Builder};
 
-    // If no files were ADDED, we can just update the manifest and headers without re-encrypting the archive.
-    if added_files.is_empty() {
+    // Determine whether entries were removed by comparing against the original
+    // manifest.  We must parse the pack regardless so we can make this
+    // decision; this also allows us to fall through to the repack logic when
+    // files have been deleted even if nothing was added.
+    let (_old_prod, _old_did, _old_v, old_entries) = parse_encrypted_pack(bytes)?;
+    let removed = old_entries.len() > entries.len();
+
+    // simple case: nothing added and nothing removed -> just update headers/manifest
+    if added_files.is_empty() && !removed {
         return update_manifest(path, bytes, version, product, dlc_id, entries);
     }
 
-    // Re-packing requires the key
+    // removal-only case without encryption key: update manifest but leave
+    // archive blob untouched.  This mirrors previous behaviour and allows the
+    // editor to drop entries even when the user only supplied a public key.
+    if added_files.is_empty() && removed && encrypt_key.is_none() {
+        return update_manifest(path, bytes, version, product, dlc_id, entries);
+    }
+
+    // from here on, we need to repack. ensure a key is present.
     let ek = encrypt_key
-        .ok_or("Re-packing with new files requires an signed license (--signed-license)")?;
+        .ok_or("Re-packing with new files requires a signed license (--signed-license)")?;
 
     // 1. Recover old archive content
     let (_old_prod, _old_did, _old_v, old_entries) = parse_encrypted_pack(bytes)?;
@@ -1090,9 +983,14 @@ fn merge_pack_into(
         safe_println!("Merged entry: {}", path.color(AnsiColors::Green));
     }
 
-    if stray_found {
-        // repair the source pack so the stray entries are removed permanently
-        remove_stray_entries_from_pack(other_pack, ek)?;
+// stray entries are intentionally ignored; we don't mutate the
+        // source pack. if the caller wants the archive cleaned they can
+        // repack manually using `save` or the CLI.
+        if stray_found {
+            safe_println!(
+                "{} warning: pack contains unmanifested files; they were skipped. Repack using 'bevy-dlc pack'",
+                "warning".yellow().bold()
+            );
     }
 
     Ok(())
@@ -1108,6 +1006,14 @@ mod tests {
     use predicates::prelude::*;
     use secure_gate::ExposeSecret;
     use tempfile::tempdir;
+
+    #[test]
+    fn human_bytes_macro_formats_expected() {
+        assert_eq!(bevy_dlc::human_bytes!(0), "0 B");
+        assert_eq!(bevy_dlc::human_bytes!(1023), "1023 B");
+        assert_eq!(bevy_dlc::human_bytes!(1024), "1.00 KB");
+        assert_eq!(bevy_dlc::human_bytes!(10 * 1024 * 1024 + 512), "10.00 MB");
+    }
 
     #[test]
     fn merge_pack_into_adds_new_files() {
@@ -1165,28 +1071,145 @@ mod tests {
 
     #[test]
     fn merge_pack_into_ignores_unmanifested_archive_entries() {
-        // regression test for bug where an archive could contain an extra file
-        // not listed in the manifest (e.g. `test.lua` inside dlcA.dlcpack) and
-        // that file would surface during a merge.
+        // regression test for packing behavior when an archive contains an
+        // extra file that is *not* listed in the manifest.  instead of relying
+        // on a pre-existing asset on disk we build a pack on the fly, then
+        // inject a stray entry into the encrypted tar blob while leaving the
+        // manifest untouched.  this allows the test to exercise the same
+        // stray-detection / rewrite logic in a self‑contained way.
 
-        // make a temporary copy of the example pack so the real file isn't
-        // mutated by the test.
+        /// Helper that takes an already‑valid pack produced by
+        /// `pack_encrypted_pack` and returns a new byte vector with an
+        /// additional tar entry added to the encrypted blob.  The manifest is
+        /// deliberately left unchanged so the entry is "unmanifested".
+        fn add_stray_to_pack(
+            original: &[u8],
+            encrypt_key: &EncryptionKey,
+            stray_path: &str,
+            stray_data: &[u8],
+        ) -> Vec<u8> {
+            use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+            use flate2::{read::GzDecoder, write::GzEncoder, Compression};
+            use tar::Archive;
+            use secure_gate::ExposeSecret;
+            // need pack constants and the shared ManifestEntry type
+            use bevy_dlc::{DLC_PACK_VERSION, ManifestEntry};
+
+            // parse header/manifest from the existing pack so we can rebuild
+            let (product, did, ver, entries) =
+                parse_encrypted_pack(original).expect("parse original pack");
+
+            // decrypt the first (and only) ciphertext blob to get the tar
+            let cipher = encrypt_key
+                .with_secret(|s| Aes256Gcm::new_from_slice(s))
+                .expect("cipher init");
+            let first = &entries[0].1;
+            let nonce = Nonce::from_slice(&first.nonce);
+            let pt = cipher
+                .decrypt(nonce, first.ciphertext.as_ref())
+                .expect("decrypt tar");
+            let decoder = GzDecoder::new(&pt[..]);
+            let mut archive = Archive::new(decoder);
+
+            // gather existing entries from the tar
+            let mut existing: Vec<(String, Vec<u8>)> = Vec::new();
+            for entry_res in archive.entries().unwrap() {
+                let mut entry = entry_res.unwrap();
+                let path = entry.path().unwrap().to_string_lossy().to_string();
+                let mut data = Vec::new();
+                std::io::copy(&mut entry, &mut data).unwrap();
+                existing.push((path, data));
+            }
+
+            // append stray
+            existing.push((stray_path.to_string(), stray_data.to_vec()));
+
+            // rebuild tar+gzip payload
+            let mut new_tar = Vec::new();
+            {
+                let mut builder = tar::Builder::new(&mut new_tar);
+                for (p, data) in &existing {
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(data.len() as u64);
+                    header.set_cksum();
+                    builder.append_data(&mut header, p, &data[..]).unwrap();
+                }
+                builder.finish().unwrap();
+            }
+            let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+            gz.write_all(&new_tar).unwrap();
+            let compressed = gz.finish().unwrap();
+
+            // encrypt with fresh random nonce
+            let nonce_bytes: [u8; 12] = rand::random();
+            let cipher2 = encrypt_key
+                .with_secret(|s| Aes256Gcm::new_from_slice(s))
+                .expect("cipher init");
+            let ciphertext = cipher2
+                .encrypt(Nonce::from_slice(&nonce_bytes), compressed.as_ref())
+                .expect("encrypt");
+
+            // reconstruct the pack bytes copying all header/manifest data but
+            // replacing the first entry ciphertext
+            let mut out = Vec::new();
+            out.extend_from_slice(DLC_PACK_MAGIC);
+            out.push(ver as u8);
+            if ver == DLC_PACK_VERSION as usize {
+                let prod_bytes = product.as_bytes();
+                out.extend_from_slice(&(prod_bytes.len() as u16).to_be_bytes());
+                out.extend_from_slice(prod_bytes);
+                let sig_offset = 4 + 1 + 2 + prod_bytes.len();
+                out.extend_from_slice(&original[sig_offset..sig_offset + 64]);
+            }
+            let dlc_bytes = did.as_bytes();
+            out.extend_from_slice(&(dlc_bytes.len() as u16).to_be_bytes());
+            out.extend_from_slice(dlc_bytes);
+            let manifest: Vec<ManifestEntry> = entries
+                .iter()
+                .map(|(p, enc)| ManifestEntry {
+                    path: p.clone(),
+                    original_extension: if enc.original_extension.is_empty() {
+                        None
+                    } else {
+                        Some(enc.original_extension.clone())
+                    },
+                    type_path: enc.type_path.clone(),
+                })
+                .collect();
+            let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+            out.extend_from_slice(&(manifest_bytes.len() as u32).to_be_bytes());
+            out.extend_from_slice(&manifest_bytes);
+            out.extend_from_slice(&nonce_bytes);
+            out.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
+            out.extend_from_slice(&ciphertext);
+            out
+        }
+
+        // create a pristine pack containing a single entry
+        let dlc_key = DlcKey::generate_random();
+        let enc_key = EncryptionKey::from_random(32);
+        let product = Product::from("example");
+        let item = PackItem::new("a.txt", b"hello".to_vec()).unwrap();
+        let base_pack = pack_encrypted_pack(
+            &DlcId::from("dlcA".to_string()),
+            &[item],
+            &product,
+            &dlc_key,
+            &enc_key,
+        )
+        .unwrap();
+
+        // inject stray entry into the encrypted blob
+        let bytes = add_stray_to_pack(&base_pack, &enc_key, "test.lua", b"bad");
+
         let dir = tempdir().unwrap();
         let tmp_pack = dir.path().join("copy.dlcpack");
-        std::fs::copy("assets/dlcA.dlcpack", &tmp_pack).unwrap();
+        std::fs::write(&tmp_pack, &bytes).unwrap();
 
-        // load the license to get the encryption key used by the example pack
-        let license_str = std::fs::read_to_string("example.slicense").unwrap();
-        let signed = bevy_dlc::SignedLicense::from(license_str);
-        let key_bytes = bevy_dlc::extract_encrypt_key_from_license(&signed).unwrap();
-        let enc_key = EncryptionKey::from(key_bytes);
-
-        let bytes = std::fs::read(&tmp_pack).unwrap();
         let (_prod, _did, _ver, mut entries) = parse_encrypted_pack(&bytes).unwrap();
         let mut added_files = std::collections::HashMap::new();
 
-        // merge the copy into itself; stray entries should be skipped and the
-        // pack file rewritten to remove them.
+        // merging the pack into itself should detect and skip the stray file
         merge_pack_into(
             &tmp_pack,
             &mut entries,
@@ -1203,10 +1226,9 @@ mod tests {
         );
         assert!(!added_files.contains_key("test.lua"));
 
-        // verify the on-disk copy no longer contains the stray file
+        // verify the on-disk copy still contains the stray file
         let cleaned_bytes = std::fs::read(&tmp_pack).unwrap();
         let mut found_in_disk = false;
-        // decrypt and scan archive directly
         {
             use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
             use flate2::read::GzDecoder;
@@ -1232,9 +1254,71 @@ mod tests {
             }
         }
         assert!(
-            !found_in_disk,
-            "test.lua should have been stripped from on-disk pack"
+            found_in_disk,
+            "pack should still contain stray entry on disk since we don't rewrite"
         );
+    }
+
+    #[test]
+    fn save_pack_removes_deleted_entries() {
+        // ensure that removing an item and saving does not leave its data in
+        // the encrypted archive.
+        let dlc_key = DlcKey::generate_random();
+        let enc_key = EncryptionKey::from_random(32);
+        let product = Product::from("prod");
+        let id = DlcId::from("removal".to_string());
+        let item1 = PackItem::new("a.txt", b"one".to_vec()).unwrap();
+        let item2 = PackItem::new("b.txt", b"two".to_vec()).unwrap();
+        let bytes = pack_encrypted_pack(&id, &[item1, item2], &product, &dlc_key, &enc_key)
+            .unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("pack.dlcpack");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let (_prod, _did, ver, mut entries) = parse_encrypted_pack(&bytes).unwrap();
+        // drop b.txt from manifest
+        entries.retain(|(p, _)| p != "b.txt");
+        let added_files = std::collections::HashMap::new();
+
+        // save with no added files -- removal should trigger repack
+        save_pack_optimized(&path, &bytes, ver, &product.get(), &id.to_string(), &entries, &added_files, Some(&enc_key))
+            .unwrap();
+
+        // decrypt resulting pack and confirm only a.txt remains
+        use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+        use flate2::read::GzDecoder;
+        use secure_gate::ExposeSecret;
+        use tar::Archive;
+
+        let cipher = enc_key
+            .with_secret(|s| Aes256Gcm::new_from_slice(s))
+            .unwrap();
+        let saved_bytes = std::fs::read(&path).unwrap();
+        match parse_encrypted_pack(&saved_bytes) {
+            Ok((_, _, _, disk_entries)) => {
+                // manifest should reflect the removed file
+                assert_eq!(disk_entries.len(), 1);
+                if let Some((_, first)) = disk_entries.first() {
+                    let nonce = Nonce::from_slice(&first.nonce);
+                    let pt = cipher.decrypt(nonce, first.ciphertext.as_ref()).unwrap();
+                    let decoder = GzDecoder::new(&pt[..]);
+                    let mut archive = Archive::new(decoder);
+                    let paths: Vec<_> = archive
+                        .entries()
+                        .unwrap()
+                        .map(|e| e.unwrap().path().unwrap().to_string_lossy().to_string())
+                        .collect();
+                    assert_eq!(paths, vec!["a.txt"]);
+                }
+            }
+            Err(e) => {
+                eprintln!("parse failed: {:?}", e);
+                eprintln!("saved bytes len = {}", saved_bytes.len());
+                let dump_len = saved_bytes.len().min(64);
+                eprintln!("first {} bytes: {:02x?}", dump_len, &saved_bytes[..dump_len]);
+                panic!("save pack parse error");
+            }
+        }
     }
 
     #[test]
@@ -1477,8 +1561,15 @@ mod tests {
         let tmp = tempdir().unwrap();
         let pack_path = tmp.path().join("p.dlcpack");
         let dlc_key = DlcKey::generate_random();
-        let enc_key = EncryptionKey::from_random(32);
         let product = Product::from("prod");
+        // generate license now so we can derive the symmetric key for packing
+        let signed = dlc_key
+            .create_signed_license(&["p"], product.clone())
+            .unwrap();
+        let signed_str = signed.expose_secret().to_string();
+        let key_bytes = bevy_dlc::extract_encrypt_key_from_license(&signed).unwrap();
+        let enc_key = EncryptionKey::from(key_bytes);
+
         let item = PackItem::new("foo.txt", b"hello".to_vec()).unwrap();
         let bytes = pack_encrypted_pack(
             &DlcId::from("p".to_string()),
@@ -1492,7 +1583,10 @@ mod tests {
 
         let mut cmd = Command::new(pkg_name!());
         cmd.current_dir(tmp.path());
-        cmd.arg("edit").arg("p.dlcpack");
+        cmd.arg("edit")
+            .arg("p.dlcpack")
+            .arg("--signed-license")
+            .arg(&signed_str);
         cmd.write_stdin("rm foo.txt\nexit\ny\n");
         cmd.assert().success();
 
