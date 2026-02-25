@@ -5,7 +5,7 @@ use std::collections::HashSet;
 pub const DLC_PACK_MAGIC: &[u8; 4] = b"BDLP";
 
 /// Current supported .dlcpack format version. This is stored in the container header and used to determine how to parse the contents.
-pub const DLC_PACK_VERSION: u8 = 3;
+pub const DLC_PACK_VERSION_LATEST: u8 = 3;
 
 /// List of file extensions that are never allowed to be packed.  These are
 /// taken from the same array that used to live in [lib.rs]; we keep the
@@ -94,27 +94,29 @@ use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use secure_gate::ExposeSecret;
 use ring::signature::Ed25519KeyPair;
 
+use crate::{DlcError, DlcId, DlcKey, EncryptionKey, PackItem, Product};
+
 pub fn decrypt_with_key(
     key: &crate::EncryptionKey,
     ciphertext: &[u8],
     nonce: &[u8],
-) -> Result<Vec<u8>, crate::DlcError> {
+) -> Result<Vec<u8>, DlcError> {
     key.with_secret(|key_bytes| {
         if key_bytes.len() != 32 {
-            return Err(crate::DlcError::InvalidEncryptKey(
+            return Err(DlcError::InvalidEncryptKey(
                 "encrypt key must be 32 bytes (AES-256)".into(),
             ));
         }
         if nonce.len() != 12 {
-            return Err(crate::DlcError::InvalidNonce(
+            return Err(DlcError::InvalidNonce(
                 "nonce must be 12 bytes (AES-GCM)".into(),
             ));
         }
         let cipher = Aes256Gcm::new_from_slice(key_bytes)
-            .map_err(|e| crate::DlcError::CryptoError(e.to_string()))?;
+            .map_err(|e| DlcError::CryptoError(e.to_string()))?;
         let nonce = Nonce::from_slice(nonce);
         cipher.decrypt(nonce, ciphertext).map_err(|_| {
-            crate::DlcError::DecryptionFailed(
+            DlcError::DecryptionFailed(
                 "authentication failed (incorrect key or corrupted ciphertext)".to_string(),
             )
         })
@@ -154,7 +156,7 @@ pub fn parse_encrypted_pack(
     let version = bytes[4];
     let mut offset = 5usize;
 
-    let product_str = if version == DLC_PACK_VERSION {
+    let product_str = if version == DLC_PACK_VERSION_LATEST {
         if offset + 2 > bytes.len() {
             return Err(std::io::Error::new(
                 ErrorKind::InvalidData,
@@ -183,7 +185,7 @@ pub fn parse_encrypted_pack(
         offset += 64;
 
         prod
-    } else if version < DLC_PACK_VERSION {
+    } else if version < DLC_PACK_VERSION_LATEST {
         String::new()
     } else {
         return Err(std::io::Error::new(
@@ -404,27 +406,27 @@ pub fn parse_encrypted_pack(
 ///
 /// Arguments:
 /// - `dlc_id`: the DLC ID this pack belongs to (used for registry lookup and validation)
-/// - `items`: a list of items to include in the pack, where each item is a tuple of (relative path, optional original file extension, optional type path, plaintext bytes)
+/// - `items`: a list of [PackItem]s containing the plaintext data to be packed
 /// - `product`: the product identifier to bind the pack to
 /// - `dlc_key`: the `DlcKey` containing the private key used to sign the pack (must be a `DlcKey::Private`)
 /// - `key`: the symmetric encryption key used to encrypt the pack contents (must be 32 bytes for AES-256)
 pub fn pack_encrypted_pack(
-    dlc_id: &crate::DlcId,
-    items: &[crate::PackItem],
-    product: &crate::Product,
-    dlc_key: &crate::DlcKey,
-    key: &crate::EncryptionKey,
-) -> Result<Vec<u8>, crate::DlcError> {
+    dlc_id: &DlcId,
+    items: &[PackItem],
+    product: &Product,
+    dlc_key: &DlcKey,
+    key: &EncryptionKey,
+) -> Result<Vec<u8>, DlcError> {
     if key.len() != 32 {
-        return Err(crate::DlcError::InvalidEncryptKey(
+        return Err(DlcError::InvalidEncryptKey(
             "encryption key must be 32 bytes (AES-256)".into(),
         ));
     }
 
     let privkey_bytes = match dlc_key {
-        crate::DlcKey::Private { privkey, .. } => privkey,
-        crate::DlcKey::Public { .. } => {
-            return Err(crate::DlcError::Other(
+        DlcKey::Private { privkey, .. } => privkey,
+        DlcKey::Public { .. } => {
+            return Err(DlcError::Other(
                 "cannot sign pack with public-only key; use private key".into(),
             ));
         }
@@ -432,14 +434,14 @@ pub fn pack_encrypted_pack(
 
     for item in items {
         if item.plaintext.len() >= 4 && item.plaintext.starts_with(DLC_PACK_MAGIC) {
-            return Err(crate::DlcError::Other(format!(
+            return Err(DlcError::Other(format!(
                 "cannot pack existing dlcpack container as an item: {}",
                 item.path
             )));
         }
 
         if is_malicious_file(&item.path, item.original_extension.as_deref()) {
-            return Err(crate::DlcError::Other(format!("file not allowed: {}", item.path)));
+            return Err(DlcError::Other(format!("file not allowed: {}", item.path)));
         }
     }
 
@@ -461,42 +463,42 @@ pub fn pack_encrypted_pack(
                 &item.path,
                 &mut std::io::Cursor::new(&item.plaintext),
             )
-            .map_err(|e| crate::DlcError::Other(e.to_string()))?;
+            .map_err(|e| DlcError::Other(e.to_string()))?;
         }
 
         let enc = tar
             .into_inner()
-            .map_err(|e| crate::DlcError::Other(e.to_string()))?;
+            .map_err(|e| DlcError::Other(e.to_string()))?;
 
-        let _ = enc.finish().map_err(|e| crate::DlcError::Other(e.to_string()))?;
+        let _ = enc.finish().map_err(|e| DlcError::Other(e.to_string()))?;
     }
 
     let cipher = key.with_secret(|kb| {
-        Aes256Gcm::new_from_slice(kb.as_slice()).map_err(|e| crate::DlcError::CryptoError(e.to_string()))
+        Aes256Gcm::new_from_slice(kb.as_slice()).map_err(|e| DlcError::CryptoError(e.to_string()))
     })?;
 
     let nonce_bytes: [u8; 12] = rand::random();
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
         .encrypt(nonce, tar_gz.as_slice())
-        .map_err(|_| crate::DlcError::EncryptionFailed("encryption failed".into()))?;
+        .map_err(|_| DlcError::EncryptionFailed("encryption failed".into()))?;
 
     let mut manifest: Vec<ManifestEntry> = Vec::with_capacity(items.len());
     for item in items {
         manifest.push(ManifestEntry::from_pack_item(item));
     }
     let manifest_bytes =
-        serde_json::to_vec(&manifest).map_err(|e| crate::DlcError::Other(e.to_string()))?;
+        serde_json::to_vec(&manifest).map_err(|e| DlcError::Other(e.to_string()))?;
 
     let product_str = product.get();
     let dlc_id_str = dlc_id.to_string();
     let signature = privkey_bytes.with_secret(|priv_bytes| {
         let pair = Ed25519KeyPair::from_seed_unchecked(priv_bytes)
-            .map_err(|e| crate::DlcError::CryptoError(format!("keypair: {:?}", e)))?;
+            .map_err(|e| DlcError::CryptoError(format!("keypair: {:?}", e)))?;
         let mut signature_preimage = Vec::new();
         signature_preimage.extend_from_slice(product_str.as_bytes());
         signature_preimage.extend_from_slice(dlc_id_str.as_bytes());
-        Ok::<_, crate::DlcError>(pair.sign(&signature_preimage).as_ref().to_vec())
+        Ok::<_, DlcError>(pair.sign(&signature_preimage).as_ref().to_vec())
     })?;
 
     let mut out = Vec::new();
@@ -508,7 +510,7 @@ pub fn pack_encrypted_pack(
     out.extend_from_slice(product_bytes);
 
     if signature.len() != 64 {
-        return Err(crate::DlcError::Other(format!(
+        return Err(DlcError::Other(format!(
             "ed25519 signature must be 64 bytes, got {}",
             signature.len()
         )));

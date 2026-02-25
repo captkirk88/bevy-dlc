@@ -18,7 +18,7 @@ use bevy::{asset::AssetServer, log::LogPlugin};
 use clap::{Parser, Subcommand};
 
 use bevy_dlc::{
-    DLC_PACK_VERSION, EncryptionKey, PackItem, extract_dlc_ids_from_license, pack_encrypted_pack,
+    DLC_PACK_VERSION_LATEST, EncryptionKey, PackItem, extract_dlc_ids_from_license, pack_encrypted_pack,
     parse_encrypted_pack, prelude::*,
 };
 use owo_colors::{AnsiColors, OwoColorize};
@@ -737,7 +737,7 @@ fn validate_dlc_file(
 
     // Verify signature if pubkey provided
     if let Some(pk) = supplied_pubkey.as_deref() {
-        match bevy_dlc::verify_pack_signature(&bytes, pk, DLC_PACK_VERSION) {
+        match bevy_dlc::verify_pack_signature(&bytes, pk, DLC_PACK_VERSION_LATEST) {
             Ok(true) => {}
             Ok(false) => {
                 return Err("Pack signature verification failed, invalid signature".into());

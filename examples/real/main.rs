@@ -26,7 +26,7 @@ fn main() -> AppExit {
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
         "example_license"
     );
-
+    
     let dlc_key = DlcKey::public(include_str!("../../example_keys/example.pubkey"))
         .expect("invalid example pubkey");
 

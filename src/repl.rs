@@ -1093,7 +1093,7 @@ mod tests {
             use tar::Archive;
             use secure_gate::ExposeSecret;
             // need pack constants and the shared ManifestEntry type
-            use bevy_dlc::{DLC_PACK_VERSION, ManifestEntry};
+            use bevy_dlc::{DLC_PACK_VERSION_LATEST, ManifestEntry};
 
             // parse header/manifest from the existing pack so we can rebuild
             let (product, did, ver, entries) =
@@ -1154,7 +1154,7 @@ mod tests {
             let mut out = Vec::new();
             out.extend_from_slice(DLC_PACK_MAGIC);
             out.push(ver as u8);
-            if ver == DLC_PACK_VERSION as usize {
+            if ver == DLC_PACK_VERSION_LATEST as usize {
                 let prod_bytes = product.as_bytes();
                 out.extend_from_slice(&(prod_bytes.len() as u16).to_be_bytes());
                 out.extend_from_slice(prod_bytes);
@@ -1348,7 +1348,10 @@ mod tests {
             .success()
             // color codes may surround the DLC ID so just look for the prefix
             .stdout(
-                predicates::str::contains("Entries in ").and(predicates::str::contains("foo.txt")),
+                predicates::str::contains("Entries in ")
+                    .and(predicates::str::contains("foo.txt"))
+                    // initial entry count message with plain number
+                    .and(predicates::str::contains("Entries: 1")),
             );
     }
 

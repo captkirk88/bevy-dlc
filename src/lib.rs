@@ -18,7 +18,7 @@ mod pack_format;
 pub use asset_loader::{DlcLoader, DlcPack, DlcPackLoader, EncryptedAsset, parse_encrypted};
 pub use pack_format::{
     DLC_PACK_MAGIC,
-    DLC_PACK_VERSION,
+    DLC_PACK_VERSION_LATEST,
     ManifestEntry,
     is_data_executable,
     is_forbidden_extension,
