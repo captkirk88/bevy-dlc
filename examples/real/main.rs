@@ -22,12 +22,12 @@ fn main() -> AppExit {
     // This is the RECOMMENDED approach:
     // Create cryptographically secure license key that can't be decrypted from your compiled binary (game).
     secure::include_secure_str_aes!(
-        "example_keys/example.slicense",
+        "examples/example_keys/example.slicense",
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
         "example_license"
     );
     
-    let dlc_key = DlcKey::public(include_str!("../../example_keys/example.pubkey"))
+    let dlc_key = DlcKey::public(include_str!("../example_keys/example.pubkey"))
         .expect("invalid example pubkey");
 
     App::new()
