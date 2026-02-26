@@ -1,14 +1,8 @@
-use bevy_dlc::{
-    DLC_PACK_MAGIC,
-    EncryptionKey,
-    parse_encrypted_pack,
-    prelude::*,
-};
+use bevy_dlc::{DLC_PACK_MAGIC, EncryptionKey, parse_encrypted_pack, prelude::*};
 use clap::{Arg, ArgAction, Command};
 use owo_colors::{AnsiColors, CssColors, OwoColorize};
 use std::io::{ErrorKind, Write, stdin, stdout};
 use std::path::{Path, PathBuf};
-
 
 use crate::{extract_encrypt_key_from_token, is_executable, print_error, resolve_keys};
 
@@ -41,7 +35,6 @@ macro_rules! safe_print {
     }};
 }
 
-
 pub fn run_edit_repl(
     path: PathBuf,
     mut encrypt_key: Option<EncryptionKey>,
@@ -73,6 +66,7 @@ pub fn run_edit_repl(
     };
 
     safe_println!("Encryption key available {}.", adding_enabled);
+    safe_println!("Entries: {}", entries.len());
     safe_println!("Type 'help' for commands.");
 
     let mut dirty = false;
@@ -903,7 +897,7 @@ fn merge_pack_into(
     encrypt_key: Option<&EncryptionKey>,
     current_product: &str,
     current_dlc_id: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
     use flate2::read::GzDecoder;
     use secure_gate::ExposeSecret;
@@ -923,7 +917,7 @@ fn merge_pack_into(
     }
 
     if other_entries.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     // decrypt blob from the other pack
@@ -939,7 +933,7 @@ fn merge_pack_into(
     let decoder = GzDecoder::new(&pt[..]);
     let mut archive = Archive::new(decoder);
 
-    let mut stray_found = false;
+    let mut strays: Vec<String> = Vec::new();
     for entry_res in archive.entries()? {
         let mut entry = entry_res?;
         let path = entry.path()?.to_string_lossy().to_string();
@@ -949,7 +943,7 @@ fn merge_pack_into(
         // packing runs) which are intentionally omitted from the manifest; these
         // should *not* be merged.
         if !other_entries.iter().any(|(p, _)| p == &path) {
-            stray_found = true;
+            strays.push(path.clone());
             continue;
         }
 
@@ -983,17 +977,18 @@ fn merge_pack_into(
         safe_println!("Merged entry: {}", path.color(AnsiColors::Green));
     }
 
-// stray entries are intentionally ignored; we don't mutate the
-        // source pack. if the caller wants the archive cleaned they can
-        // repack manually using `save` or the CLI.
-        if stray_found {
-            safe_println!(
-                "{} warning: pack contains unmanifested files; they were skipped. Repack using 'bevy-dlc pack'",
-                "warning".yellow().bold()
-            );
+    // stray entries are intentionally ignored; we don't mutate the
+    // source pack. if the caller wants the archive cleaned they can
+    // repack manually using `save` or the CLI.  Strays should not happen anymore.
+    if !strays.is_empty() {
+        safe_println!(
+            "{} warning: pack contains unmanifested files; they were skipped. Repack using 'bevy-dlc pack':\n{}",
+            "warning".yellow().bold(),
+            strays.join(", "),
+        );
     }
 
-    Ok(())
+    Ok(strays)
 }
 
 #[cfg(test)]
@@ -1052,7 +1047,7 @@ mod tests {
         let mut added_files = std::collections::HashMap::new();
 
         // merge pack B into A
-        merge_pack_into(
+        let strays = merge_pack_into(
             &path_b,
             &mut entries,
             &mut added_files,
@@ -1061,6 +1056,7 @@ mod tests {
             "a",
         )
         .unwrap();
+        assert!(strays.is_empty());
 
         // expect the new entry to be staged
         assert!(entries.iter().any(|(p, _)| p == "b.txt"));
@@ -1089,9 +1085,9 @@ mod tests {
             stray_data: &[u8],
         ) -> Vec<u8> {
             use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
-            use flate2::{read::GzDecoder, write::GzEncoder, Compression};
-            use tar::Archive;
+            use flate2::{Compression, read::GzDecoder, write::GzEncoder};
             use secure_gate::ExposeSecret;
+            use tar::Archive;
             // need pack constants and the shared ManifestEntry type
             use bevy_dlc::{DLC_PACK_VERSION_LATEST, ManifestEntry};
 
@@ -1210,7 +1206,7 @@ mod tests {
         let mut added_files = std::collections::HashMap::new();
 
         // merging the pack into itself should detect and skip the stray file
-        merge_pack_into(
+        let strays = merge_pack_into(
             &tmp_pack,
             &mut entries,
             &mut added_files,
@@ -1219,6 +1215,7 @@ mod tests {
             "dlcA",
         )
         .unwrap();
+        assert_eq!(strays, vec!["test.lua".to_string()]);
 
         assert!(
             !entries.iter().any(|(p, _)| p == "test.lua"),
@@ -1269,8 +1266,8 @@ mod tests {
         let id = DlcId::from("removal".to_string());
         let item1 = PackItem::new("a.txt", b"one".to_vec()).unwrap();
         let item2 = PackItem::new("b.txt", b"two".to_vec()).unwrap();
-        let bytes = pack_encrypted_pack(&id, &[item1, item2], &product, &dlc_key, &enc_key)
-            .unwrap();
+        let bytes =
+            pack_encrypted_pack(&id, &[item1, item2], &product, &dlc_key, &enc_key).unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("pack.dlcpack");
         std::fs::write(&path, &bytes).unwrap();
@@ -1281,8 +1278,17 @@ mod tests {
         let added_files = std::collections::HashMap::new();
 
         // save with no added files -- removal should trigger repack
-        save_pack_optimized(&path, &bytes, ver, &product.get(), &id.to_string(), &entries, &added_files, Some(&enc_key))
-            .unwrap();
+        save_pack_optimized(
+            &path,
+            &bytes,
+            ver,
+            &product.get(),
+            &id.to_string(),
+            &entries,
+            &added_files,
+            Some(&enc_key),
+        )
+        .unwrap();
 
         // decrypt resulting pack and confirm only a.txt remains
         use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
@@ -1315,7 +1321,11 @@ mod tests {
                 eprintln!("parse failed: {:?}", e);
                 eprintln!("saved bytes len = {}", saved_bytes.len());
                 let dump_len = saved_bytes.len().min(64);
-                eprintln!("first {} bytes: {:02x?}", dump_len, &saved_bytes[..dump_len]);
+                eprintln!(
+                    "first {} bytes: {:02x?}",
+                    dump_len,
+                    &saved_bytes[..dump_len]
+                );
                 panic!("save pack parse error");
             }
         }
@@ -1427,7 +1437,7 @@ mod tests {
         // pass on the CLI.
         let mut lic_str = String::new();
         signed_b.with_secret(|s| lic_str = s.to_string());
-        let pub_b64 = URL_SAFE_NO_PAD.encode(dlc_key.get_public_key().get());
+        let pub_b64 = URL_SAFE_NO_PAD.encode(dlc_key.get_public_key().0);
 
         // normal merge with delete
         let mut cmd = Command::new(pkg_name!());
@@ -1439,8 +1449,7 @@ mod tests {
             .arg("b.dlcpack")
             .arg("--signed-license")
             .arg(&lic_str)
-            .arg("--pubkey")
-            .arg(&pub_b64)
+            .arg(format!("--pubkey={}", pub_b64))
             .arg("-d");
         cmd.assert().success();
         let output = cmd.output().expect("failed to read output");
@@ -1460,7 +1469,7 @@ mod tests {
             .arg("--signed-license")
             .arg(&lic_str)
             .arg("--pubkey")
-            .arg(&pub_b64)
+            .arg(pub_b64)
             .arg("-d");
         cmd2.assert().success();
         assert!(path_b.exists());

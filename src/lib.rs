@@ -210,19 +210,7 @@ fixed_alias!(pub PrivateKey, 32, "A secure wrapper for a 32-byte Ed25519 signing
 
 /// PublicKey wrapper (32 bytes)
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct PublicKey([u8; 32]);
-
-impl PublicKey {
-    pub fn get(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
-
-impl From<[u8; 32]> for PublicKey {
-    fn from(v: [u8; 32]) -> Self {
-        PublicKey(v)
-    }
-}
+pub struct PublicKey(pub [u8; 32]);
 
 impl std::fmt::Debug for PublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -337,7 +325,7 @@ impl DlcKey {
         let mut priv_bytes = [0u8; 32];
         priv_bytes.copy_from_slice(&decoded_priv);
 
-        Self::from_priv_and_pub(PrivateKey::from(priv_bytes), PublicKey::from(pub_bytes))
+        Self::from_priv_and_pub(PrivateKey::from(priv_bytes), PublicKey(pub_bytes))
     }
 
     /// Construct a `DlcKey::Public` from a base64url-encoded public key string.
@@ -352,7 +340,7 @@ impl DlcKey {
         pub_bytes.copy_from_slice(&decoded_pub);
 
         Ok(DlcKey::Public {
-            pubkey: PublicKey::from(pub_bytes),
+            pubkey: PublicKey(pub_bytes),
         })
     }
 
@@ -363,7 +351,7 @@ impl DlcKey {
     ) -> Result<Self, DlcError> {
         let kp = privkey
             .with_secret(|priv_bytes| {
-                Ed25519KeyPair::from_seed_and_public_key(priv_bytes, publickey.get())
+                Ed25519KeyPair::from_seed_and_public_key(priv_bytes, &publickey.0)
             })
             .map_err(|e| DlcError::CryptoError(format!("invalid seed: {:?}", e)))?;
         let mut pub_bytes = [0u8; 32];
@@ -377,7 +365,7 @@ impl DlcKey {
 
         Ok(DlcKey::Private {
             privkey,
-            pubkey: PublicKey::from(pub_bytes),
+            pubkey: PublicKey(pub_bytes),
         })
     }
 
@@ -393,7 +381,7 @@ impl DlcKey {
         let mut pub_bytes = [0u8; 32];
         pub_bytes.copy_from_slice(pair.public_key().as_ref());
 
-        Self::from_priv_and_pub(privkey, PublicKey::from(pub_bytes))
+        Self::from_priv_and_pub(privkey, PublicKey(pub_bytes))
             .unwrap_or_else(|e| panic!("generate_complete failed: {:?}", e))
     }
 
@@ -444,7 +432,7 @@ impl DlcKey {
                     .map_err(|e| DlcError::TokenCreationFailed(e.to_string()))?;
 
                 let pair =
-                    Ed25519KeyPair::from_seed_and_public_key(encrypt_key_bytes, pubkey.get())
+                    Ed25519KeyPair::from_seed_and_public_key(encrypt_key_bytes, &pubkey.0)
                         .map_err(|e| DlcError::CryptoError(format!("{}", e)))?;
                 let sig = pair.sign(&payload_bytes);
                 Ok(SignedLicense::from(format!(
@@ -582,7 +570,7 @@ impl Clone for DlcKey {
 
 impl std::fmt::Display for DlcKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", URL_SAFE_NO_PAD.encode(self.get_public_key().get()))
+        write!(f, "{}", URL_SAFE_NO_PAD.encode(self.get_public_key().0))
     }
 }
 
@@ -795,7 +783,7 @@ pub fn verify_pack_signature(
     preimage.extend_from_slice(dlc_id_str.as_bytes());
 
     let pubkey = verifier.get_public_key();
-    let unparsed_public_key = UnparsedPublicKey::new(&ED25519, pubkey.get());
+    let unparsed_public_key = UnparsedPublicKey::new(&ED25519, pubkey.0);
     match unparsed_public_key.verify(&preimage, &signature_bytes) {
         Ok(()) => Ok(true),
         Err(_) => Ok(false),

@@ -60,8 +60,7 @@ pub fn is_data_executable(data: &[u8]) -> bool {
     false
 }
 
-/// Representation of a single manifest entry inside a v2+ `.dlcpack`.  The
-/// same struct is used by pack creation, parsing, and the REPL logic.
+/// Representation of a single manifest entry inside a v2+ `.dlcpack`.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct ManifestEntry {
     pub path: String,
@@ -84,6 +83,178 @@ impl ManifestEntry {
     }
 }
 
+/// Internal helper for binary parsing with offset management.
+struct PackReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> PackReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn check_len(&self, len: usize) -> std::io::Result<()> {
+        if self.offset + len > self.bytes.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unexpected end of dlcpack (truncated data)",
+            ));
+        }
+        Ok(())
+    }
+
+    fn read_u8(&mut self) -> std::io::Result<u8> {
+        self.check_len(1)?;
+        let val = self.bytes[self.offset];
+        self.offset += 1;
+        Ok(val)
+    }
+
+    fn read_u16(&mut self) -> std::io::Result<u16> {
+        self.check_len(2)?;
+        let val = u16::from_be_bytes([self.bytes[self.offset], self.bytes[self.offset + 1]]);
+        self.offset += 2;
+        Ok(val)
+    }
+
+    fn read_u32(&mut self) -> std::io::Result<u32> {
+        self.check_len(4)?;
+        let val = u32::from_be_bytes([
+            self.bytes[self.offset],
+            self.bytes[self.offset + 1],
+            self.bytes[self.offset + 2],
+            self.bytes[self.offset + 3],
+        ]);
+        self.offset += 4;
+        Ok(val)
+    }
+
+    fn read_bytes(&mut self, len: usize) -> std::io::Result<&'a [u8]> {
+        self.check_len(len)?;
+        let data = &self.bytes[self.offset..self.offset + len];
+        self.offset += len;
+        Ok(data)
+    }
+
+    fn read_string_u16(&mut self) -> std::io::Result<String> {
+        let len = self.read_u16()? as usize;
+        let bytes = self.read_bytes(len)?;
+        String::from_utf8(bytes.to_vec())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    fn read_string_u8(&mut self) -> std::io::Result<String> {
+        let len = self.read_u8()? as usize;
+        let bytes = self.read_bytes(len)?;
+        String::from_utf8(bytes.to_vec())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    fn read_nonce(&mut self) -> std::io::Result<[u8; 12]> {
+        let bytes = self.read_bytes(12)?;
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(bytes);
+        Ok(nonce)
+    }
+}
+
+/// Internal helper for binary packing.
+struct PackWriter {
+    buf: Vec<u8>,
+}
+
+impl PackWriter {
+    fn new() -> Self {
+        Self { buf: Vec::new() }
+    }
+
+    fn write_u8(&mut self, val: u8) {
+        self.buf.push(val);
+    }
+
+    fn write_u16(&mut self, val: u16) {
+        self.buf.extend_from_slice(&val.to_be_bytes());
+    }
+
+    fn write_u32(&mut self, val: u32) {
+        self.buf.extend_from_slice(&val.to_be_bytes());
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+    }
+
+    fn write_string_u16(&mut self, s: &str) {
+        let bytes = s.as_bytes();
+        self.write_u16(bytes.len() as u16);
+        self.write_bytes(bytes);
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.buf
+    }
+}
+
+/// Represents the header of any version of a `.dlcpack`.
+struct PackHeader {
+    version: u8,
+    product: String,
+    signature: Option<[u8; 64]>,
+    dlc_id: String,
+}
+
+impl PackHeader {
+    fn read(reader: &mut PackReader) -> std::io::Result<Self> {
+        let magic = reader.read_bytes(4)?;
+        if magic != DLC_PACK_MAGIC {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid dlcpack magic",
+            ));
+        }
+
+        let version = reader.read_u8()?;
+        let mut product = String::new();
+        let mut signature = None;
+
+        if version == 3 {
+            product = reader.read_string_u16()?;
+            let sig_bytes = reader.read_bytes(64)?;
+            let mut sig = [0u8; 64];
+            sig.copy_from_slice(sig_bytes);
+            signature = Some(sig);
+        } else if version > 3 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unsupported pack version: {}", version),
+            ));
+        }
+
+        let dlc_id = reader.read_string_u16()?;
+
+        Ok(PackHeader {
+            version,
+            product,
+            signature,
+            dlc_id,
+        })
+    }
+
+    fn write(&self, writer: &mut PackWriter) {
+        writer.write_bytes(DLC_PACK_MAGIC);
+        writer.write_u8(self.version);
+
+        if self.version == 3 {
+            writer.write_string_u16(&self.product);
+            if let Some(sig) = self.signature {
+                writer.write_bytes(&sig);
+            }
+        }
+
+        writer.write_string_u16(&self.dlc_id);
+    }
+}
 
 /// Decrypt with a 32-byte AES key using AES-GCM.  This is the same logic that
 /// used to live in `lib.rs`; moving it here allows crates that only depend on
@@ -123,11 +294,7 @@ pub fn decrypt_with_key(
     })
 }
 
-/// Parse a `.dlcpack` container and return product, embedded dlc_id, and a list
-/// of `(path, EncryptedAsset)` pairs. For v3 format, also validates the signature
-/// against the authorized product public key.
-///
-/// Returns: (product, dlc_id, entries, signature_bytes_if_v3)
+/// Returns: (product, dlc_id, version, entries)
 pub fn parse_encrypted_pack(
     bytes: &[u8],
 ) -> Result<
@@ -141,181 +308,37 @@ pub fn parse_encrypted_pack(
 > {
     use std::io::ErrorKind;
 
-    if bytes.len() < 4 + 1 {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidData,
-            "dlcpack too small",
-        ));
-    }
-    if &bytes[0..4] != DLC_PACK_MAGIC {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidData,
-            "invalid dlcpack magic",
-        ));
-    }
-    let version = bytes[4];
-    let mut offset = 5usize;
+    let mut reader = PackReader::new(bytes);
+    let header = PackHeader::read(&mut reader)?;
 
-    let product_str = if version == DLC_PACK_VERSION_LATEST {
-        if offset + 2 > bytes.len() {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidData,
-                "v3: missing product_len",
-            ));
-        }
-        let product_len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
-        offset += 2;
-        if offset + product_len > bytes.len() {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidData,
-                "v3: invalid product length",
-            ));
-        }
-        let prod = String::from_utf8(bytes[offset..offset + product_len].to_vec())
-            .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
-        offset += product_len;
-
-        if offset + 64 > bytes.len() {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidData,
-                "v3: missing signature",
-            ));
-        }
-        let _signature = &bytes[offset..offset + 64].to_vec();
-        offset += 64;
-
-        prod
-    } else if version < DLC_PACK_VERSION_LATEST {
-        String::new()
-    } else {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidData,
-            format!("unsupported pack version: {}", version),
-        ));
-    };
-
-    let dlc_len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
-    offset += 2;
-    if offset + dlc_len > bytes.len() {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidData,
-            "invalid dlc id length",
-        ));
-    }
-    let dlc_id = String::from_utf8(bytes[offset..offset + dlc_len].to_vec())
-        .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
-    offset += dlc_len;
-
-    let entries = if version == 1 {
-        // legacy v1 format: count followed by per-entry metadata
-        let entry_count = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
-        offset += 2;
-
+    let entries = if header.version == 1 {
+        // legacy v1 format: each entry has its own metadata and ciphertext
+        let entry_count = reader.read_u16()? as usize;
         let mut out = Vec::with_capacity(entry_count);
         for _ in 0..entry_count {
-            if offset + 2 > bytes.len() {
-                return Err(std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    "missing path_len",
-                ));
-            }
-            let path_len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
-            offset += 2;
-            if offset + path_len > bytes.len() {
-                return Err(std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    "invalid path length",
-                ));
-            }
-            let path = String::from_utf8(bytes[offset..offset + path_len].to_vec())
-                .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
-            offset += path_len;
-
-            if offset + 1 > bytes.len() {
-                return Err(std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    "missing ext_len",
-                ));
-            }
-            let ext_len = bytes[offset] as usize;
-            offset += 1;
-            let original_extension = if ext_len == 0 {
-                return Err(std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    "missing original extension",
-                ));
-            } else {
-                if offset + ext_len > bytes.len() {
-                    return Err(std::io::Error::new(
-                        ErrorKind::InvalidData,
-                        "invalid ext length",
-                    ));
-                }
-                let s = String::from_utf8(bytes[offset..offset + ext_len].to_vec())
-                    .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
-                offset += ext_len;
-                s
-            };
-
-            let original_type = if version >= 1 {
-                if offset + 2 > bytes.len() {
-                    return Err(std::io::Error::new(
-                        ErrorKind::InvalidData,
-                        "missing type_path len",
-                    ));
-                }
-                let tlen = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
-                offset += 2;
-                if tlen == 0 {
-                    None
-                } else {
-                    if offset + tlen > bytes.len() {
-                        return Err(std::io::Error::new(
-                            ErrorKind::InvalidData,
-                            "invalid type_path length",
-                        ));
-                    }
-                    let s = String::from_utf8(bytes[offset..offset + tlen].to_vec())
-                        .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
-                    offset += tlen;
-                    Some(s)
-                }
-            } else {
+            let path = reader.read_string_u16()?;
+            let original_extension = reader.read_string_u8()?;
+            
+            // v1: optional type_path
+            let tlen = reader.read_u16()? as usize;
+            let type_path = if tlen == 0 {
                 None
+            } else {
+                let s = String::from_utf8(reader.read_bytes(tlen)?.to_vec())
+                    .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
+                Some(s)
             };
 
-            if offset + 12 + 4 > bytes.len() {
-                return Err(std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    "truncated entry",
-                ));
-            }
-            let mut nonce = [0u8; 12];
-            nonce.copy_from_slice(&bytes[offset..offset + 12]);
-            offset += 12;
-            let ciphertext_len = u32::from_be_bytes([
-                bytes[offset],
-                bytes[offset + 1],
-                bytes[offset + 2],
-                bytes[offset + 3],
-            ]) as usize;
-            offset += 4;
-
-            if offset + ciphertext_len > bytes.len() {
-                return Err(std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    "truncated ciphertext",
-                ));
-            }
-            let ciphertext = bytes[offset..offset + ciphertext_len].into();
-            offset += ciphertext_len;
+            let nonce = reader.read_nonce()?;
+            let ciphertext_len = reader.read_u32()? as usize;
+            let ciphertext = reader.read_bytes(ciphertext_len)?.into();
 
             out.push((
                 path,
                 crate::asset_loader::EncryptedAsset {
-                    dlc_id: dlc_id.clone(),
+                    dlc_id: header.dlc_id.clone(),
                     original_extension,
-                    type_path: original_type,
+                    type_path,
                     nonce,
                     ciphertext,
                 },
@@ -323,71 +346,23 @@ pub fn parse_encrypted_pack(
         }
         out
     } else {
-        // version >= 2: manifest JSON followed by per-entry nonce+ciphertext
-        if offset + 4 > bytes.len() {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidData,
-                "missing manifest_len",
-            ));
-        }
-        let manifest_len = u32::from_be_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-        ]) as usize;
-        offset += 4;
-        if offset + manifest_len > bytes.len() {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidData,
-                "manifest extends past end of file",
-            ));
-        }
-        let manifest_bytes = &bytes[offset..offset + manifest_len];
-        offset += manifest_len;
-
-        let manifest: Vec<ManifestEntry> =
-            serde_json::from_slice(manifest_bytes)
-                .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
+        // version 2+: manifest JSON followed by shared nonce and ciphertext
+        let manifest_len = reader.read_u32()? as usize;
+        let manifest_bytes = reader.read_bytes(manifest_len)?;
+        let manifest: Vec<ManifestEntry> = serde_json::from_slice(manifest_bytes)
+            .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
 
         let mut out = Vec::with_capacity(manifest.len());
 
-        // newer packs encrypt the entire tar.gz archive as a single blob; the
-        // manifest lists individual paths but the ciphertext/nonces are shared
-        // (version>=2).  We read exactly one nonce+ciphertext pair and then
-        // duplicate it for every manifest entry.  This keeps old `version==1`
-        // behavior unaffected.
-        if offset + 12 + 4 > bytes.len() {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidData,
-                "truncated entry header",
-            ));
-        }
-        let mut shared_nonce = [0u8; 12];
-        shared_nonce.copy_from_slice(&bytes[offset..offset + 12]);
-        offset += 12;
-        let shared_ciphertext_len = u32::from_be_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-        ]) as usize;
-        offset += 4;
+        let shared_nonce = reader.read_nonce()?;
+        let shared_ciphertext_len = reader.read_u32()? as usize;
+        let shared_ciphertext: std::sync::Arc<[u8]> = reader.read_bytes(shared_ciphertext_len)?.into();
 
-        if offset + shared_ciphertext_len > bytes.len() {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidData,
-                "truncated ciphertext",
-            ));
-        }
-        let shared_ciphertext: std::sync::Arc<[u8]> = bytes[offset..offset + shared_ciphertext_len].into();
-
-        // populate output for each manifest entry using the shared blob
         for entry in manifest {
             out.push((
                 entry.path,
                 crate::asset_loader::EncryptedAsset {
-                    dlc_id: dlc_id.clone(),
+                    dlc_id: header.dlc_id.clone(),
                     original_extension: entry.original_extension.unwrap_or_default(),
                     type_path: entry.type_path,
                     nonce: shared_nonce,
@@ -398,8 +373,7 @@ pub fn parse_encrypted_pack(
         out
     };
 
-    // final return with the parsed data
-    Ok((product_str, dlc_id, version as usize, entries))
+    Ok((header.product, header.dlc_id, header.version as usize, entries))
 }
 
 /// Pack multiple entries into a single `.dlcpack` container.
@@ -423,8 +397,8 @@ pub fn pack_encrypted_pack(
         ));
     }
 
-    let privkey_bytes = match dlc_key {
-        DlcKey::Private { privkey, .. } => privkey,
+    let (privkey_bytes, pubkey_bytes) = match dlc_key {
+        DlcKey::Private { privkey, pubkey } => (privkey, pubkey.0),
         DlcKey::Public { .. } => {
             return Err(DlcError::Other(
                 "cannot sign pack with public-only key; use private key".into(),
@@ -493,7 +467,7 @@ pub fn pack_encrypted_pack(
     let product_str = product.get();
     let dlc_id_str = dlc_id.to_string();
     let signature = privkey_bytes.with_secret(|priv_bytes| {
-        let pair = Ed25519KeyPair::from_seed_unchecked(priv_bytes)
+        let pair = Ed25519KeyPair::from_seed_and_public_key(priv_bytes, &pubkey_bytes)
             .map_err(|e| DlcError::CryptoError(format!("keypair: {:?}", e)))?;
         let mut signature_preimage = Vec::new();
         signature_preimage.extend_from_slice(product_str.as_bytes());
@@ -501,34 +475,27 @@ pub fn pack_encrypted_pack(
         Ok::<_, DlcError>(pair.sign(&signature_preimage).as_ref().to_vec())
     })?;
 
-    let mut out = Vec::new();
-    out.extend_from_slice(DLC_PACK_MAGIC);
-    out.push(3u8); // version 3 (with signature + product)
+    let sig_fixed: [u8; 64] = signature.try_into().map_err(|_| {
+        DlcError::Other("ed25519 signature must be exactly 64 bytes".into())
+    })?;
 
-    let product_bytes = product_str.as_bytes();
-    out.extend_from_slice(&(product_bytes.len() as u16).to_be_bytes());
-    out.extend_from_slice(product_bytes);
+    let mut writer = PackWriter::new();
+    let header = PackHeader {
+        version: DLC_PACK_VERSION_LATEST,
+        product: product_str.to_string(),
+        signature: Some(sig_fixed),
+        dlc_id: dlc_id_str.to_string(),
+    };
+    header.write(&mut writer);
 
-    if signature.len() != 64 {
-        return Err(DlcError::Other(format!(
-            "ed25519 signature must be 64 bytes, got {}",
-            signature.len()
-        )));
-    }
-    out.extend_from_slice(&signature);
+    // Write body
+    writer.write_u32(manifest_bytes.len() as u32);
+    writer.write_bytes(&manifest_bytes);
+    writer.write_bytes(&nonce_bytes);
+    writer.write_u32(ciphertext.len() as u32);
+    writer.write_bytes(&ciphertext);
 
-    let dlc_bytes = dlc_id_str.as_bytes();
-    out.extend_from_slice(&(dlc_bytes.len() as u16).to_be_bytes());
-    out.extend_from_slice(dlc_bytes);
-
-    out.extend_from_slice(&(manifest_bytes.len() as u32).to_be_bytes());
-    out.extend_from_slice(&manifest_bytes);
-
-    out.extend_from_slice(&nonce_bytes);
-    out.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
-    out.extend_from_slice(&ciphertext);
-
-    Ok(out)
+    Ok(writer.finish())
 }
 
 #[cfg(test)]

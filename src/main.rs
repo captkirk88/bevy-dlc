@@ -290,7 +290,7 @@ fn print_signed_license_and_pubkey(
 ) {
     println!("{}:\n{}", "SIGNED LICENSE".green().bold(), signedlicense);
 
-    let pubkey_b64 = URL_SAFE_NO_PAD.encode(dlc_key.get_public_key().get());
+    let pubkey_b64 = URL_SAFE_NO_PAD.encode(dlc_key.get_public_key().0);
     println!("{}: {}", "PUB KEY".blue().bold(), pubkey_b64);
 
     if write_files {
