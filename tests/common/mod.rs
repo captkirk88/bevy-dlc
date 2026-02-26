@@ -112,7 +112,7 @@ impl CliTestCtx {
         product: &str,
         dlc_id: &str,
         type_override: Option<&str>,
-    ) -> Result<(String, String, usize, Vec<(String, EncryptedAsset)>), Box<dyn std::error::Error>>
+    ) -> Result<(bevy_dlc::Product, bevy_dlc::DlcId, usize, Vec<(String, EncryptedAsset)>), Box<dyn std::error::Error>>
     {
         self.pack(product, dlc_id, type_override).success();
         let bytes = std::fs::read(self.pack_path(dlc_id))?;

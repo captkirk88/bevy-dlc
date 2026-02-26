@@ -299,8 +299,8 @@ pub fn parse_encrypted_pack(
     bytes: &[u8],
 ) -> Result<
     (
-        String,
-        String,
+        Product,
+        DlcId,
         usize,
         Vec<(String, crate::asset_loader::EncryptedAsset)>,
     ),
@@ -373,7 +373,12 @@ pub fn parse_encrypted_pack(
         out
     };
 
-    Ok((header.product, header.dlc_id, header.version as usize, entries))
+    Ok((
+        Product::from(header.product),
+        DlcId::from(header.dlc_id),
+        header.version as usize,
+        entries,
+    ))
 }
 
 /// Pack multiple entries into a single `.dlcpack` container.
@@ -464,7 +469,7 @@ pub fn pack_encrypted_pack(
     let manifest_bytes =
         serde_json::to_vec(&manifest).map_err(|e| DlcError::Other(e.to_string()))?;
 
-    let product_str = product.get();
+    let product_str = product.as_ref();
     let dlc_id_str = dlc_id.to_string();
     let signature = privkey_bytes.with_secret(|priv_bytes| {
         let pair = Ed25519KeyPair::from_seed_and_public_key(priv_bytes, &pubkey_bytes)

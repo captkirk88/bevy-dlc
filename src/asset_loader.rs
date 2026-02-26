@@ -9,7 +9,7 @@ use std::io;
 use std::sync::Arc;
 use thiserror::Error;
 
-use crate::DlcId;
+use crate::{DlcId, PackItem};
 
 /// Decompress a gzip‑compressed tar archive from `plaintext` and return a map from
 /// internal path -> contents.  Errors are mapped into `DlcLoaderError::DecryptionFailed`
@@ -619,10 +619,10 @@ impl AssetLoader for DlcPackLoader {
 
         // Check for DLC ID conflicts: reject if a DIFFERENT pack file is being loaded for the same DLC ID.
         // Allow the same pack file to be loaded multiple times (e.g., when accessing labeled sub-assets).
-        let existing_path = crate::encrypt_key_registry::asset_path_for(&dlc_id);
+        let existing_path = crate::encrypt_key_registry::asset_path_for(dlc_id.as_ref());
         if !existing_path.is_empty() && existing_path != path_string {
             return Err(DlcLoaderError::DlcIdConflict(
-                dlc_id.clone(),
+                dlc_id.to_string(),
                 existing_path.clone(),
                 path_string.clone(),
             ));
@@ -630,8 +630,8 @@ impl AssetLoader for DlcPackLoader {
 
         // Register this asset path for the dlc id so it can be reloaded on unlock.
         // If the path already exists for this DLC ID, it's idempotent (same pack file).
-        if !crate::encrypt_key_registry::has(&dlc_id, &path_string) {
-            crate::encrypt_key_registry::register_asset_path(&dlc_id, &path_string);
+        if !crate::encrypt_key_registry::has(dlc_id.as_ref(), &path_string) {
+            crate::encrypt_key_registry::register_asset_path(dlc_id.as_ref(), &path_string);
         }
 
         // Try to decrypt all entries immediately when the encrypt key is present.
@@ -639,7 +639,7 @@ impl AssetLoader for DlcPackLoader {
         // we don't block the asset loader threads on heavy CPU work. If the key
         // is missing we still populate the manifest so callers can inspect
         // entries; a reload after unlock will add the typed sub-assets.
-        let decrypted_items: Option<Vec<(String, String, Option<String>, Vec<u8>)>> = {
+        let decrypted_items: Option<Vec<PackItem>> = {
             // clone bytes for the blocking task so we can continue to own the
             // original `bytes` for `container_bytes` later
             let bytes_for_task = bytes.clone();
@@ -676,9 +676,10 @@ impl AssetLoader for DlcPackLoader {
 
             // Try to load this entry as a typed sub-asset when plaintext is available.
             if let Some(ref items) = decrypted_items {
-                if let Some((_, ext, type_path, plaintext)) =
-                    items.iter().find(|(p, _, _, _)| p == &path)
-                {
+                if let Some(item) = items.iter().find(|i| i.path() == path) {
+                    let ext = item.ext().unwrap_or_default();
+                    let type_path = item.type_path();
+                    let plaintext = item.plaintext().to_vec();
                     // Build a fake path with the correct extension so
                     // `load_context.loader()` selects the right concrete loader
                     // by extension (e.g. `.png` → ImageLoader, `.json` → JsonLoader).
@@ -696,7 +697,7 @@ impl AssetLoader for DlcPackLoader {
                     if let Some(tp) = type_path {
                         if let Some(registrar) = regs
                             .iter()
-                            .find(|r| fuzzy_type_path_match(r.asset_type_path(), tp))
+                            .find(|r| fuzzy_type_path_match(r.asset_type_path(), tp.as_str()))
                         {
                             match registrar
                                 .load_direct(
@@ -756,15 +757,15 @@ impl AssetLoader for DlcPackLoader {
 
                                 if let Some(_) = remaining {
                                     warn!(
-                                        "DLC entry '{}' (fake_path='{}') present in container but no registered asset type matched (extension='{}'); the asset will NOT be available as '{}#{}'. Register a loader with `app.register_dlc_type::<T>()`",
-                                        entry_label, fake_path, ext, path_string, entry_label
+                                        "DLC entry '{}' present in container but no registered asset type matched (extension='{}'); the asset will NOT be available as '{}#{}'. Register a loader with `app.register_dlc_type::<T>()`",
+                                        entry_label, ext, path_string, entry_label
                                     );
                                 }
                             }
                             Err(e) => {
                                 warn!(
-                                    "Failed to load entry '{}' (fake_path='{}', extension='{}'): {}",
-                                    entry_label, fake_path, ext, e
+                                    "Failed to load entry '{}', extension='{}': {}",
+                                    entry_label, ext, e
                                 );
                             }
                         }
@@ -785,12 +786,18 @@ impl AssetLoader for DlcPackLoader {
             });
         }
 
-        // If any entries were not registered as labeled assets, emit a single
-        // summary warning that explains why `AssetServer::load("pack#entry")`
-        // will report the labeled asset as missing (see user-facing error).
-        if !unregistered_labels.is_empty() {
+        // If we actually had plaintext to attempt registration (i.e. the
+        // pack was unlocked at load time) then unregistered_labels indicates a
+        // genuine failure to match a loader.  When the pack is still locked we
+        // intentionally avoid logging anything here because a later reload when
+        // the key arrives will perform the real work and emit the warning.
+        if decrypted_items.is_some() && !unregistered_labels.is_empty() {
+            // provide a concrete example using the first unregistered label so
+            // the user can see how to reference it with the pack path.
+            let example_label = &unregistered_labels[0];
+            let example_full = format!("{}#{}", path_string, example_label);
             warn!(
-                "{} {} in '{}' were not registered as labeled assets and will be inaccessible via 'pack#entry': {}. See earlier warnings for details or register the appropriate loader via `app.register_dlc_type::<T>()`.",
+                "{} {} in '{}' were not registered as labeled assets and will be inaccessible via '{}'. See earlier warnings for details or register the appropriate loader via `app.register_dlc_type::<T>()`.",
                 unregistered_labels.len(),
                 if unregistered_labels.len() == 1 {
                     "entry"
@@ -798,7 +805,7 @@ impl AssetLoader for DlcPackLoader {
                     "entries"
                 },
                 path_string,
-                unregistered_labels.join(", ")
+                example_full,
             );
         }
 
@@ -810,23 +817,18 @@ impl AssetLoader for DlcPackLoader {
 /// Returns `(dlc_id, Vec<(path, original_extension, plaintext)>)`.
 pub fn decrypt_pack_entries(
     pack_bytes: &[u8],
-) -> Result<(String, Vec<(String, String, Option<String>, Vec<u8>)>), DlcLoaderError> {
+) -> Result<(crate::DlcId, Vec<crate::PackItem>), DlcLoaderError> {
     let (_product, dlc_id, version, entries) = crate::parse_encrypted_pack(pack_bytes)
         .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
 
     // lookup encrypt key in global registry
-    let encrypt_key = crate::encrypt_key_registry::get(&dlc_id)
-        .ok_or_else(|| DlcLoaderError::DlcLocked(dlc_id.clone()))?;
+    let encrypt_key = crate::encrypt_key_registry::get(dlc_id.as_ref())
+        .ok_or_else(|| DlcLoaderError::DlcLocked(dlc_id.to_string()))?;
 
     // Version >= 2: single encrypted gzip archive + plaintext manifest
     // (the version‑1 branch has been removed; packs are always created in v3+
     // going forward)
-    if version < 3 && entries.is_empty() {
-        return Ok((dlc_id, Vec::new()));
-    }
-
-    // Version >= 2: single encrypted gzip archive + plaintext manifest
-    if entries.is_empty() {
+    if version < 3 || entries.is_empty() {
         return Ok((dlc_id, Vec::new()));
     }
 
@@ -853,23 +855,37 @@ pub fn decrypt_pack_entries(
     let mut extracted = decompress_archive(&archive_plain)?;
 
     // build output list using manifest metadata from `entries`
-    let mut out = Vec::with_capacity(entries.len());
+    let mut out: Vec<PackItem> = Vec::with_capacity(entries.len());
     for (path, enc) in entries.into_iter() {
         // normalize manifest path (manifest paths may contain Windows backslashes);
         // extracted archive paths are normalized to forward slashes above.
         let normalized = path.replace("\\", "/");
-        match extracted
+        let plaintext = match extracted
             .remove(&normalized)
             .or_else(|| extracted.remove(&path))
         {
-            Some(bytes) => out.push((path, enc.original_extension, enc.type_path, bytes)),
+            Some(bytes) => bytes,
             None => {
                 return Err(DlcLoaderError::DecryptionFailed(format!(
                     "dlc='{}' missing entry in archive: {}",
                     dlc_id, path
                 )));
             }
+        };
+
+        // create PackItem from decrypted data, preserving metadata
+        let mut item = crate::PackItem::new(path.clone(), plaintext)
+            .map_err(|e| DlcLoaderError::DecryptionFailed(e.to_string()))?;
+        if !enc.original_extension.is_empty() {
+            item = item
+                .with_extension(enc.original_extension.clone())
+                .map_err(|e| DlcLoaderError::DecryptionFailed(e.to_string()))?;
         }
+        if let Some(tp) = &enc.type_path {
+            item = item.with_type_path(tp.clone());
+        }
+
+        out.push(item);
     }
 
     Ok((dlc_id, out))

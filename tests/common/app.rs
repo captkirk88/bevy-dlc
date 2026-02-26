@@ -23,7 +23,7 @@ impl TestAppBuilder {
     pub fn new(product: impl Into<Product>, dlc_ids: &[&str]) -> Self {
         Self {
             temp_dir: TempDir::new().expect("create temp dir for TestAppBuilder"),
-            product: product.into().get().clone(),
+            product: product.into().to_string(),
             dlc_ids: dlc_ids.iter().map(|s| s.to_string()).collect(),
             app: App::new(),
             dlc_key: DlcKey::generate_random(),

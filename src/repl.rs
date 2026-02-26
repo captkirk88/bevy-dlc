@@ -42,12 +42,7 @@ pub fn run_edit_repl(
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read(&path)?;
-    let (product, mut dlc_id, version, mut entries): (
-        String,
-        String,
-        usize,
-        Vec<(String, EncryptedAsset)>,
-    ) = parse_encrypted_pack(&bytes)?;
+    let (product, mut dlc_id, version, mut entries) = parse_encrypted_pack(&bytes)?;
 
     safe_println!(
         "{} {} (v{}, {}: {}, dlc: {})",
@@ -55,18 +50,17 @@ pub fn run_edit_repl(
         path.display().to_string().color(AnsiColors::Cyan),
         version,
         "product".color(AnsiColors::Blue),
-        product.as_str().color(AnsiColors::Magenta).bold(),
+        product.as_ref().color(AnsiColors::Magenta).bold(),
         dlc_id.as_str().color(AnsiColors::Magenta).bold()
     );
 
     let adding_enabled = if encrypt_key.is_some() {
-        format!("{}", "(adding new files enabled)".green())
+        format!("{}", "Adding new files enabled.".green())
     } else {
-        format!("{}", "(adding new files disabled)".yellow())
+        format!("{}", "Adding new files disabled, no signed license.".yellow())
     };
 
-    safe_println!("Encryption key available {}.", adding_enabled);
-    safe_println!("Entries: {}", entries.len());
+    safe_println!("{}.", adding_enabled);
     safe_println!("Type 'help' for commands.");
 
     let mut dirty = false;
@@ -202,7 +196,7 @@ pub fn run_edit_repl(
                             "Pack info: {}",
                             path.display().to_string().color(AnsiColors::Cyan)
                         );
-                        safe_println!(" Product: {}", product.color(AnsiColors::Blue));
+                        safe_println!(" Product: {}", product.as_ref().color(AnsiColors::Blue));
                         safe_println!(" DLC ID: {}", dlc_id.color(AnsiColors::Magenta));
                         safe_println!(
                             " Version: {}",
@@ -347,7 +341,7 @@ pub fn run_edit_repl(
                             entries.push((
                                 inner_path.clone(),
                                 EncryptedAsset {
-                                    dlc_id: dlc_id.clone(),
+                                    dlc_id: dlc_id.to_string(),
                                     original_extension: pack_item.ext().unwrap_or_default(),
                                     type_path: pack_item.type_path(),
                                     nonce: [0u8; 12],
@@ -369,7 +363,7 @@ pub fn run_edit_repl(
                             dlc_id.color(AnsiColors::Magenta),
                             new_id.color(AnsiColors::Magenta).bold(),
                         );
-                        dlc_id = new_id.clone();
+                        dlc_id = bevy_dlc::DlcId(new_id.clone());
                         dirty = true;
                         return Ok(false);
                     }
@@ -670,8 +664,8 @@ fn save_pack_optimized(
     path: &Path,
     bytes: &[u8],
     version: usize,
-    product: &str,
-    dlc_id: &str,
+    product: &Product,
+    dlc_id: &DlcId,
     entries: &[(String, EncryptedAsset)],
     added_files: &std::collections::HashMap<String, Vec<u8>>,
     encrypt_key: Option<&EncryptionKey>,
@@ -771,7 +765,7 @@ fn save_pack_optimized(
     out.push(version as u8);
 
     if version >= 3 {
-        let prod_bytes = product.as_bytes();
+        let prod_bytes = product.as_str().as_bytes();
         out.extend_from_slice(&(prod_bytes.len() as u16).to_be_bytes());
         out.extend_from_slice(prod_bytes);
 
@@ -779,7 +773,7 @@ fn save_pack_optimized(
         out.extend_from_slice(&bytes[sig_offset..sig_offset + 64]);
     }
 
-    let dlc_bytes = dlc_id.as_bytes();
+    let dlc_bytes = dlc_id.as_str().as_bytes();
     out.extend_from_slice(&(dlc_bytes.len() as u16).to_be_bytes());
     out.extend_from_slice(dlc_bytes);
 
@@ -818,8 +812,8 @@ fn update_manifest(
     path: &Path,
     bytes: &[u8],
     version: usize,
-    product: &str,
-    dlc_id: &str,
+    product: &Product,
+    dlc_id: &DlcId,
     entries: &[(String, EncryptedAsset)],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut out = Vec::new();
@@ -827,7 +821,7 @@ fn update_manifest(
     out.push(version as u8);
 
     if version >= 3 {
-        let prod_bytes = product.as_bytes();
+        let prod_bytes = product.as_str().as_bytes();
         out.extend_from_slice(&(prod_bytes.len() as u16).to_be_bytes());
         out.extend_from_slice(prod_bytes);
 
@@ -835,7 +829,7 @@ fn update_manifest(
         out.extend_from_slice(&bytes[sig_offset..sig_offset + 64]);
     }
 
-    let dlc_bytes = dlc_id.as_bytes();
+    let dlc_bytes = dlc_id.as_str().as_bytes();
     out.extend_from_slice(&(dlc_bytes.len() as u16).to_be_bytes());
     out.extend_from_slice(dlc_bytes);
 
@@ -895,8 +889,8 @@ fn merge_pack_into(
     entries: &mut Vec<(String, EncryptedAsset)>,
     added_files: &mut std::collections::HashMap<String, Vec<u8>>,
     encrypt_key: Option<&EncryptionKey>,
-    current_product: &str,
-    current_dlc_id: &str,
+    current_product: &Product,
+    current_dlc_id: &DlcId,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
     use flate2::read::GzDecoder;
@@ -908,7 +902,7 @@ fn merge_pack_into(
     let bytes = std::fs::read(other_pack)?;
     let (other_prod, _other_did, _ver, other_entries) = parse_encrypted_pack(&bytes)?;
 
-    if other_prod != current_product {
+    if other_prod != *current_product {
         return Err(format!(
             "cannot merge two different products '{}' into '{}'",
             other_prod, current_product
@@ -1052,8 +1046,8 @@ mod tests {
             &mut entries,
             &mut added_files,
             Some(&enc_key),
-            "prod",
-            "a",
+            &Product::from("prod"),
+            &DlcId::from("a"),
         )
         .unwrap();
         assert!(strays.is_empty());
@@ -1151,13 +1145,13 @@ mod tests {
             out.extend_from_slice(DLC_PACK_MAGIC);
             out.push(ver as u8);
             if ver == DLC_PACK_VERSION_LATEST as usize {
-                let prod_bytes = product.as_bytes();
+                let prod_bytes = product.as_str().as_bytes();
                 out.extend_from_slice(&(prod_bytes.len() as u16).to_be_bytes());
                 out.extend_from_slice(prod_bytes);
                 let sig_offset = 4 + 1 + 2 + prod_bytes.len();
                 out.extend_from_slice(&original[sig_offset..sig_offset + 64]);
             }
-            let dlc_bytes = did.as_bytes();
+            let dlc_bytes = did.as_str().as_bytes();
             out.extend_from_slice(&(dlc_bytes.len() as u16).to_be_bytes());
             out.extend_from_slice(dlc_bytes);
             let manifest: Vec<ManifestEntry> = entries
@@ -1211,8 +1205,8 @@ mod tests {
             &mut entries,
             &mut added_files,
             Some(&enc_key),
-            "example",
-            "dlcA",
+            &Product::from("example"),
+            &DlcId::from("dlcA"),
         )
         .unwrap();
         assert_eq!(strays, vec!["test.lua".to_string()]);
@@ -1282,8 +1276,8 @@ mod tests {
             &path,
             &bytes,
             ver,
-            &product.get(),
-            &id.to_string(),
+            &product,
+            &id,
             &entries,
             &added_files,
             Some(&enc_key),
@@ -1360,8 +1354,6 @@ mod tests {
             .stdout(
                 predicates::str::contains("Entries in ")
                     .and(predicates::str::contains("foo.txt"))
-                    // initial entry count message with plain number
-                    .and(predicates::str::contains("Entries: 1")),
             );
     }
 

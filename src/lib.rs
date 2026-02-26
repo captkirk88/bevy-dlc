@@ -1,3 +1,4 @@
+
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bevy::prelude::*;
@@ -184,9 +185,28 @@ pub fn is_dlc_entry_loaded(
 }
 
 /// Strongly-typed DLC identifier (string-backed).
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(transparent)]
 pub struct DlcId(pub String);
+
+impl std::fmt::Display for DlcId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl DlcId {
+    /// Return the underlying string slice.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl Clone for DlcId {
+    fn clone(&self) -> Self {
+        DlcId(self.0.clone())
+    }
+}
 
 impl From<&str> for DlcId {
     fn from(s: &str) -> Self {
@@ -200,9 +220,9 @@ impl From<String> for DlcId {
     }
 }
 
-impl std::fmt::Display for DlcId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
+impl AsRef<str> for DlcId {
+    fn as_ref(&self) -> &str {
+        &self.0
     }
 }
 
@@ -267,9 +287,22 @@ pub fn extract_dlc_ids_from_license(license: &SignedLicense) -> Vec<String> {
 #[derive(Resource, Clone, PartialEq, Eq, Debug)]
 pub struct Product(String);
 
-impl Product {
-    pub fn get(&self) -> &String {
+impl std::fmt::Display for Product {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl AsRef<str> for Product {
+    fn as_ref(&self) -> &str {
         &self.0
+    }
+}
+
+impl Product {
+    /// Return the underlying string slice.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
     }
 }
 
@@ -417,7 +450,7 @@ impl DlcKey {
 
         payload.insert(
             "product".to_string(),
-            serde_json::Value::String(product.get().to_string()),
+            serde_json::Value::String(product.as_ref().to_string()),
         );
 
         match self {

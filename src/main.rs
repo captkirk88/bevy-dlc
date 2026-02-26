@@ -575,8 +575,8 @@ fn handle_license_output(
 fn resolve_keys(
     pubkey: Option<String>,
     signed_license: Option<String>,
-    product: Option<String>,
-    embedded_product: Option<String>,
+    product: Option<Product>,
+    embedded_product: Option<Product>,
 ) -> (Option<String>, Option<String>) {
     // Priority: explicit args → product/embedded_product files in CWD → recursive search for product files
 
@@ -605,7 +605,7 @@ fn resolve_keys(
     let resolved_pubkey = pubkey.or_else(|| {
         // try product / embedded_product first
         if let Some(prod) = product.as_ref().or_else(|| embedded_product.as_ref()) {
-            if let Some(found) = find_product_file_recursive_opt(prod, "pubkey") {
+            if let Some(found) = find_product_file_recursive_opt(prod.as_ref(), "pubkey") {
                 return Some(found);
             }
         }
@@ -614,7 +614,7 @@ fn resolve_keys(
 
     let resolved_license = signed_license.or_else(|| {
         if let Some(prod) = product.as_ref().or_else(|| embedded_product.as_ref()) {
-            if let Some(found) = find_product_file_recursive_opt(prod, "slicense") {
+            if let Some(found) = find_product_file_recursive_opt(prod.as_ref(), "slicense") {
                 return Some(found);
             }
         }
@@ -725,13 +725,13 @@ fn validate_dlc_file(
 
     // Parse and get embedded product/dlc id
     let (prod, dlc_id, _v, _ents) = parse_encrypted_pack(&bytes)?;
-    let embedded_product = Some(prod.to_string());
+    let embedded_product = Some(prod.clone());
 
     // resolve pubkey and signed license with fallback to embedded product (recursively)
     let (supplied_pubkey, supplied_license) = resolve_keys(
         pubkey_arg.map(|s| s.to_string()),
         signed_license_arg.map(|s| s.to_string()),
-        product_arg.map(|s| s.to_string()),
+        product_arg.map(|s| Product::from(s.to_string())),
         embedded_product,
     );
 
@@ -758,7 +758,7 @@ fn validate_dlc_file(
             .verify_signed_license(&SignedLicense::from(supplied_license.clone()))
             .map_err(|e| format!("signed-license verification failed: {:?}", e))?;
 
-        if !verified.dlcs.iter().any(|d| d == &dlc_id) {
+        if !verified.dlcs.iter().any(|d| d == &dlc_id.as_ref()) {
             return Err(format!("license does not include DLC id '{}'", dlc_id).into());
         }
     }
@@ -1250,7 +1250,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (emb_prod, _emb_did, _v, _ents) = parse_encrypted_pack(&bytes)?;
 
             // resolve pubkey and signed license with fallback to embedded product
-            let (_, sup_lic) = resolve_keys(pubkey, signed_license, product, Some(emb_prod));
+            let (_, sup_lic) = resolve_keys(
+                pubkey,
+                signed_license,
+                product.map(|p| Product::from(p)),
+                Some(emb_prod),
+            );
 
             // extract the encryption key from the license if present
             let encrypt_key = if let Some(lic) = sup_lic.as_deref() {
