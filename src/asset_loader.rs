@@ -508,11 +508,6 @@ impl DlcPack {
         self.version
     }
 
-    /// Return a slice of block metadata (v4 only).
-    pub(crate) fn block_metadatas(&self) -> &[crate::pack_format::BlockMetadata] {
-        &self.block_metadatas
-    }
-
     /// Return a slice of contained entries.
     pub fn entries(&self) -> &[DlcPackEntry] {
         &self.entries
