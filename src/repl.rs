@@ -41,8 +41,10 @@ pub fn run_edit_repl(
     initial_command: Option<Vec<String>>, // new parameter for one-shot commands
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let bytes = std::fs::read(&path)?;
-    let (product, mut dlc_id, version, mut entries) = parse_encrypted_pack(&bytes)?;
+    let file = std::fs::File::open(&path)?;
+    let mut reader = std::io::BufReader::new(file);
+    let (product, mut dlc_id, version, mut entries, block_metadatas) =
+        parse_encrypted_pack(&mut reader)?;
 
     safe_println!(
         "{} {} (v{}, {}: {}, dlc: {})",
@@ -206,8 +208,13 @@ pub fn run_edit_repl(
                         // actual file size on disk.  if the user saved without a key
                         // (manifest-only change) then only the manifest shrinks and the
                         // archive bytes stay the same.
-                        let archive_size =
-                            entries.get(0).map(|(_, e)| e.ciphertext.len()).unwrap_or(0);
+                        let archive_size: u64 = if version >= 4 {
+                            block_metadatas.iter().map(|b| b.encrypted_size as u64).sum()
+                        } else if version >= 2 {
+                            entries.get(0).map(|(_, e)| e.ciphertext.len() as u64).unwrap_or(0)
+                        } else {
+                            entries.iter().map(|(_, e)| e.ciphertext.len() as u64).sum()
+                        };
 
                         safe_println!(
                             " Archive Size: {} ({} bytes)",
@@ -220,10 +227,11 @@ pub fn run_edit_repl(
                         safe_println!("Entries in {}:", dlc_id.as_str().color(AnsiColors::Magenta));
                         for (i, (p, enc)) in entries.iter().enumerate() {
                             safe_println!(
-                                " [{}] {} (ext: {}) type: {}",
+                                " [{}] {} (ext: {}, size: {}) type: {}",
                                 i.color(AnsiColors::Cyan),
                                 p.as_str().color(AnsiColors::Green),
                                 enc.original_extension.as_str().color(AnsiColors::Yellow),
+                                bevy_dlc::human_bytes!(enc.size as u64).color(CssColors::SlateGray),
                                 enc.type_path
                                     .as_deref()
                                     .unwrap_or("None")
@@ -346,6 +354,9 @@ pub fn run_edit_repl(
                                     type_path: pack_item.type_path(),
                                     nonce: [0u8; 12],
                                     ciphertext: vec![].into(),
+                                    block_id: 0,
+                                    block_offset: 0,
+                                    size: 0,
                                 },
                             ));
                             safe_println!(
@@ -478,7 +489,6 @@ pub fn run_edit_repl(
                         } else {
                             save_pack_optimized(
                                 &path,
-                                &bytes,
                                 version,
                                 &product,
                                 &dlc_id,
@@ -508,9 +518,10 @@ pub fn run_edit_repl(
                         // try to resolve encryption key if we don't already have one
                         if encrypt_key.is_none() {
                             // parse other pack to get product for heuristics
-                            if let Ok(bytes) = std::fs::read(other_path) {
-                                if let Ok((other_prod, _other_did, _ver, _ents)) =
-                                    parse_encrypted_pack(&bytes)
+                            if let Ok(file) = std::fs::File::open(other_path) {
+                                let mut reader = std::io::BufReader::new(file);
+                                if let Ok((other_prod, _other_did, _ver, _ents, _blocks)) =
+                                    parse_encrypted_pack(&mut reader)
                                 {
                                     let (_resolved_pubkey, resolved_license): (
                                         Option<String>,
@@ -573,7 +584,6 @@ pub fn run_edit_repl(
                                 if e.kind() == ErrorKind::BrokenPipe {
                                     save_pack_optimized(
                                         &path,
-                                        &bytes,
                                         version,
                                         &product,
                                         &dlc_id,
@@ -596,7 +606,6 @@ pub fn run_edit_repl(
                             if confirm.trim().eq_ignore_ascii_case("y") {
                                 save_pack_optimized(
                                     &path,
-                                    &bytes,
                                     version,
                                     &product,
                                     &dlc_id,
@@ -662,155 +671,108 @@ pub fn run_edit_repl(
 /// Save function that attempts to optimize for the case where no files were added/removed, since we can just update the manifest and headers without touching the archive content. If files were added, we have to re-pack the archive which requires the encryption key.
 fn save_pack_optimized(
     path: &Path,
-    bytes: &[u8],
-    version: usize,
+    _version: usize,
     product: &Product,
     dlc_id: &DlcId,
     entries: &[(String, EncryptedAsset)],
     added_files: &std::collections::HashMap<String, Vec<u8>>,
     encrypt_key: Option<&EncryptionKey>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
-    use flate2::Compression;
     use flate2::read::GzDecoder;
-    use flate2::write::GzEncoder;
+    use tar::Archive;
+    use std::io::{Read, Seek, SeekFrom};
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
     use secure_gate::ExposeSecret;
-    use tar::{Archive, Builder};
 
-    // Determine whether entries were removed by comparing against the original
-    // manifest.  We must parse the pack regardless so we can make this
-    // decision; this also allows us to fall through to the repack logic when
-    // files have been deleted even if nothing was added.
-    let (_old_prod, _old_did, _old_v, old_entries) = parse_encrypted_pack(bytes)?;
+    // determine whether entries were removed
+    let (old_entries, blocks) = {
+        let mut file = std::fs::File::open(path)?;
+        let (_old_prod, _old_did, _old_v, old_entries, blocks) = parse_encrypted_pack(&mut file)?;
+        (old_entries, blocks)
+    };
     let removed = old_entries.len() > entries.len();
 
-    // simple case: nothing added and nothing removed -> just update headers/manifest
+    // simple metadata-only update (if nothing added/removed)
     if added_files.is_empty() && !removed {
-        return update_manifest(path, bytes, version, product, dlc_id, entries);
+        return update_manifest(path, bevy_dlc::DLC_PACK_VERSION_LATEST as usize, product, dlc_id, entries);
     }
 
-    // removal-only case without encryption key: update manifest but leave
-    // archive blob untouched.  This mirrors previous behaviour and allows the
-    // editor to drop entries even when the user only supplied a public key.
-    if added_files.is_empty() && removed && encrypt_key.is_none() {
-        return update_manifest(path, bytes, version, product, dlc_id, entries);
-    }
-
-    // from here on, we need to repack. ensure a key is present.
     let ek = encrypt_key
         .ok_or("Re-packing with new files requires a signed license (--signed-license)")?;
 
-    // 1. Recover old archive content
-    let (_old_prod, _old_did, _old_v, old_entries) = parse_encrypted_pack(bytes)?;
+    let mut items = Vec::new();
+    let cipher = ek
+        .with_secret(|s| Aes256Gcm::new_from_slice(s))
+        .map_err(|_| "cipher init")?;
 
-    let mut new_tar_buffer = Vec::new();
+    // 1. Recover existing files from old pack
     {
-        let mut builder = Builder::new(&mut new_tar_buffer);
+        let mut file = std::fs::File::open(path)?;
+        let block_data = if !blocks.is_empty() {
+            // v4
+            let mut configs = Vec::new();
+            for b in blocks {
+                file.seek(SeekFrom::Start(b.file_offset))?;
+                let mut ct = vec![0u8; b.encrypted_size as usize];
+                file.read_exact(&mut ct)?;
+                configs.push((b.nonce, ct));
+            }
+            configs
+        } else if let Some((_, first)) = old_entries.first() {
+            // legacy
+            vec![(first.nonce, first.ciphertext.to_vec())]
+        } else {
+            vec![]
+        };
 
-        // 1a. Extract and add existing files from original archive
-        if let Some((_, first)) = old_entries.first() {
-            let cipher = ek
-                .with_secret(|s| Aes256Gcm::new_from_slice(s))
-                .map_err(|_| "Invalid key")?;
-            let nonce = Nonce::from_slice(&first.nonce);
+        for (nonce_bytes, ct) in block_data {
+            let nonce = Nonce::from_slice(&nonce_bytes);
             let pt = cipher
-                .decrypt(nonce, first.ciphertext.as_ref())
+                .decrypt(nonce, ct.as_slice())
                 .map_err(|_| "Decryption failed (key may be incorrect for this pack)")?;
-
-            let mut decoder = GzDecoder::new(&pt[..]);
-            let mut archive = Archive::new(&mut decoder);
-
+            let mut archive = Archive::new(GzDecoder::new(&pt[..]));
             for entry in archive.entries()? {
                 let mut entry = entry?;
-                let path = entry.path()?.to_path_buf();
-                let path_str = path.to_string_lossy().to_string();
-
-                // Only keep it if it wasn't REMOVED in the REPL
+                let path_str = entry.path()?.to_string_lossy().to_string();
                 if entries.iter().any(|(p, _)| p == &path_str) {
-                    builder.append_data(&mut entry.header().clone(), &path, &mut entry)?;
+                    let mut data = Vec::new();
+                    std::io::copy(&mut entry, &mut data)?;
+                    let mut item = PackItem::new(path_str.clone(), data)?;
+                    // preserve type_path
+                    if let Some((_, e)) = old_entries.iter().find(|(p, _)| p == &path_str) {
+                        if let Some(tp) = &e.type_path {
+                            item = item.with_type_path(tp);
+                        }
+                    }
+                    items.push(item);
                 }
             }
         }
+    }
 
-        // 1b. Add newly staged files
-        for (p, data) in added_files {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(data.len() as u64);
-            header.set_cksum();
-            builder.append_data(&mut header, p, &data[..])?;
+    // 2. Add newly staged files
+    for (p, data) in added_files {
+        let mut item = PackItem::new(p.clone(), data.clone())?;
+        // try to find type_path in current manifest (if it was set by user)
+        if let Some((_, e)) = entries.iter().find(|(path, _)| path == p) {
+            if let Some(tp) = &e.type_path {
+                item = item.with_type_path(tp);
+            }
         }
-        builder.finish()?;
+        items.push(item);
     }
 
-    // 2. Compress and re-encrypt
-    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
-    gz.write_all(&new_tar_buffer)?;
-    let compressed = gz.finish()?;
+    // 3. Re-pack using latest format
+    let bytes = bevy_dlc::pack_encrypted_pack(dlc_id, &items, product, ek)
+        .map_err(|e: bevy_dlc::DlcError| e.to_string())?;
+    std::fs::write(path, bytes)?;
 
-    let nonce_bytes = EncryptionKey::from_random(12).with_secret(|kb| {
-        let mut n = [0u8; 12];
-        n.copy_from_slice(&kb[0..12]);
-        n
-    });
-    let cipher = ek
-        .with_secret(|s| Aes256Gcm::new_from_slice(s))
-        .map_err(|_| "Cipher error")?;
-    let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce_bytes), compressed.as_ref())
-        .map_err(|_| "Encryption error")?;
-
-    // 3. Assemble final container
-    let mut out = Vec::new();
-    out.extend_from_slice(DLC_PACK_MAGIC);
-    out.push(version as u8);
-
-    if version >= 3 {
-        let prod_bytes = product.as_str().as_bytes();
-        out.extend_from_slice(&(prod_bytes.len() as u16).to_be_bytes());
-        out.extend_from_slice(prod_bytes);
-
-        let sig_offset = 4 + 1 + 2 + prod_bytes.len();
-        out.extend_from_slice(&bytes[sig_offset..sig_offset + 64]);
-    }
-
-    let dlc_bytes = dlc_id.as_str().as_bytes();
-    out.extend_from_slice(&(dlc_bytes.len() as u16).to_be_bytes());
-    out.extend_from_slice(dlc_bytes);
-
-    #[derive(serde::Serialize)]
-    struct ManifestEntry<'a> {
-        path: &'a str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        original_extension: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        type_path: Option<&'a str>,
-    }
-
-    let manifest: Vec<ManifestEntry<'_>> = entries
-        .iter()
-        .map(|(p, enc)| ManifestEntry {
-            path: p,
-            original_extension: Some(&enc.original_extension),
-            type_path: enc.type_path.as_deref(),
-        })
-        .collect();
-
-    let manifest_bytes = serde_json::to_vec(&manifest)?;
-    out.extend_from_slice(&(manifest_bytes.len() as u32).to_be_bytes());
-    out.extend_from_slice(&manifest_bytes);
-
-    out.extend_from_slice(&nonce_bytes);
-    out.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
-    out.extend_from_slice(&ciphertext);
-
-    std::fs::write(path, &out)?;
     Ok(())
 }
 
 /// Update the manifest and headers of the pack without re-encrypting the archive (only works if no files were added/removed, just metadata changes)
 fn update_manifest(
     path: &Path,
-    bytes: &[u8],
     version: usize,
     product: &Product,
     dlc_id: &DlcId,
@@ -820,59 +782,127 @@ fn update_manifest(
     out.extend_from_slice(DLC_PACK_MAGIC);
     out.push(version as u8);
 
-    if version >= 3 {
+    if version == 4 {
+        // v4 header
         let prod_bytes = product.as_str().as_bytes();
         out.extend_from_slice(&(prod_bytes.len() as u16).to_be_bytes());
         out.extend_from_slice(prod_bytes);
 
-        let sig_offset = 4 + 1 + 2 + prod_bytes.len();
-        out.extend_from_slice(&bytes[sig_offset..sig_offset + 64]);
-    }
+        let dlc_bytes = dlc_id.as_str().as_bytes();
+        out.extend_from_slice(&(dlc_bytes.len() as u16).to_be_bytes());
+        out.extend_from_slice(dlc_bytes);
 
-    let dlc_bytes = dlc_id.as_str().as_bytes();
-    out.extend_from_slice(&(dlc_bytes.len() as u16).to_be_bytes());
-    out.extend_from_slice(dlc_bytes);
+        // Manifest
+        out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        for (p, enc) in entries {
+            let p_bytes = p.as_bytes();
+            out.extend_from_slice(&(p_bytes.len() as u32).to_be_bytes());
+            out.extend_from_slice(p_bytes);
 
-    #[derive(serde::Serialize)]
-    struct ManifestEntry<'a> {
-        path: &'a str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        original_extension: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        type_path: Option<&'a str>,
-    }
+            let ext_bytes = enc.original_extension.as_bytes();
+            out.push(ext_bytes.len() as u8);
+            out.extend_from_slice(ext_bytes);
 
-    let manifest: Vec<ManifestEntry<'_>> = entries
-        .iter()
-        .map(|(p, enc)| ManifestEntry {
-            path: p,
-            original_extension: Some(&enc.original_extension),
-            type_path: enc.type_path.as_deref(),
-        })
-        .collect();
-
-    let manifest_bytes = serde_json::to_vec(&manifest)?;
-    out.extend_from_slice(&(manifest_bytes.len() as u32).to_be_bytes());
-    out.extend_from_slice(&manifest_bytes);
-
-    // When there are still entries the first one provides the nonce/
-    // ciphertext blob we need to keep.  However if the user removed every
-    // entry we still need to preserve the original archive bytes so the
-    // container remains valid (the manifest may be empty but we can't
-    // re-pack without the encryption key).  In that case parse the original
-    // pack to pull its first encrypted blob and write it unchanged.
-    if entries.is_empty() {
-        if let Ok((_, _, _, orig_entries)) = parse_encrypted_pack(bytes) {
-            if let Some((_, orig_first)) = orig_entries.first() {
-                out.extend_from_slice(&orig_first.nonce);
-                out.extend_from_slice(&(orig_first.ciphertext.len() as u32).to_be_bytes());
-                out.extend_from_slice(&orig_first.ciphertext);
+            if let Some(tp) = &enc.type_path {
+                let tp_bytes = tp.as_bytes();
+                out.extend_from_slice(&(tp_bytes.len() as u16).to_be_bytes());
+                out.extend_from_slice(tp_bytes);
+            } else {
+                out.extend_from_slice(&0u16.to_be_bytes());
             }
+
+            out.extend_from_slice(&enc.block_id.to_be_bytes());
+            out.extend_from_slice(&enc.block_offset.to_be_bytes());
+            out.extend_from_slice(&enc.size.to_be_bytes());
         }
-    } else if let Some((_, first_enc)) = entries.first() {
-        out.extend_from_slice(&first_enc.nonce);
-        out.extend_from_slice(&(first_enc.ciphertext.len() as u32).to_be_bytes());
-        out.extend_from_slice(&first_enc.ciphertext);
+
+        // We need to preserve the blocks from the original file
+        let mut file = std::fs::File::open(path)?;
+        let mut reader = std::io::BufReader::new(&mut file);
+        let (_p, _id, _v, _e, blocks) = parse_encrypted_pack(&mut reader)?;
+        
+        out.extend_from_slice(&(blocks.len() as u32).to_be_bytes());
+        
+        let mut block_data_to_copy = Vec::new();
+        for b in blocks {
+            // Write metadata (File offset will need update!)
+            out.extend_from_slice(&b.block_id.to_be_bytes());
+            
+            // We'll update the offset later
+            let offset_pos = out.len();
+            out.extend_from_slice(&0u64.to_be_bytes());
+            
+            out.extend_from_slice(&b.encrypted_size.to_be_bytes());
+            out.extend_from_slice(&b.uncompressed_size.to_be_bytes());
+            out.extend_from_slice(&b.nonce);
+            out.extend_from_slice(&b.crc32.to_be_bytes());
+            
+            // Read block ciphertext
+            use std::io::{Seek, SeekFrom, Read};
+            file.seek(SeekFrom::Start(b.file_offset))?;
+            let mut ct = vec![0u8; b.encrypted_size as usize];
+            file.read_exact(&mut ct)?;
+            block_data_to_copy.push((offset_pos, ct));
+        }
+        
+        // Append blocks and update offsets
+        for (offset_pos, ct) in block_data_to_copy {
+            let current_pos = out.len() as u64;
+            out[offset_pos..offset_pos+8].copy_from_slice(&current_pos.to_be_bytes());
+            out.extend_from_slice(&ct);
+        }
+
+    } else {
+        // Legacy v1-v3
+        if version >= 3 {
+            let prod_bytes = product.as_str().as_bytes();
+            out.extend_from_slice(&(prod_bytes.len() as u16).to_be_bytes());
+            out.extend_from_slice(prod_bytes);
+        }
+
+        let dlc_bytes = dlc_id.as_str().as_bytes();
+        out.extend_from_slice(&(dlc_bytes.len() as u16).to_be_bytes());
+        out.extend_from_slice(dlc_bytes);
+
+        #[derive(serde::Serialize)]
+        struct ManifestEntry<'a> {
+            path: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            original_extension: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            type_path: Option<&'a str>,
+        }
+
+        let manifest: Vec<ManifestEntry<'_>> = entries
+            .iter()
+            .map(|(p, enc)| ManifestEntry {
+                path: p,
+                original_extension: Some(&enc.original_extension),
+                type_path: enc.type_path.as_deref(),
+            })
+            .collect();
+
+        let manifest_bytes = serde_json::to_vec(&manifest)?;
+        out.extend_from_slice(&(manifest_bytes.len() as u32).to_be_bytes());
+        out.extend_from_slice(&manifest_bytes);
+
+        // When there are still entries the first one provides the nonce/
+        // ciphertext blob we need to keep.
+        if entries.is_empty() {
+            let file = std::fs::File::open(path)?;
+            let mut reader = std::io::BufReader::new(file);
+            if let Ok((_prod, _did, _v, orig_entries, _blocks)) = parse_encrypted_pack(&mut reader) {
+                if let Some((_, orig_first)) = orig_entries.first() {
+                    out.extend_from_slice(&orig_first.nonce);
+                    out.extend_from_slice(&(orig_first.ciphertext.len() as u32).to_be_bytes());
+                    out.extend_from_slice(&orig_first.ciphertext);
+                }
+            }
+        } else if let Some((_, first_enc)) = entries.first() {
+            out.extend_from_slice(&first_enc.nonce);
+            out.extend_from_slice(&(first_enc.ciphertext.len() as u32).to_be_bytes());
+            out.extend_from_slice(&first_enc.ciphertext);
+        }
     }
 
     std::fs::write(path, &out)?;
@@ -899,8 +929,8 @@ fn merge_pack_into(
 
     let ek = encrypt_key.ok_or("encryption key required to merge")?;
 
-    let bytes = std::fs::read(other_pack)?;
-    let (other_prod, _other_did, _ver, other_entries) = parse_encrypted_pack(&bytes)?;
+    let mut file = std::fs::File::open(other_pack)?;
+    let (other_prod, _other_did, _ver, other_entries, blocks) = parse_encrypted_pack(&mut file)?;
 
     if other_prod != *current_product {
         return Err(format!(
@@ -914,61 +944,63 @@ fn merge_pack_into(
         return Ok(Vec::new());
     }
 
-    // decrypt blob from the other pack
+    // decrypt blobs from the other pack (v4 or legacy)
     let cipher = ek
         .with_secret(|s| Aes256Gcm::new_from_slice(s))
-        .map_err(|_| "cipher init");
-    let cipher = cipher?;
-    let first = &other_entries[0].1;
-    let nonce = Nonce::from_slice(&first.nonce);
-    let pt = cipher
-        .decrypt(nonce, first.ciphertext.as_ref())
-        .map_err(|_| "decryption failed (key mismatch?)")?;
-    let decoder = GzDecoder::new(&pt[..]);
-    let mut archive = Archive::new(decoder);
+        .map_err(|_| "cipher init")?;
 
     let mut strays: Vec<String> = Vec::new();
-    for entry_res in archive.entries()? {
-        let mut entry = entry_res?;
-        let path = entry.path()?.to_string_lossy().to_string();
 
-        // Only consider files that are listed in the source pack's manifest.  The
-        // tar.gz archive may contain leftover or stray files (e.g. previous
-        // packing runs) which are intentionally omitted from the manifest; these
-        // should *not* be merged.
-        if !other_entries.iter().any(|(p, _)| p == &path) {
-            strays.push(path.clone());
-            continue;
+    if blocks.is_empty() {
+        // legacy v1-v3
+        let first = &other_entries[0].1;
+        let nonce = Nonce::from_slice(&first.nonce);
+        let pt = cipher
+            .decrypt(nonce, first.ciphertext.as_ref())
+            .map_err(|_| "decryption failed (key mismatch?)")?;
+        let decoder = GzDecoder::new(&pt[..]);
+        let mut archive = Archive::new(decoder);
+        for entry_res in archive.entries()? {
+            let mut entry = entry_res?;
+            let path = entry.path()?.to_string_lossy().to_string();
+            process_merge_entry(
+                &mut entry,
+                path,
+                &other_entries,
+                &mut strays,
+                entries,
+                added_files,
+                current_dlc_id,
+            )?;
         }
+    } else {
+        // v4 multi-block
+        use std::io::{Read, Seek, SeekFrom};
+        for block in blocks {
+            file.seek(SeekFrom::Start(block.file_offset))?;
+            let mut ciphertext = vec![0u8; block.encrypted_size as usize];
+            file.read_exact(&mut ciphertext)?;
 
-        if entries.iter().any(|(p, _)| p == &path) || added_files.contains_key(&path) {
-            //safe_println!("Skipping existing entry: {}", path.color(AnsiColors::Yellow));
-            continue;
-        }
-
-        let mut data = Vec::new();
-        std::io::copy(&mut entry, &mut data)?;
-
-        let mut pack_item = PackItem::new(path.clone(), data)?;
-        // preserve type_path if present in source metadata
-        if let Some((_, enc)) = other_entries.iter().find(|(p, _)| p == &path) {
-            if let Some(tp) = &enc.type_path {
-                pack_item = pack_item.with_type_path(tp);
+            let nonce = Nonce::from_slice(&block.nonce);
+            let pt = cipher
+                .decrypt(nonce, ciphertext.as_slice())
+                .map_err(|_| "decryption failed (key mismatch?)")?;
+            let decoder = GzDecoder::new(&pt[..]);
+            let mut archive = Archive::new(decoder);
+            for entry_res in archive.entries()? {
+                let mut entry = entry_res?;
+                let path = entry.path()?.to_string_lossy().to_string();
+                process_merge_entry(
+                    &mut entry,
+                    path,
+                    &other_entries,
+                    &mut strays,
+                    entries,
+                    added_files,
+                    current_dlc_id,
+                )?;
             }
         }
-
-        added_files.insert(path.clone(), pack_item.plaintext().to_vec());
-        entries.push((
-            path.clone(),
-            EncryptedAsset {
-                dlc_id: current_dlc_id.to_string(),
-                original_extension: pack_item.ext().unwrap_or_default(),
-                type_path: pack_item.type_path(),
-                nonce: [0u8; 12],
-                ciphertext: vec![].into(),
-            },
-        ));
-        safe_println!("Merged entry: {}", path.color(AnsiColors::Green));
     }
 
     // stray entries are intentionally ignored; we don't mutate the
@@ -983,6 +1015,54 @@ fn merge_pack_into(
     }
 
     Ok(strays)
+}
+
+fn process_merge_entry(
+    entry: &mut tar::Entry<impl std::io::Read>,
+    path: String,
+    other_entries: &[(String, EncryptedAsset)],
+    strays: &mut Vec<String>,
+    entries: &mut Vec<(String, EncryptedAsset)>,
+    added_files: &mut std::collections::HashMap<String, Vec<u8>>,
+    current_dlc_id: &DlcId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Only consider files that are listed in the source pack's manifest.
+    if !other_entries.iter().any(|(p, _)| p == &path) {
+        strays.push(path.clone());
+        return Ok(());
+    }
+
+    if entries.iter().any(|(p, _)| p == &path) || added_files.contains_key(&path) {
+        return Ok(());
+    }
+
+    let mut data = Vec::new();
+    std::io::copy(entry, &mut data)?;
+
+    let mut pack_item = PackItem::new(path.clone(), data)?;
+    if let Some((_, enc)) = other_entries.iter().find(|(p, _)| p == &path) {
+        if let Some(tp) = &enc.type_path {
+            pack_item = pack_item.with_type_path(tp);
+        }
+    }
+
+    added_files.insert(path.clone(), pack_item.plaintext().to_vec());
+    entries.push((
+        path.clone(),
+        EncryptedAsset {
+            dlc_id: current_dlc_id.to_string(),
+            original_extension: pack_item.ext().unwrap_or_default(),
+            type_path: pack_item.type_path(),
+            nonce: [0u8; 12],
+            ciphertext: vec![].into(),
+            block_id: 0,
+            block_offset: 0,
+            size: 0,
+        },
+    ));
+    safe_println!("Merged entry: {}", path.color(AnsiColors::Green));
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1007,7 +1087,7 @@ mod tests {
     #[test]
     fn merge_pack_into_adds_new_files() {
         // prepare two simple packs with different entries
-        let dlc_key = DlcKey::generate_random();
+        let _dlc_key = DlcKey::generate_random();
         let enc_key = EncryptionKey::from_random(32);
         let product = Product::from("prod");
 
@@ -1016,7 +1096,6 @@ mod tests {
             &DlcId::from("a".to_string()),
             &[item1],
             &product,
-            &dlc_key,
             &enc_key,
         )
         .unwrap();
@@ -1026,7 +1105,6 @@ mod tests {
             &DlcId::from("b".to_string()),
             &[item2],
             &product,
-            &dlc_key,
             &enc_key,
         )
         .unwrap();
@@ -1037,7 +1115,7 @@ mod tests {
         std::fs::write(&path_a, &bytes_a).unwrap();
         std::fs::write(&path_b, &bytes_b).unwrap();
 
-        let (_p, _id, _ver, mut entries) = parse_encrypted_pack(&bytes_a).unwrap();
+        let (_p, _id, _ver, mut entries, _b) = parse_encrypted_pack(&bytes_a[..]).unwrap();
         let mut added_files = std::collections::HashMap::new();
 
         // merge pack B into A
@@ -1082,21 +1160,34 @@ mod tests {
             use flate2::{Compression, read::GzDecoder, write::GzEncoder};
             use secure_gate::ExposeSecret;
             use tar::Archive;
-            // need pack constants and the shared ManifestEntry type
-            use bevy_dlc::{DLC_PACK_VERSION_LATEST, ManifestEntry};
+            use std::io::{Read, Seek, SeekFrom};
 
-            // parse header/manifest from the existing pack so we can rebuild
-            let (product, did, ver, entries) =
-                parse_encrypted_pack(original).expect("parse original pack");
+            // parse header from the existing pack so we can rebuild
+            let mut reader = std::io::Cursor::new(original);
+            let (product, did, _ver, entries, blocks) =
+                parse_encrypted_pack(&mut reader).expect("parse original pack");
 
-            // decrypt the first (and only) ciphertext blob to get the tar
+            // decrypt the first block to get the tar
             let cipher = encrypt_key
                 .with_secret(|s| Aes256Gcm::new_from_slice(s))
                 .expect("cipher init");
-            let first = &entries[0].1;
-            let nonce = Nonce::from_slice(&first.nonce);
+
+            let (nonce_bytes, ciphertext) = if blocks.is_empty() {
+                // legacy
+                let first = &entries[0].1;
+                (first.nonce, first.ciphertext.clone())
+            } else {
+                // v4
+                let first_block = &blocks[0];
+                let mut data = vec![0u8; first_block.encrypted_size as usize];
+                reader.seek(SeekFrom::Start(first_block.file_offset)).unwrap();
+                reader.read_exact(&mut data).unwrap();
+                (first_block.nonce, std::sync::Arc::from(data))
+            };
+
+            let nonce = Nonce::from_slice(&nonce_bytes);
             let pt = cipher
-                .decrypt(nonce, first.ciphertext.as_ref())
+                .decrypt(nonce, ciphertext.as_ref())
                 .expect("decrypt tar");
             let decoder = GzDecoder::new(&pt[..]);
             let mut archive = Archive::new(decoder);
@@ -1130,53 +1221,83 @@ mod tests {
             gz.write_all(&new_tar).unwrap();
             let compressed = gz.finish().unwrap();
 
-            // encrypt with fresh random nonce
-            let nonce_bytes: [u8; 12] = rand::random();
+            // rebuild using the actual packer to ensure v4 format is correct
+            // but we want to KEEP the original manifest (to test stray detection)
+            let _items: Vec<PackItem> = existing.into_iter().map(|(p, d)| {
+                PackItem::new(p, d).unwrap()
+            }).collect();
+            
+            // If we use the standard packer it will update the manifest.
+            // So we manually build the v4 pack but use the OLD manifest entries.
+            
+            let _encrypted_size = compressed.len() as u32;
+            let new_nonce: [u8; 12] = rand::random();
             let cipher2 = encrypt_key
                 .with_secret(|s| Aes256Gcm::new_from_slice(s))
                 .expect("cipher init");
-            let ciphertext = cipher2
-                .encrypt(Nonce::from_slice(&nonce_bytes), compressed.as_ref())
-                .expect("encrypt");
-
-            // reconstruct the pack bytes copying all header/manifest data but
-            // replacing the first entry ciphertext
+            let new_ciphertext = cipher2.encrypt(Nonce::from_slice(&new_nonce), compressed.as_ref()).unwrap();
+            
+            // Reconstruct a minimalist v4 pack
             let mut out = Vec::new();
             out.extend_from_slice(DLC_PACK_MAGIC);
-            out.push(ver as u8);
-            if ver == DLC_PACK_VERSION_LATEST as usize {
-                let prod_bytes = product.as_str().as_bytes();
-                out.extend_from_slice(&(prod_bytes.len() as u16).to_be_bytes());
-                out.extend_from_slice(prod_bytes);
-                let sig_offset = 4 + 1 + 2 + prod_bytes.len();
-                out.extend_from_slice(&original[sig_offset..sig_offset + 64]);
+            out.push(4); // version
+            
+            let p_bytes = product.as_str().as_bytes();
+            out.extend_from_slice(&(p_bytes.len() as u16).to_be_bytes());
+            out.extend_from_slice(p_bytes);
+            
+            let d_bytes = did.as_str().as_bytes();
+            out.extend_from_slice(&(d_bytes.len() as u16).to_be_bytes());
+            out.extend_from_slice(d_bytes);
+            
+            // Manifest count (use original entries)
+            out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+            for (path, enc) in entries {
+                // write binary entry (V4 format)
+                let p_bytes = path.as_bytes();
+                out.extend_from_slice(&(p_bytes.len() as u32).to_be_bytes());
+                out.extend_from_slice(p_bytes);
+                
+                let ext_bytes = enc.original_extension.as_bytes();
+                out.push(ext_bytes.len() as u8);
+                out.extend_from_slice(ext_bytes);
+                
+                if let Some(tp) = enc.type_path {
+                    let tp_bytes = tp.as_bytes();
+                    out.extend_from_slice(&(tp_bytes.len() as u16).to_be_bytes());
+                    out.extend_from_slice(tp_bytes);
+                } else {
+                    out.extend_from_slice(&0u16.to_be_bytes());
+                }
+                
+                out.extend_from_slice(&0u32.to_be_bytes()); // block_id
+                out.extend_from_slice(&0u32.to_be_bytes()); // block_offset (not perfect but OK for test)
+                out.extend_from_slice(&0u32.to_be_bytes()); // size
             }
-            let dlc_bytes = did.as_str().as_bytes();
-            out.extend_from_slice(&(dlc_bytes.len() as u16).to_be_bytes());
-            out.extend_from_slice(dlc_bytes);
-            let manifest: Vec<ManifestEntry> = entries
-                .iter()
-                .map(|(p, enc)| ManifestEntry {
-                    path: p.clone(),
-                    original_extension: if enc.original_extension.is_empty() {
-                        None
-                    } else {
-                        Some(enc.original_extension.clone())
-                    },
-                    type_path: enc.type_path.clone(),
-                })
-                .collect();
-            let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-            out.extend_from_slice(&(manifest_bytes.len() as u32).to_be_bytes());
-            out.extend_from_slice(&manifest_bytes);
-            out.extend_from_slice(&nonce_bytes);
-            out.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
-            out.extend_from_slice(&ciphertext);
+            
+            // Block count (1)
+            out.extend_from_slice(&1u32.to_be_bytes());
+            out.extend_from_slice(&0u32.to_be_bytes()); // block_id
+            
+            let _header_size = out.len() as u64 + 8 + 4 + 4 + 12 + 4; // approximate
+            out.extend_from_slice(&0u64.to_be_bytes()); // temp offset
+            let offset_pos = out.len() - 8;
+            
+            out.extend_from_slice(&(new_ciphertext.len() as u32).to_be_bytes());
+            out.extend_from_slice(&0u32.to_be_bytes()); // uncompressed
+            out.extend_from_slice(&new_nonce);
+            out.extend_from_slice(&0u32.to_be_bytes()); // crc
+            
+            let final_offset = out.len() as u64;
+            let offset_bytes = final_offset.to_be_bytes();
+            out[offset_pos..offset_pos+8].copy_from_slice(&offset_bytes);
+            
+            out.extend_from_slice(&new_ciphertext);
             out
         }
 
         // create a pristine pack containing a single entry
-        let dlc_key = DlcKey::generate_random();
+        let _dlc_key = DlcKey::generate_random();
         let enc_key = EncryptionKey::from_random(32);
         let product = Product::from("example");
         let item = PackItem::new("a.txt", b"hello".to_vec()).unwrap();
@@ -1184,7 +1305,6 @@ mod tests {
             &DlcId::from("dlcA".to_string()),
             &[item],
             &product,
-            &dlc_key,
             &enc_key,
         )
         .unwrap();
@@ -1196,7 +1316,7 @@ mod tests {
         let tmp_pack = dir.path().join("copy.dlcpack");
         std::fs::write(&tmp_pack, &bytes).unwrap();
 
-        let (_prod, _did, _ver, mut entries) = parse_encrypted_pack(&bytes).unwrap();
+        let (_prod, _did, _ver, mut entries, _b) = parse_encrypted_pack(&bytes[..]).unwrap();
         let mut added_files = std::collections::HashMap::new();
 
         // merging the pack into itself should detect and skip the stray file
@@ -1218,29 +1338,40 @@ mod tests {
         assert!(!added_files.contains_key("test.lua"));
 
         // verify the on-disk copy still contains the stray file
-        let cleaned_bytes = std::fs::read(&tmp_pack).unwrap();
+        let mut file = std::fs::File::open(&tmp_pack).unwrap();
         let mut found_in_disk = false;
         {
             use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
             use flate2::read::GzDecoder;
             use secure_gate::ExposeSecret;
             use tar::Archive;
+            use std::io::{Read, Seek, SeekFrom};
 
             let cipher = enc_key
                 .with_secret(|s| Aes256Gcm::new_from_slice(s))
                 .unwrap();
-            let (_, _, _, disk_entries) = parse_encrypted_pack(&cleaned_bytes).unwrap();
-            if let Some((_, first)) = disk_entries.first() {
-                let nonce = Nonce::from_slice(&first.nonce);
-                let pt = cipher.decrypt(nonce, first.ciphertext.as_ref()).unwrap();
-                let decoder = GzDecoder::new(&pt[..]);
-                let mut archive = Archive::new(decoder);
-                for entry_res in archive.entries().unwrap() {
-                    let entry = entry_res.unwrap();
-                    if entry.path().unwrap().to_string_lossy() == "test.lua" {
-                        found_in_disk = true;
-                        break;
-                    }
+            let (_, _, _, disk_entries, blocks) = parse_encrypted_pack(&mut file).unwrap();
+            
+            let block_data = if blocks.is_empty() {
+                let first = &disk_entries[0].1;
+                (first.nonce, first.ciphertext.clone())
+            } else {
+                let b = &blocks[0];
+                file.seek(SeekFrom::Start(b.file_offset)).unwrap();
+                let mut data = vec![0u8; b.encrypted_size as usize];
+                file.read_exact(&mut data).unwrap();
+                (b.nonce, std::sync::Arc::from(data))
+            };
+
+            let nonce = Nonce::from_slice(&block_data.0);
+            let pt = cipher.decrypt(nonce, block_data.1.as_ref()).unwrap();
+            let decoder = GzDecoder::new(&pt[..]);
+            let mut archive = Archive::new(decoder);
+            for entry_res in archive.entries().unwrap() {
+                let entry = entry_res.unwrap();
+                if entry.path().unwrap().to_string_lossy() == "test.lua" {
+                    found_in_disk = true;
+                    break;
                 }
             }
         }
@@ -1254,19 +1385,19 @@ mod tests {
     fn save_pack_removes_deleted_entries() {
         // ensure that removing an item and saving does not leave its data in
         // the encrypted archive.
-        let dlc_key = DlcKey::generate_random();
+        let _dlc_key = DlcKey::generate_random();
         let enc_key = EncryptionKey::from_random(32);
         let product = Product::from("prod");
         let id = DlcId::from("removal".to_string());
         let item1 = PackItem::new("a.txt", b"one".to_vec()).unwrap();
         let item2 = PackItem::new("b.txt", b"two".to_vec()).unwrap();
         let bytes =
-            pack_encrypted_pack(&id, &[item1, item2], &product, &dlc_key, &enc_key).unwrap();
+            pack_encrypted_pack(&id, &[item1, item2], &product, &enc_key).unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("pack.dlcpack");
         std::fs::write(&path, &bytes).unwrap();
 
-        let (_prod, _did, ver, mut entries) = parse_encrypted_pack(&bytes).unwrap();
+        let (_prod, _did, ver, mut entries, _) = parse_encrypted_pack(&bytes[..]).unwrap();
         // drop b.txt from manifest
         entries.retain(|(p, _)| p != "b.txt");
         let added_files = std::collections::HashMap::new();
@@ -1274,7 +1405,6 @@ mod tests {
         // save with no added files -- removal should trigger repack
         save_pack_optimized(
             &path,
-            &bytes,
             ver,
             &product,
             &id,
@@ -1289,37 +1419,41 @@ mod tests {
         use flate2::read::GzDecoder;
         use secure_gate::ExposeSecret;
         use tar::Archive;
+        use std::io::{Read, Seek, SeekFrom};
 
         let cipher = enc_key
             .with_secret(|s| Aes256Gcm::new_from_slice(s))
             .unwrap();
-        let saved_bytes = std::fs::read(&path).unwrap();
-        match parse_encrypted_pack(&saved_bytes) {
-            Ok((_, _, _, disk_entries)) => {
+        let mut file = std::fs::File::open(&path).unwrap();
+        match parse_encrypted_pack(&mut file) {
+            Ok((_, _, _, disk_entries, blocks)) => {
                 // manifest should reflect the removed file
                 assert_eq!(disk_entries.len(), 1);
-                if let Some((_, first)) = disk_entries.first() {
-                    let nonce = Nonce::from_slice(&first.nonce);
-                    let pt = cipher.decrypt(nonce, first.ciphertext.as_ref()).unwrap();
-                    let decoder = GzDecoder::new(&pt[..]);
-                    let mut archive = Archive::new(decoder);
-                    let paths: Vec<_> = archive
-                        .entries()
-                        .unwrap()
-                        .map(|e| e.unwrap().path().unwrap().to_string_lossy().to_string())
-                        .collect();
-                    assert_eq!(paths, vec!["a.txt"]);
-                }
+
+                let block_data = if blocks.is_empty() {
+                    let first = &disk_entries[0].1;
+                    (first.nonce, first.ciphertext.clone())
+                } else {
+                    let b = &blocks[0];
+                    file.seek(SeekFrom::Start(b.file_offset)).unwrap();
+                    let mut data = vec![0u8; b.encrypted_size as usize];
+                    file.read_exact(&mut data).unwrap();
+                    (b.nonce, std::sync::Arc::from(data))
+                };
+
+                let nonce = Nonce::from_slice(&block_data.0);
+                let pt = cipher.decrypt(nonce, block_data.1.as_ref()).unwrap();
+                let decoder = GzDecoder::new(&pt[..]);
+                let mut archive = Archive::new(decoder);
+                let paths: Vec<_> = archive
+                    .entries()
+                    .unwrap()
+                    .map(|e| e.unwrap().path().unwrap().to_string_lossy().to_string())
+                    .collect();
+                assert_eq!(paths, vec!["a.txt"]);
             }
             Err(e) => {
                 eprintln!("parse failed: {:?}", e);
-                eprintln!("saved bytes len = {}", saved_bytes.len());
-                let dump_len = saved_bytes.len().min(64);
-                eprintln!(
-                    "first {} bytes: {:02x?}",
-                    dump_len,
-                    &saved_bytes[..dump_len]
-                );
                 panic!("save pack parse error");
             }
         }
@@ -1328,7 +1462,7 @@ mod tests {
     #[test]
     fn edit_one_shot_ls() {
         // verify that providing a command after '--' runs it and exits
-        let dlc_key = DlcKey::generate_random();
+        let _dlc_key = DlcKey::generate_random();
         let enc_key = EncryptionKey::from_random(32);
         let product = Product::from("prod");
         let item = PackItem::new("foo.txt", b"hello".to_vec()).unwrap();
@@ -1336,7 +1470,6 @@ mod tests {
             &DlcId::from("p".to_string()),
             &[item],
             &product,
-            &dlc_key,
             &enc_key,
         )
         .unwrap();
@@ -1361,7 +1494,7 @@ mod tests {
     fn edit_dry_run_save_does_not_modify() {
         let tmp = tempdir().unwrap();
         let pack_path = tmp.path().join("p.dlcpack");
-        let dlc_key = DlcKey::generate_random();
+        let _dlc_key = DlcKey::generate_random();
         let enc_key = EncryptionKey::from_random(32);
         let product = Product::from("prod");
         let item = PackItem::new("foo.txt", b"hello".to_vec()).unwrap();
@@ -1369,7 +1502,6 @@ mod tests {
             &DlcId::from("p".to_string()),
             &[item],
             &product,
-            &dlc_key,
             &enc_key,
         )
         .unwrap();
@@ -1381,8 +1513,8 @@ mod tests {
         cmd.write_stdin("rm foo.txt\nsave\nexit\n");
         cmd.assert().success();
 
-        let data = std::fs::read(&pack_path).unwrap();
-        let (_p, _id, _v, entries) = parse_encrypted_pack(&data).unwrap();
+        let file = std::fs::File::open(&pack_path).unwrap();
+        let (_p, _id, _v, entries, _) = parse_encrypted_pack(file).unwrap();
         assert!(entries.iter().any(|(p, _)| p == "foo.txt"));
     }
 
@@ -1405,7 +1537,6 @@ mod tests {
             &DlcId::from("a".to_string()),
             &[item_a],
             &product,
-            &dlc_key,
             &enc_key,
         )
         .unwrap();
@@ -1414,7 +1545,6 @@ mod tests {
             &DlcId::from("b".to_string()),
             &[item_b],
             &product,
-            &dlc_key,
             &enc_key,
         )
         .unwrap();
@@ -1579,7 +1709,6 @@ mod tests {
             &DlcId::from("p".to_string()),
             &[item],
             &product,
-            &dlc_key,
             &enc_key,
         )
         .unwrap();
@@ -1594,8 +1723,8 @@ mod tests {
         cmd.write_stdin("rm foo.txt\nexit\ny\n");
         cmd.assert().success();
 
-        let data = std::fs::read(&pack_path).unwrap();
-        let (_p, _id, _v, entries) = parse_encrypted_pack(&data).unwrap();
+        let file = std::fs::File::open(&pack_path).unwrap();
+        let (_p, _id, _v, entries, _) = parse_encrypted_pack(file).unwrap();
         assert!(!entries.iter().any(|(p, _)| p == "foo.txt"));
     }
 }

@@ -20,7 +20,7 @@
 #[doc(hidden)]
 macro_rules! human_bytes {
     ($bytes:expr) => {{
-        let bytes: usize = $bytes;
+        let bytes: u64 = $bytes as u64;
         const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
         let mut size = bytes as f64;
         let mut unit = 0;
@@ -29,7 +29,7 @@ macro_rules! human_bytes {
             unit += 1;
         }
         if unit == 0 {
-            format!("{} {}", size as usize, UNITS[unit])
+            format!("{} {}", size as u64, UNITS[unit])
         } else {
             format!("{:.2} {}", size, UNITS[unit])
         }

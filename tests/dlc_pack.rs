@@ -56,7 +56,6 @@ fn dlcpack_runtime_loads_but_locked_without_key() {
         &DlcId::from("other_dlc"),
         &items,
         &product,
-        &pack_key,
         &enc_key,
     )
     .expect("pack_encrypted_pack");

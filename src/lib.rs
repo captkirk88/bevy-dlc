@@ -7,7 +7,7 @@ use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use secure_gate::{ExposeSecret, dynamic_alias, fixed_alias};
 
 mod asset_loader;
-mod encrypt_key_registry;
+pub(crate) mod encrypt_key_registry;
 mod ext;
 
 #[macro_use]
@@ -20,13 +20,21 @@ pub use asset_loader::{DlcLoader, DlcPack, DlcPackLoader, EncryptedAsset, parse_
 pub use pack_format::{
     DLC_PACK_MAGIC,
     DLC_PACK_VERSION_LATEST,
+    DEFAULT_BLOCK_SIZE,
     ManifestEntry,
+    V4ManifestEntry,
+    BlockMetadata,
+    PackConverter,
+    V3toV4Converter,
+    PackConverterRegistry,
+    CompressionLevel,
     is_data_executable,
     is_forbidden_extension,
     is_malicious_file,
     decrypt_with_key,
     parse_encrypted_pack,
     pack_encrypted_pack,
+    convert_pack_format,
 };
 
 use serde::{Deserialize, Serialize};
@@ -36,6 +44,16 @@ use thiserror::Error;
 use crate::asset_loader::DlcPackLoaded;
 
 pub use crate::ext::AppExt;
+
+/// Register an encryption key for a DLC ID in the global registry.
+/// This is used internally by the plugin and can be called by tools/CLI for key management.
+/// 
+/// # Arguments
+/// * `dlc_id` - The DLC identifier to associate with the key
+/// * `key` - The encryption key to register
+pub fn register_encryption_key(dlc_id: &str, key: EncryptionKey) {
+    encrypt_key_registry::insert(dlc_id, key);
+}
 
 pub mod prelude {
     pub use crate::ext::*;
@@ -232,6 +250,12 @@ fixed_alias!(pub PrivateKey, 32, "A secure wrapper for a 32-byte Ed25519 signing
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PublicKey(pub [u8; 32]);
 
+impl AsRef<[u8]> for PublicKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 impl std::fmt::Debug for PublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "PublicKey({} bytes)", 32)
@@ -425,6 +449,30 @@ impl DlcKey {
         }
     }
 
+    /// Sign data using the private key.
+    /// Returns a 64-byte signature.
+    pub fn sign(&self, data: &[u8]) -> Result<[u8; 64], DlcError> {
+        match self {
+            DlcKey::Private { privkey, pubkey } => privkey.with_secret(|seed| {
+                let pair = Ed25519KeyPair::from_seed_and_public_key(seed, pubkey.as_ref())
+                    .map_err(|e| DlcError::CryptoError(e.to_string()))?;
+                let sig = pair.sign(data);
+                let mut sig_bytes = [0u8; 64];
+                sig_bytes.copy_from_slice(sig.as_ref());
+                Ok(sig_bytes)
+            }),
+            DlcKey::Public { .. } => Err(DlcError::PrivateKeyRequired),
+        }
+    }
+
+    /// Verify a 64-byte Ed25519 signature against provided data.
+    pub fn verify(&self, data: &[u8], signature: &[u8; 64]) -> Result<(), DlcError> {
+        let pubkey = self.get_public_key();
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, pubkey.as_ref())
+            .verify(data, signature.as_ref())
+            .map_err(|_| DlcError::SignatureInvalid)
+    }
+
     /// Create a compact offline-signed token that can be verified by this key's public key.
     ///
     /// Returns a `SignedLicense` (zeroized on drop). The license payload includes
@@ -454,26 +502,26 @@ impl DlcKey {
         );
 
         match self {
-            DlcKey::Private { privkey, pubkey } => privkey.with_secret(|encrypt_key_bytes| {
-                payload.insert(
-                    "encrypt_key".to_string(),
-                    serde_json::Value::String(URL_SAFE_NO_PAD.encode(encrypt_key_bytes)),
-                );
+            DlcKey::Private { privkey, .. } => {
+                let sig_token = privkey.with_secret(|encrypt_key_bytes| -> Result<SignedLicense, DlcError> {
+                    payload.insert(
+                        "encrypt_key".to_string(),
+                        serde_json::Value::String(URL_SAFE_NO_PAD.encode(encrypt_key_bytes)),
+                    );
 
-                let payload_value = serde_json::Value::Object(payload);
-                let payload_bytes = serde_json::to_vec(&payload_value)
-                    .map_err(|e| DlcError::TokenCreationFailed(e.to_string()))?;
+                    let payload_value = serde_json::Value::Object(payload);
+                    let payload_bytes = serde_json::to_vec(&payload_value)
+                        .map_err(|e| DlcError::TokenCreationFailed(e.to_string()))?;
 
-                let pair =
-                    Ed25519KeyPair::from_seed_and_public_key(encrypt_key_bytes, &pubkey.0)
-                        .map_err(|e| DlcError::CryptoError(format!("{}", e)))?;
-                let sig = pair.sign(&payload_bytes);
-                Ok(SignedLicense::from(format!(
-                    "{}.{}",
-                    URL_SAFE_NO_PAD.encode(&payload_bytes),
-                    URL_SAFE_NO_PAD.encode(sig.as_ref())
-                )))
-            }),
+                    let sig = self.sign(&payload_bytes)?;
+                    Ok(SignedLicense::from(format!(
+                        "{}.{}",
+                        URL_SAFE_NO_PAD.encode(&payload_bytes),
+                        URL_SAFE_NO_PAD.encode(sig.as_ref())
+                    )))
+                })?;
+                Ok(sig_token)
+            }
             DlcKey::Public { .. } => Err(DlcError::PrivateKeyRequired),
         }
     }
@@ -760,68 +808,6 @@ impl From<PackItem> for (String, Option<String>, Option<String>, Vec<u8>) {
 /// against the authorized product public key.
 ///
 /// Returns: (product, dlc_id, entries, signature_bytes_if_v3)
-
-/// Verify the signature of a .dlcpack v3 container against a public key.
-///
-/// Returns `Ok(true)` if the signature is valid, `Ok(false)` if invalid, or `Err` if parsing fails.
-/// Only works for v3 packs which include product and signature.
-pub fn verify_pack_signature(
-    pack_bytes: &[u8],
-    pub_key_str: &str,
-    version: u8,
-) -> Result<bool, DlcError> {
-    if pack_bytes.len() < 5 || &pack_bytes[0..4] != DLC_PACK_MAGIC {
-        return Err(DlcError::Other("not a valid dlcpack".into()));
-    }
-    let pack_version = pack_bytes[4];
-
-    if pack_version < version {
-        return Err(DlcError::DeprecatedVersion(format!("{}", version).into()));
-    }
-
-    let mut offset = 5usize;
-
-    if offset + 2 > pack_bytes.len() {
-        return Err(DlcError::Other("truncated pack format".into()));
-    }
-    let product_len = u16::from_be_bytes([pack_bytes[offset], pack_bytes[offset + 1]]) as usize;
-    offset += 2;
-    if offset + product_len > pack_bytes.len() {
-        return Err(DlcError::Other("invalid product length".into()));
-    }
-    let product_str = String::from_utf8(pack_bytes[offset..offset + product_len].to_vec())
-        .map_err(|_| DlcError::Other("product not valid UTF-8".into()))?;
-    offset += product_len;
-
-    if offset + 64 > pack_bytes.len() {
-        return Err(DlcError::Other("truncated signature".into()));
-    }
-    let signature_bytes = pack_bytes[offset..offset + 64].to_vec();
-    offset += 64;
-
-    if offset + 2 > pack_bytes.len() {
-        return Err(DlcError::Other("truncated dlc_id length".into()));
-    }
-    let dlc_len = u16::from_be_bytes([pack_bytes[offset], pack_bytes[offset + 1]]) as usize;
-    offset += 2;
-    if offset + dlc_len > pack_bytes.len() {
-        return Err(DlcError::Other("invalid dlc_id length".into()));
-    }
-    let dlc_id_str = String::from_utf8(pack_bytes[offset..offset + dlc_len].to_vec())
-        .map_err(|_| DlcError::Other("dlc_id not valid UTF-8".into()))?;
-
-    let verifier = DlcKey::public(pub_key_str)?;
-    let mut preimage = Vec::new();
-    preimage.extend_from_slice(product_str.as_bytes());
-    preimage.extend_from_slice(dlc_id_str.as_bytes());
-
-    let pubkey = verifier.get_public_key();
-    let unparsed_public_key = UnparsedPublicKey::new(&ED25519, pubkey.0);
-    match unparsed_public_key.verify(&preimage, &signature_bytes) {
-        Ok(()) => Ok(true),
-        Err(_) => Ok(false),
-    }
-}
 
 #[derive(Error, Debug, Clone)]
 pub enum DlcError {

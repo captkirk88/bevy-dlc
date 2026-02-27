@@ -37,7 +37,7 @@ fn main() -> AppExit {
         .add_plugins(JsonAssetPlugin::<JsonAsset>::new(&["json"]))
         .register_dlc_type::<JsonAsset>()
         .add_systems(Startup, startup)
-        .add_systems(Update, display_loaded_text)
+        .add_systems(Update, display_loaded_text.run_if(is_dlc_entry_loaded("dlcA", "test.json")))
         .add_observer(on_dlc_pack_loaded)
         .run()
 }

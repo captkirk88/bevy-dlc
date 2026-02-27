@@ -14,10 +14,8 @@ Works with Bevy's asset pipeline.
 
 ## Features
 
-- Pack assets into encrypted `.dlcpack` containers
-- Sign licenses with Ed25519 (private key embeds the symmetric encryption key)
-- Verify signatures at runtime and unlock encrypted content
-- Lazy loading of labeled assets (e.g. `pack.dlcpack#sprites/player.png`)
+- AES-256-GCM encryption of DLC packs
+- Efficient random-access decryption of specific assets without reading full packs
 - Product binding — prevent token reuse across games
 - Security checks to prevent common mistakes like packing executables or other packs
 
@@ -29,7 +27,7 @@ Add to your `Cargo.toml`:
 cargo add bevy-dlc
 ```
 > [!NOTE]
-> `bevy-dlc` will always be compatible with Bevy 1.## with the minor version being used for bug fixes and new features.  So `bevy-dlc = "1.18"` will also work and automatically get you any compatible bug fixes.
+> `bevy-dlc` will always be compatible with Bevy 1.## with the minor version being used for bug fixes and new features.  So `bevy-dlc = "1.18"` will also work and automatically get you any compatible bug fixes and pack format version updates.
 
 To use the CLI tool:
 
@@ -65,7 +63,7 @@ bevy-dlc pack --product my-game dlcA -o dlc -- assets/dlcA
 
 This creates `dlcA.dlcpack` and prints a signed license token.
 
-Alternatively you can use `bevy-dlc generate --help` to review how to generate a signed license without packing, or `bevy-dlc validate --help` to verify it.
+Alternatively you can use `bevy-dlc generate --help` to review how to generate a signed license without packing, or `bevy-dlc check --help` to verify it.
 
 > [!NOTE]
 > `bevy-dlc help <command>` for detailed usage of each CLI command.
@@ -89,12 +87,12 @@ Review the [examples](examples/) for a complete example (run with `cargo run --r
 
 ### API Overview
 
-* `DlcLoader` is a low‑level loader that decrypts an individual file extracted from a `.dlcpack` container and then forwards the resulting bytes to whatever concrete loader would normally handle that extension. It’s largely a pass‑through wrapper, and `DlcPackLoader` uses it under the hood when you load a full `.dlcpack` with entries (`pack.dlcpack#entry.png`).
-* `DlcPack` is a custom Bevy `Asset` that represents a loaded DLC pack, and contains the decrypted asset data and metadata.  You can load it directly with `AssetServer::load("my_pack.dlcpack")`.
-* `DlcPackEntry` represents a single asset within a pack, and can be loaded with `AssetServer::load("my_pack.dlcpack#path/to/asset.png")` (note the `#` separator).  You can also query the `DlcPack` directly for its entries.
-* Events are emitted when packs and entries are loaded, so you can react to them with Bevy's event system.
-  - `DlcPackLoaded` — emitted when a pack is loaded and decrypted, contains the `DlcId` and `DlcPack`.
-* Finally, `DlcPlugin` is the main plugin that sets up the DLC system.  It requires a `DlcKey::Public` and `SignedLicense` to verify and unlock packs.
+* `DlcPack` is a custom Bevy `Asset` that represents a loaded DLC pack. In V4, it uses a binary manifest and block metadata to support efficient random-access decryption of assets from the `.dlcpack` file on disk. You can load it directly with `AssetServer::load("my_pack.dlcpack")`.
+* `DlcPackEntry` represents a single asset within a pack. Loading via `AssetServer::load("my_pack.dlcpack#path/to/asset.png")` only decrypts the specific asset.
+* `DlcLoader` is the internal low-level loader that handles granular decryption and forwards resulting bytes to the appropriate concrete loader.
+* Events are emitted when packs are loaded:
+  - `DlcPackLoaded` — emitted when a pack manifest is successfully parsed and ready for use.
+* Finally, `DlcPlugin` is the main plugin that sets up the DLC system. It requires a `DlcKey::Public` (or `Private`) and `SignedLicense` to unlock packs.
 
 #### Helper macros
 

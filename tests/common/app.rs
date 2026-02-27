@@ -138,11 +138,10 @@ impl TestApp {
     }
 
     fn init(&mut self) -> &mut Self {
-        let original_cwd = std::env::current_dir().expect("cwd");
-        std::env::set_current_dir(self.asset_dir.path()).expect("set cwd to asset_dir");
+        let assets_dir = self.asset_dir.path().join("assets");
+        std::env::set_current_dir(&assets_dir).expect("set cwd to assets_dir");
         self.app.finish();
         self.app.cleanup();
-        std::env::set_current_dir(original_cwd).expect("restore cwd");
         self
     }
 
@@ -363,7 +362,6 @@ impl TestApp {
             &DlcId::from(dlc_id.to_string()),
             &[item],
             &self.product,
-            &self.dlc_key,
             &enc_key,
         )
         .expect("pack_encrypted_pack");
@@ -386,7 +384,6 @@ impl TestApp {
             &DlcId::from(dlc_id.to_string()),
             items,
             &self.product,
-            &self.dlc_key,
             &enc_key,
         )
         .expect("pack_encrypted_pack");

@@ -16,26 +16,42 @@ struct DlcRegistration {
 static REGISTRY: Lazy<DashMap<String, DlcRegistration>> = Lazy::new(|| DashMap::new());
 
 /// Insert or replace the encrypt key for `dlc_id`.
-pub(crate) fn insert(dlc_id: &str, key: EncryptionKey) {
+pub fn insert(dlc_id: &str, key: EncryptionKey) {
     let mut entry = REGISTRY.entry(dlc_id.to_owned()).or_default();
     entry.key = Some(key);
 }
 
 /// Remove the encrypt key for `dlc_id`.
 #[allow(unused)]
-pub(crate) fn remove(dlc_id: &str) {
+pub fn remove(dlc_id: &str) {
     REGISTRY.remove(dlc_id);
+}
+
+/// Result of a lookup in the registry.
+pub struct DlcEntry {
+    pub key: EncryptionKey,
+    pub path: Option<String>,
 }
 
 /// Return an owned [EncryptionKey] (cloned) if present.
 /// The clone is performed within the secure closure to minimize exposure time.
-pub(crate) fn get(dlc_id: &str) -> Option<EncryptionKey> {
+pub fn get(dlc_id: &str) -> Option<EncryptionKey> {
     REGISTRY.get(dlc_id).and_then(|v| {
         v.key.as_ref().map(|k| {
             k.with_secret(|b| {
                 // Clone directly into a new EncryptionKey wrapper to ensure it's zeroized
                 EncryptionKey::from(b.to_vec())
             })
+        })
+    })
+}
+
+/// Return both the key and the registered path for a given `dlc_id`.
+pub fn get_full(dlc_id: &str) -> Option<DlcEntry> {
+    REGISTRY.get(dlc_id).and_then(|v| {
+        v.key.as_ref().map(|k| DlcEntry {
+            key: k.with_secret(|b| EncryptionKey::from(b.to_vec())),
+            path: v.path.clone(),
         })
     })
 }

@@ -112,11 +112,19 @@ impl CliTestCtx {
         product: &str,
         dlc_id: &str,
         type_override: Option<&str>,
-    ) -> Result<(bevy_dlc::Product, bevy_dlc::DlcId, usize, Vec<(String, EncryptedAsset)>), Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        (
+            bevy_dlc::Product,
+            bevy_dlc::DlcId,
+            usize,
+            Vec<(String, EncryptedAsset)>,
+            Vec<bevy_dlc::BlockMetadata>,
+        ),
+        Box<dyn std::error::Error>,
+    > {
         self.pack(product, dlc_id, type_override).success();
-        let bytes = std::fs::read(self.pack_path(dlc_id))?;
-        let parsed = parse_encrypted_pack(&bytes)?;
+        let file = std::fs::File::open(self.pack_path(dlc_id))?;
+        let parsed = parse_encrypted_pack(&file)?;
         Ok(parsed)
     }
 
@@ -176,15 +184,10 @@ impl CliTestCtx {
         self.td.path().join(format!("{}.dlcpack", dlc_id))
     }
 
-    /// Read raw bytes of a generated .dlcpack
-    pub fn read_pack_bytes(&self, dlc_id: &str) -> Result<Vec<u8>, std::io::Error> {
-        std::fs::read(self.pack_path(dlc_id))
-    }
-
     /// Assert that the parsed pack contains the given entry path
     pub fn assert_pack_contains_entry(&self, dlc_id: &str, entry_path: &str) {
-        let bytes = self.read_pack_bytes(dlc_id).expect("read pack");
-        let (_prod, _did, _v, entries) = parse_encrypted_pack(&bytes).expect("parse pack");
+        let file = std::fs::File::open(self.pack_path(dlc_id)).expect("read pack");
+        let (_prod, _did, _v, entries, _blocks) = parse_encrypted_pack(&file).expect("parse pack");
         assert!(
             entries.iter().any(|(p, _)| p == entry_path),
             "entry not found: {}",
