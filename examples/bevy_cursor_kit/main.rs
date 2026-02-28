@@ -11,7 +11,7 @@ use bevy_dlc::prelude::*;
 
 #[path = "../mod.rs"]
 mod examples;
-
+use examples::*;
 use bevy_cursor_kit::prelude::*;
 
 fn main() -> AppExit {
@@ -29,6 +29,7 @@ fn main() -> AppExit {
 
     App::new()
         .add_plugins(DefaultPlugins)
+        .add_plugins(ExamplePlugin::default())
         .add_plugins(DlcPlugin::new(
             dlc_key,
             SignedLicense::from(get_example_license()),

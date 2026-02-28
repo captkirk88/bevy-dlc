@@ -12,7 +12,7 @@ use bevy_dlc::prelude::*;
 
 #[path = "../mod.rs"]
 mod examples;
-use examples::JsonAsset;
+use examples::*;
 
 fn main() -> AppExit {
     // DO NOT USE ABCD... as your choice of secure key. This is just a placeholder for the example.
@@ -29,6 +29,7 @@ fn main() -> AppExit {
 
     App::new()
         .add_plugins(DefaultPlugins)
+        .add_plugins(ExamplePlugin::default())
         .add_plugins(DlcPlugin::new(
             dlc_key,
             SignedLicense::from(get_example_license()),

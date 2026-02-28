@@ -11,9 +11,7 @@ use bevy_dlc::prelude::*;
 
 #[path = "../mod.rs"]
 mod examples;
-use examples::TextAsset;
-
-use crate::examples::TextAssetLoader;
+use examples::*;
 
 // You must generate `example.slicense` and `example.pubkey` by `bevy-dlc generate example`
 
@@ -32,6 +30,7 @@ fn main() -> AppExit {
 
     App::new()
         .add_plugins(DefaultPlugins)
+        .add_plugins(ExamplePlugin::default())
         .add_plugins(DlcPlugin::new(
             dlc_key,
             SignedLicense::from(get_example_license()),
