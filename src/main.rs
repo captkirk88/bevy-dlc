@@ -46,7 +46,6 @@ enum Commands {
         about = "Print version information",
         long_about = "Display version information for bevy-dlc and the encrypted pack format. If a .dlcpack file is supplied, also display the embedded pack version.",
         alias = "v",
-        short_flag = 'v'
     )]
     Version {
         /// Optional path to a .dlcpack file; when supplied the command will
@@ -55,9 +54,9 @@ enum Commands {
         dlc: Option<PathBuf>,
     },
     #[command(
-        about = "Pack assets into a .dlcpack bundle (writes .dlcpack, prints private key + pub key)",
-        long_about = "Encrypts the provided input files into a single bevy-dlc .dlcpack bundle and prints a signed private key and public key. Use --list to preview container metadata without writing files.",
-        short_flag = 'p'
+        about = "Pack assets into a .dlcpack bundle",
+        long_about = "Encrypts the provided input files into a single bevy-dlc .dlcpack bundle. Use --list to preview container metadata.",
+        alias = "p",
     )]
     Pack {
         /// DLC identifier to embed in the container/private key
@@ -141,7 +140,7 @@ enum Commands {
         about = "Validate a .dlcpack file against a signed license and public key",
         long_about = "Checks that the .dlcpack's embedded DLC id is covered by the signed license, and that the signature is valid for the given public key. If the license does not include the DLC id but is otherwise valid, the command will attempt to extend the license with the missing DLC id (if a private key is available) and print the extended token.",
         alias = "validate",
-        short_flag = 'c'
+        alias = "c",
     )]
     Check {
         /// path to a .dlcpack file
@@ -160,7 +159,8 @@ enum Commands {
 
     #[command(
         about = "Generate a product .slicense and .pubkey.",
-        long_about = "Create a signed-license token and write <product>.slicense and <product>.pubkey; these files are used as defaults by other commands when present."
+        long_about = "Create a signed-license token and write <product>.slicense and <product>.pubkey; these files are used as defaults by other commands when present.",
+        alias = "g",
     )]
     Generate {
         /// Product name to bind the license to (also used to name the output files)
