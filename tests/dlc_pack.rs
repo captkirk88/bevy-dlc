@@ -33,6 +33,30 @@ fn dlcpack_runtime_loads_and_decrypts_when_unlocked() {
 
 #[test]
 #[serial_test::serial]
+fn pack_executable_fails() {
+
+    // use the running binary as a stand-in for a dangerous payload
+    let exe = std::env::current_exe().expect("current exe");
+    let data = std::fs::read(&exe).expect("read exe");
+    let name = exe
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("exe");
+
+    // PackItem::new itself should reject executable payloads, so exercise that
+    let err = bevy_dlc::PackItem::new(name, data).expect_err("PackItem::new should refuse executable");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("executable payload"),
+        "unexpected error: {}",
+        msg
+    );
+
+    // no need to call pack_encrypted_pack at all; the item can't even be created.
+}
+
+#[test]
+#[serial_test::serial]
 fn dlcpack_runtime_loads_but_locked_without_key() {
     use bevy_dlc::{DlcId, DlcKey, pack_encrypted_pack};
     use common::app::TestApp;

@@ -1,4 +1,3 @@
-
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bevy::prelude::*;
@@ -13,24 +12,14 @@ mod ext;
 #[macro_use]
 mod macros;
 
-
 mod pack_format;
 
 pub use asset_loader::{DlcLoader, DlcPack, DlcPackLoader, EncryptedAsset, parse_encrypted};
 
 pub use pack_format::{
-    DLC_PACK_MAGIC,
-    DLC_PACK_VERSION_LATEST,
-    DEFAULT_BLOCK_SIZE,
-    ManifestEntry,
-    V4ManifestEntry,
-    BlockMetadata,
-    CompressionLevel,
-    is_data_executable,
-    is_forbidden_extension,
-    is_malicious_file,
-    parse_encrypted_pack,
-    pack_encrypted_pack,
+    BlockMetadata, CompressionLevel, DEFAULT_BLOCK_SIZE, DLC_PACK_MAGIC, DLC_PACK_VERSION_LATEST,
+    ManifestEntry, V4ManifestEntry, is_data_executable, is_forbidden_extension,
+    pack_encrypted_pack, parse_encrypted_pack,
 };
 
 use serde::{Deserialize, Serialize};
@@ -43,7 +32,7 @@ pub use crate::ext::AppExt;
 
 /// Register an encryption key for a DLC ID in the global registry.
 /// This is used internally by the plugin and can be called by tools/CLI for key management.
-/// 
+///
 /// # Arguments
 /// * `dlc_id` - The DLC identifier to associate with the key
 /// * `key` - The encryption key to register
@@ -55,8 +44,8 @@ pub mod prelude {
     pub use crate::ext::*;
     pub use crate::{
         DlcError, DlcId, DlcKey, DlcLoader, DlcPack, DlcPackLoader, DlcPlugin, EncryptedAsset,
-        PackItem, Product, SignedLicense, asset_loader::DlcPackEntry,
-        asset_loader::DlcPackLoaded, is_dlc_entry_loaded, is_dlc_loaded,
+        PackItem, Product, SignedLicense, asset_loader::DlcPackEntry, asset_loader::DlcPackLoaded,
+        is_dlc_entry_loaded, is_dlc_loaded,
     };
 }
 
@@ -517,23 +506,25 @@ impl DlcKey {
 
         match self {
             DlcKey::Private { privkey, .. } => {
-                let sig_token = privkey.with_secret(|encrypt_key_bytes| -> Result<SignedLicense, DlcError> {
-                    payload.insert(
-                        "encrypt_key".to_string(),
-                        serde_json::Value::String(URL_SAFE_NO_PAD.encode(encrypt_key_bytes)),
-                    );
+                let sig_token = privkey.with_secret(
+                    |encrypt_key_bytes| -> Result<SignedLicense, DlcError> {
+                        payload.insert(
+                            "encrypt_key".to_string(),
+                            serde_json::Value::String(URL_SAFE_NO_PAD.encode(encrypt_key_bytes)),
+                        );
 
-                    let payload_value = serde_json::Value::Object(payload);
-                    let payload_bytes = serde_json::to_vec(&payload_value)
-                        .map_err(|e| DlcError::TokenCreationFailed(e.to_string()))?;
+                        let payload_value = serde_json::Value::Object(payload);
+                        let payload_bytes = serde_json::to_vec(&payload_value)
+                            .map_err(|e| DlcError::TokenCreationFailed(e.to_string()))?;
 
-                    let sig = self.sign(&payload_bytes)?;
-                    Ok(SignedLicense::from(format!(
-                        "{}.{}",
-                        URL_SAFE_NO_PAD.encode(&payload_bytes),
-                        URL_SAFE_NO_PAD.encode(sig.as_ref())
-                    )))
-                })?;
+                        let sig = self.sign(&payload_bytes)?;
+                        Ok(SignedLicense::from(format!(
+                            "{}.{}",
+                            URL_SAFE_NO_PAD.encode(&payload_bytes),
+                            URL_SAFE_NO_PAD.encode(sig.as_ref())
+                        )))
+                    },
+                )?;
                 Ok(sig_token)
             }
             DlcKey::Public { .. } => Err(DlcError::PrivateKeyRequired),
@@ -660,9 +651,6 @@ impl From<&DlcKey> for String {
     }
 }
 
-
-
-
 /// Helper struct for building DLC pack entries with optional metadata.
 /// Provides a builder pattern for creating entries to pack into a `.dlcpack` container.
 #[derive(Clone, Debug)]
@@ -778,8 +766,6 @@ impl From<PackItem> for (String, Option<String>, Option<String>, Vec<u8>) {
         )
     }
 }
-
-
 
 /// Parse a `.dlcpack` container and return product, embedded dlc_id, and a list
 /// of `(path, EncryptedAsset)` pairs. For v3 format, also validates the signature
@@ -994,23 +980,6 @@ mod tests {
             .count();
         assert_eq!(count, 1);
     }
-
-    #[test]
-    fn application_is_malicious() {
-        assert!(test_helpers::is_malicious("foo.exe", Some("exe")));
-    }
-
-    #[test]
-    fn real_application_is_malicious() {
-        let current_exe = std::env::current_exe().expect("should get current exe path");
-        let path_str = current_exe
-            .to_str()
-            .expect("exe path should be valid UTF-8");
-        assert!(test_helpers::is_malicious(
-            path_str,
-            current_exe.extension().and_then(|e| e.to_str()),
-        ));
-    }
 }
 
 /// Test helpers for integration tests. These provide controlled access to the
@@ -1044,15 +1013,6 @@ pub mod test_helpers {
     /// **Test-only**: Call this in test cleanup to reset state.
     pub fn clear_test_registry() {
         encrypt_key_registry::clear_all();
-    }
-
-    /// Proxy to crate-private `is_malicious_file` for integration tests.
-    ///
-    /// The real implementation is intentionally `pub(crate)`; this helper
-    /// exposes the logic to external test crates without opening up the API
-    /// surface for downstream consumers.
-    pub fn is_malicious(path: &str, ext: Option<&str>) -> bool {
-        crate::pack_format::is_malicious_file(path, ext)
     }
 
     pub fn is_malicious_data(data: &[u8]) -> bool {

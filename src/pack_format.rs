@@ -28,28 +28,14 @@ pub fn is_forbidden_extension(ext: &str) -> bool {
     FORBIDDEN_SET.contains(lowercase.as_str())
 }
 
-/// Return true if the file is potentially malicious based on its path and extension.
-///
-/// This is a best‑effort check used by the packaging helpers. It looks at the
-/// provided extension as well as running `infer::get_from_path` on the path to
-/// identify application/binary formats.
-pub fn is_malicious_file(path: &str, ext: Option<&str>) -> bool {
-    if let Some(e) = ext {
-        if is_forbidden_extension(e) {
-            return true;
-        }
-    }
+// `is_malicious_file` used to live here but its functionality is now
+// subsumed by `is_data_executable` which is called during packing.  Keeping
+// the helper around only bloated the public API and required test plumbing
+// that we no longer need, so the function has been removed.
 
-    if !path.contains('.') {
-        return false;
-    }
-
-    if let Some(kind) = infer::get_from_path(path).ok().flatten() {
-        return kind.mime_type().starts_with("application");
-    }
-    false
-}
-
+// NOTE: if additional heuristics are required in the future they can be
+// reintroduced or re‑exported from the CLI/generation layer rather than the
+// core format library.
 /// Simple heuristic used by the packer to detect executable payloads.  It is
 /// intentionally forgiving; the goal is merely to catch obvious binaries when
 /// a user accidentally tries to pack them.
