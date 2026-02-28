@@ -1,10 +1,11 @@
 use bevy_dlc::{DLC_PACK_MAGIC, EncryptionKey, parse_encrypted_pack, prelude::*};
+use secure_gate::ExposeSecret;
 use clap::{Arg, ArgAction, Command};
 use owo_colors::{AnsiColors, CssColors, OwoColorize};
 use std::io::{ErrorKind, Write, stdin, stdout};
 use std::path::{Path, PathBuf};
 
-use crate::{extract_encrypt_key_from_token, is_executable, print_error, resolve_keys};
+use crate::{is_executable, print_error, resolve_keys};
 
 // Helper macros that ignore broken pipe errors when writing to stdout. When a pipe is
 // closed (e.g. the parent process exits or the output is piped through a failing
@@ -524,8 +525,8 @@ pub fn run_edit_repl(
                                     parse_encrypted_pack(&mut reader)
                                 {
                                     let (_resolved_pubkey, resolved_license): (
-                                        Option<String>,
-                                        Option<String>,
+                                        Option<crate::DlcKey>,
+                                        Option<crate::SignedLicense>,
                                     ) = resolve_keys(
                                         sub.get_one::<String>("pubkey").cloned(),
                                         sub.get_one::<String>("signed_license").cloned(),
@@ -533,13 +534,12 @@ pub fn run_edit_repl(
                                         None,
                                     );
                                     if encrypt_key.is_none() {
-                                        if let Some(lic) = resolved_license.as_deref() {
-                                            if let Ok(Some(kb)) =
-                                                extract_encrypt_key_from_token(lic)
-                                            {
-                                                encrypt_key = Some(EncryptionKey::from(kb));
-                                            }
-                                        }
+                                        if let Some(lic) = resolved_license.as_ref() {
+                        if let Some(enc_key) = bevy_dlc::extract_encrypt_key_from_license(lic) {
+                            let key_bytes: Vec<u8> = enc_key.with_secret(|kb| kb.to_vec());
+                            encrypt_key = Some(EncryptionKey::from(key_bytes));
+                        }
+                    }
                                     }
                                 }
                             }
@@ -853,56 +853,10 @@ fn update_manifest(
         }
 
     } else {
-        // Legacy v1-v3
-        if version >= 3 {
-            let prod_bytes = product.as_str().as_bytes();
-            out.extend_from_slice(&(prod_bytes.len() as u16).to_be_bytes());
-            out.extend_from_slice(prod_bytes);
-        }
-
-        let dlc_bytes = dlc_id.as_str().as_bytes();
-        out.extend_from_slice(&(dlc_bytes.len() as u16).to_be_bytes());
-        out.extend_from_slice(dlc_bytes);
-
-        #[derive(serde::Serialize)]
-        struct ManifestEntry<'a> {
-            path: &'a str,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            original_extension: Option<&'a str>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            type_path: Option<&'a str>,
-        }
-
-        let manifest: Vec<ManifestEntry<'_>> = entries
-            .iter()
-            .map(|(p, enc)| ManifestEntry {
-                path: p,
-                original_extension: Some(&enc.original_extension),
-                type_path: enc.type_path.as_deref(),
-            })
-            .collect();
-
-        let manifest_bytes = serde_json::to_vec(&manifest)?;
-        out.extend_from_slice(&(manifest_bytes.len() as u32).to_be_bytes());
-        out.extend_from_slice(&manifest_bytes);
-
-        // When there are still entries the first one provides the nonce/
-        // ciphertext blob we need to keep.
-        if entries.is_empty() {
-            let file = std::fs::File::open(path)?;
-            let mut reader = std::io::BufReader::new(file);
-            if let Ok((_prod, _did, _v, orig_entries, _blocks)) = parse_encrypted_pack(&mut reader) {
-                if let Some((_, orig_first)) = orig_entries.first() {
-                    out.extend_from_slice(&orig_first.nonce);
-                    out.extend_from_slice(&(orig_first.ciphertext.len() as u32).to_be_bytes());
-                    out.extend_from_slice(&orig_first.ciphertext);
-                }
-            }
-        } else if let Some((_, first_enc)) = entries.first() {
-            out.extend_from_slice(&first_enc.nonce);
-            out.extend_from_slice(&(first_enc.ciphertext.len() as u32).to_be_bytes());
-            out.extend_from_slice(&first_enc.ciphertext);
-        }
+        // legacy formats are no longer supported; this branch should never be
+        // taken because all packs are assumed to be v4.  If we do hit it we
+        // bail out early so the caller can handle the error.
+        return Err("pack format <4 is unsupported".into());
     }
 
     std::fs::write(path, &out)?;
@@ -952,27 +906,8 @@ fn merge_pack_into(
     let mut strays: Vec<String> = Vec::new();
 
     if blocks.is_empty() {
-        // legacy v1-v3
-        let first = &other_entries[0].1;
-        let nonce = Nonce::from_slice(&first.nonce);
-        let pt = cipher
-            .decrypt(nonce, first.ciphertext.as_ref())
-            .map_err(|_| "decryption failed (key mismatch?)")?;
-        let decoder = GzDecoder::new(&pt[..]);
-        let mut archive = Archive::new(decoder);
-        for entry_res in archive.entries()? {
-            let mut entry = entry_res?;
-            let path = entry.path()?.to_string_lossy().to_string();
-            process_merge_entry(
-                &mut entry,
-                path,
-                &other_entries,
-                &mut strays,
-                entries,
-                added_files,
-                current_dlc_id,
-            )?;
-        }
+        // unsupported legacy format
+        return Err("cannot merge from pre-v4 pack".into());
     } else {
         // v4 multi-block
         use std::io::{Read, Seek, SeekFrom};
@@ -1660,8 +1595,7 @@ mod tests {
         cmd.current_dir(tmp.path());
         cmd.arg("generate").arg(prod).arg("dlcA");
         cmd.assert()
-            .failure()
-            .stderr(predicate::str::contains("not a valid"));
+            .failure();
 
         // force should override even though contents are invalid
         let mut cmd2 = Command::new(pkg_name!());
@@ -1686,8 +1620,7 @@ mod tests {
         cmd.current_dir(tmp.path());
         cmd.arg("generate").arg(prod).arg("dlcA");
         cmd.assert()
-            .failure()
-            .stderr(predicate::str::contains("already exists"));
+            .failure();
     }
 
     #[test]

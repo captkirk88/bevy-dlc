@@ -24,15 +24,16 @@ fn decompress_archive(
 
     let mut archive = Archive::new(GzDecoder::new(std::io::Cursor::new(plaintext)));
     let mut map = std::collections::HashMap::new();
-    for entry in archive.entries().map_err(|e| {
-        DlcLoaderError::DecryptionFailed(format!("archive read failed: {}", e))
-    })? {
+    for entry in archive
+        .entries()
+        .map_err(|e| DlcLoaderError::DecryptionFailed(format!("archive read failed: {}", e)))?
+    {
         let mut file = entry.map_err(|e| {
             DlcLoaderError::DecryptionFailed(format!("archive entry read failed: {}", e))
         })?;
-        let path = file.path().map_err(|e| {
-            DlcLoaderError::DecryptionFailed(format!("archive path error: {}", e))
-        })?;
+        let path = file
+            .path()
+            .map_err(|e| DlcLoaderError::DecryptionFailed(format!("archive path error: {}", e)))?;
         let path_str = path.to_string_lossy().replace("\\", "/");
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).map_err(|e| {
@@ -51,45 +52,43 @@ pub(crate) fn decrypt_pack_entry_block_bytes<R: std::io::Read + std::io::Seek>(
     key: &crate::EncryptionKey,
     full_path: &str,
 ) -> Result<Vec<u8>, DlcLoaderError> {
-    use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
-    use secure_gate::ExposeSecret;
-
     // 1. Re-parse the pack to get the block metadata
-    let _original_pos = reader.stream_position().map_err(|e| DlcLoaderError::Io(e))?;
-    reader.seek(std::io::SeekFrom::Start(0)).map_err(|e| DlcLoaderError::Io(e))?;
-    
+    let _original_pos = reader
+        .stream_position()
+        .map_err(|e| DlcLoaderError::Io(e))?;
+    reader
+        .seek(std::io::SeekFrom::Start(0))
+        .map_err(|e| DlcLoaderError::Io(e))?;
+
     let (_prod, _id, _ver, _entries, blocks) = crate::parse_encrypted_pack(&mut *reader)
         .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
-    
-    let block = blocks.iter().find(|b| b.block_id == enc.block_id).ok_or_else(|| {
-        DlcLoaderError::DecryptionFailed(format!("block {} not found in pack", enc.block_id))
-    })?;
 
-    // 2. Read the ciphertext
-    let mut ciphertext = vec![0u8; block.encrypted_size as usize];
-    reader.seek(std::io::SeekFrom::Start(block.file_offset)).map_err(|e| DlcLoaderError::Io(e))?;
-    std::io::Read::read_exact(reader, &mut ciphertext).map_err(|e| DlcLoaderError::Io(e))?;
+    let block = blocks
+        .iter()
+        .find(|b| b.block_id == enc.block_id)
+        .ok_or_else(|| {
+            DlcLoaderError::DecryptionFailed(format!("block {} not found in pack", enc.block_id))
+        })?;
 
-    // 3. Decrypt
-    let cipher = key.with_secret(|kb| {
-        Aes256Gcm::new_from_slice(kb).map_err(|e| DlcLoaderError::DecryptionFailed(e.to_string()))
-    })?;
-    
-    let pt_gz = cipher.decrypt(Nonce::from_slice(&block.nonce), ciphertext.as_slice()).map_err(|e| {
-        DlcLoaderError::DecryptionFailed(format!("authentication failed ({})", e))
-    })?;
+    // 2. Decrypt
+    let pt_gz = crate::pack_format::decrypt_with_key(&key, reader, &block.nonce)
+        .map_err(|e| DlcLoaderError::DecryptionFailed(e.to_string()))?;
 
-    // 4. Decompress and find entry
+    // 3. Decompress and find entry
     let entries = decompress_archive(&pt_gz)?;
-    
+
     // Extract label from "pack.dlcpack#label"
     let label = match full_path.rsplit_once('#') {
         Some((_, suffix)) => suffix,
         None => full_path,
-    }.replace("\\", "/");
+    }
+    .replace("\\", "/");
 
     entries.get(&label).cloned().ok_or_else(|| {
-        DlcLoaderError::DecryptionFailed(format!("entry '{}' not found in decrypted block {}", label, enc.block_id))
+        DlcLoaderError::DecryptionFailed(format!(
+            "entry '{}' not found in decrypted block {}",
+            label, enc.block_id
+        ))
     })
 }
 
@@ -391,58 +390,27 @@ impl DlcPackEntry {
             .ok_or_else(|| DlcLoaderError::DlcLocked(self.encrypted.dlc_id.clone()))?;
         let encrypt_key = entry_ek.key;
 
-        let plaintext = if !self.encrypted.ciphertext.is_empty() {
-            // Legacy v1-v3 behaviour
-            crate::decrypt_with_key(
-                &encrypt_key,
-                &*self.encrypted.ciphertext,
-                &self.encrypted.nonce,
-            )
-            .map_err(|e| {
-                DlcLoaderError::DecryptionFailed(format!("entry='{}' {}", self.path, e.to_string()))
-            })?
-        } else {
-            // v4 block-based decryption
-            let path = entry_ek.path.ok_or_else(|| {
-                DlcLoaderError::DecryptionFailed(format!(
-                    "no file path registered for DLC '{}'",
-                    self.encrypted.dlc_id
-                ))
-            })?;
+        // v4 block‑based decryption only; older formats are no longer supported.
+        let path = entry_ek.path.ok_or_else(|| {
+            DlcLoaderError::DecryptionFailed(format!(
+                "no file path registered for DLC '{}', cannot decrypt",
+                self.encrypted.dlc_id
+            ))
+        })?;
 
-            let mut file = std::fs::File::open(path).map_err(|e| {
-                DlcLoaderError::DecryptionFailed(format!("failed to open pack file: {}", e))
-            })?;
+        let mut file = std::fs::File::open(path).map_err(|e| {
+            DlcLoaderError::DecryptionFailed(format!("failed to open pack file: {}", e))
+        })?;
 
-            crate::asset_loader::decrypt_pack_entry_block_bytes(
-                &mut file,
-                &self.encrypted,
-                &encrypt_key,
-                &self.path,
-            )
-            .map_err(|e| {
-                DlcLoaderError::DecryptionFailed(format!("entry='{}' {}", self.path, e.to_string()))
-            })?
-        };
-
-        // If the plaintext is a GZIP archive (standard for v2/v3 packs),
-        // we must extract the specific file matching this entry's path.
-        if plaintext.len() > 2 && plaintext[0] == 0x1f && plaintext[1] == 0x8b {
-            let subpath = match self.path.rsplit_once('#') {
-                Some((_, suffix)) => suffix,
-                None => &self.path,
-            }
-            .replace("\\", "/");
-
-            let map = decompress_archive(&plaintext)?;
-            if let Some(v) = map.get(&subpath) {
-                return Ok(v.clone());
-            }
-            return Err(DlcLoaderError::DecryptionFailed(format!(
-                "entry='{}' not found in archive",
-                self.path
-            )));
-        }
+        let plaintext = crate::asset_loader::decrypt_pack_entry_block_bytes(
+            &mut file,
+            &self.encrypted,
+            &encrypt_key,
+            &self.path,
+        )
+        .map_err(|e| {
+            DlcLoaderError::DecryptionFailed(format!("entry='{}' {}", self.path, e.to_string()))
+        })?;
 
         Ok(plaintext)
     }
@@ -734,9 +702,10 @@ impl AssetLoader for DlcPackLoader {
             );
             DlcLoaderError::Io(e)
         })?;
-        
-        let (product, dlc_id, version, manifest_entries, block_metadatas) = crate::parse_encrypted_pack(&bytes[..])
-            .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
+
+        let (product, dlc_id, version, manifest_entries, block_metadatas) =
+            crate::parse_encrypted_pack(&bytes[..])
+                .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
 
         // Check for DLC ID conflicts: reject if a DIFFERENT pack file is being loaded for the same DLC ID.
         // Allow the same pack file to be loaded multiple times (e.g., when accessing labeled sub-assets).
@@ -764,8 +733,10 @@ impl AssetLoader for DlcPackLoader {
             // clone bytes for the blocking task so we can continue to own the
             // original `bytes` for `container_bytes` later
             let bytes_for_task = bytes.clone();
-            let task = bevy::tasks::AsyncComputeTaskPool::get()
-                .spawn(async move { decrypt_pack_entries(&bytes_for_task) });
+            let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+                let cursor = std::io::Cursor::new(bytes_for_task);
+                decrypt_pack_entries(cursor)
+            });
 
             match task.await {
                 Ok::<(DlcId, Vec<PackItem>), DlcLoaderError>((_id, items)) => Some(items),
@@ -942,27 +913,42 @@ impl AssetLoader for DlcPackLoader {
 
 /// Decrypt entries out of a `.dlcpack` container.
 /// Returns `(dlc_id, Vec<(path, original_extension, plaintext)>)`.
-pub fn decrypt_pack_entries(
-    pack_bytes: &[u8],
+/// Decrypt entries out of a `.dlcpack` container.
+///
+/// This no-longer requires keeping the entire file in memory; the caller
+/// provides a `Read+Seek` reader.  Only the current v4 hybrid format is
+/// supported, earlier versions have been removed along with their legacy
+/// semantics.
+///
+/// Returns `(dlc_id, Vec<(path, original_extension, plaintext)>)`.
+pub fn decrypt_pack_entries<R: std::io::Read + std::io::Seek>(
+    mut reader: R,
 ) -> Result<(crate::DlcId, Vec<crate::PackItem>), DlcLoaderError> {
-    let (_product, dlc_id, version, entries, block_metadatas) = crate::parse_encrypted_pack(pack_bytes)
-        .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
+    let (_product, dlc_id, version, entries, block_metadatas) =
+        crate::parse_encrypted_pack(&mut reader)
+            .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
 
     // lookup encrypt key in global registry
     let encrypt_key = crate::encrypt_key_registry::get(dlc_id.as_ref())
         .ok_or_else(|| DlcLoaderError::DlcLocked(dlc_id.to_string()))?;
 
-    if version == 4 {
-        let mut extracted_all = std::collections::HashMap::new();
-        for block in block_metadatas {
-            let start = block.file_offset as usize;
-            let end = start + block.encrypted_size as usize;
-            if end > pack_bytes.len() {
-                return Err(DlcLoaderError::InvalidFormat("block offset outside pack bounds".into()));
-            }
-            let ciphertext = &pack_bytes[start..end];
-            let pt = crate::decrypt_with_key(&encrypt_key, ciphertext, &block.nonce).map_err(|e| {
-                // report which DLC failed; include an example entry if possible for context
+    // only v4 is supported anymore
+    if version != 4 {
+        return Err(DlcLoaderError::InvalidFormat(format!(
+            "unsupported pack version: {}",
+            version
+        )));
+    }
+
+    let mut extracted_all = std::collections::HashMap::new();
+    // use reader in a PackReader for convenience
+    let mut pr = crate::pack_format::PackReader::new(reader);
+    for block in block_metadatas {
+        pr.seek(std::io::SeekFrom::Start(block.file_offset))
+            .map_err(|e| DlcLoaderError::Io(e))?;
+        let pt = pr
+            .read_and_decrypt(&encrypt_key, block.encrypted_size as usize, &block.nonce)
+            .map_err(|e| {
                 let example = entries
                     .iter()
                     .find(|(_, enc)| enc.block_id == block.block_id)
@@ -973,89 +959,30 @@ pub fn decrypt_pack_entries(
                     dlc_id, example, block.block_id, e
                 ))
             })?;
-            let extracted = decompress_archive(&pt)?;
-            extracted_all.extend(extracted);
-        }
+        let extracted = decompress_archive(&pt)?;
+        extracted_all.extend(extracted);
+    }
 
-        let mut out = Vec::with_capacity(entries.len());
-        for (path, enc) in entries {
-            let normalized = path.replace("\\", "/");
-            let plaintext = extracted_all.remove(&normalized).or_else(|| extracted_all.remove(&path)).ok_or_else(|| {
+    let mut out = Vec::with_capacity(entries.len());
+    for (path, enc) in entries {
+        let normalized = path.replace("\\", "/");
+        let plaintext = extracted_all
+            .remove(&normalized)
+            .or_else(|| extracted_all.remove(&path))
+            .ok_or_else(|| {
                 DlcLoaderError::DecryptionFailed(format!("entry {} not found in any block", path))
             })?;
-            
-            let mut item = PackItem::new(path.clone(), plaintext).map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
-            if !enc.original_extension.is_empty() {
-                item = item.with_extension(enc.original_extension).map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
-            }
-            if let Some(tp) = enc.type_path {
-                item = item.with_type_path(tp);
-            }
-            out.push(item);
-        }
-        return Ok((dlc_id, out));
-    }
 
-    // Version >= 2: single encrypted gzip archive + plaintext manifest
-    // (the version‑1 branch has been removed; packs are always created in v3+
-    // going forward)
-    if version < 3 || entries.is_empty() {
-        return Ok((dlc_id, Vec::new()));
-    }
-
-    // all entries reference the same encrypted archive (nonce + ciphertext)
-    let archive_nonce = entries[0].1.nonce;
-    let archive_ciphertext = &entries[0].1.ciphertext;
-
-    // decrypt the entire archive once
-    let archive_plain = crate::decrypt_with_key(&encrypt_key, archive_ciphertext, &archive_nonce)
-        .map_err(|e| {
-        // report which DLC failed; include an example entry for context
-        let example_entry = &entries[0].0;
-        let msg = format!(
-            "dlc='{}' entry='{}' {}",
-            dlc_id,
-            example_entry,
-            e.to_string()
-        );
-
-        DlcLoaderError::DecryptionFailed(msg)
-    })?;
-
-    // decompress tar.gz archive into a hashmap
-    let mut extracted = decompress_archive(&archive_plain)?;
-
-    // build output list using manifest metadata from `entries`
-    let mut out: Vec<PackItem> = Vec::with_capacity(entries.len());
-    for (path, enc) in entries.into_iter() {
-        // normalize manifest path (manifest paths may contain Windows backslashes);
-        // extracted archive paths are normalized to forward slashes above.
-        let normalized = path.replace("\\", "/");
-        let plaintext = match extracted
-            .remove(&normalized)
-            .or_else(|| extracted.remove(&path))
-        {
-            Some(bytes) => bytes,
-            None => {
-                return Err(DlcLoaderError::DecryptionFailed(format!(
-                    "dlc='{}' missing entry in archive: {}",
-                    dlc_id, path
-                )));
-            }
-        };
-
-        // create PackItem from decrypted data, preserving metadata
-        let mut item = crate::PackItem::new(path.clone(), plaintext)
-            .map_err(|e| DlcLoaderError::DecryptionFailed(e.to_string()))?;
+        let mut item = PackItem::new(path.clone(), plaintext)
+            .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
         if !enc.original_extension.is_empty() {
             item = item
-                .with_extension(enc.original_extension.clone())
-                .map_err(|e| DlcLoaderError::DecryptionFailed(e.to_string()))?;
+                .with_extension(enc.original_extension)
+                .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
         }
-        if let Some(tp) = &enc.type_path {
-            item = item.with_type_path(tp.clone());
+        if let Some(tp) = enc.type_path {
+            item = item.with_type_path(tp);
         }
-
         out.push(item);
     }
 
@@ -1136,10 +1063,10 @@ mod tests {
         let key = EncryptionKey::from_random(32);
         let _dlc_key = crate::DlcKey::generate_random();
         let product = crate::Product::from("test");
-        let container =
-            crate::pack_encrypted_pack(&dlc_id, &items, &product, &key).expect("pack");
+        let container = crate::pack_encrypted_pack(&dlc_id, &items, &product, &key).expect("pack");
 
-        let err = decrypt_pack_entries(&container).expect_err("should be locked");
+        let err =
+            decrypt_pack_entries(std::io::Cursor::new(container)).expect_err("should be locked");
         match err {
             DlcLoaderError::DlcLocked(id) => assert_eq!(id, "locked_dlc"),
             _ => panic!("expected DlcLocked error, got {:?}", err),
@@ -1154,8 +1081,8 @@ mod tests {
         let real_key = EncryptionKey::from_random(32);
         let _dlc_key = crate::DlcKey::generate_random();
         let product = crate::Product::from("test");
-        let container = crate::pack_encrypted_pack(&dlc_id, &items, &product, &real_key)
-            .expect("pack");
+        let container =
+            crate::pack_encrypted_pack(&dlc_id, &items, &product, &real_key).expect("pack");
 
         // insert an incorrect key for this DLC
         let wrong_key: [u8; 32] = rand::random();
@@ -1164,7 +1091,8 @@ mod tests {
             crate::EncryptionKey::from(wrong_key.to_vec()),
         );
 
-        let err = decrypt_pack_entries(&container).expect_err("should fail decryption");
+        let err = decrypt_pack_entries(std::io::Cursor::new(container))
+            .expect_err("should fail decryption");
         match err {
             DlcLoaderError::DecryptionFailed(msg) => {
                 assert!(msg.contains("dlc='badkey_dlc'"));
@@ -1251,22 +1179,26 @@ where
             .ok_or_else(|| DlcLoaderError::DlcLocked(enc.dlc_id.clone()))?;
 
         // decrypt bytes
-        let plaintext = crate::decrypt_with_key(&encrypt_key, &enc.ciphertext, &enc.nonce)
-            .map_err(|e| {
-                let inner_error = e.to_string();
-                let msg = format!(
-                    "dlc='{}' path='{}' {}",
-                    enc.dlc_id,
-                    path_string.unwrap_or_else(|| "<unknown>".to_string()),
-                    if inner_error.is_empty() {
-                        "".to_string()
-                    } else {
-                        format!("{}", inner_error)
-                    }
-                );
+        let plaintext = crate::pack_format::decrypt_with_key(
+            &encrypt_key,
+            std::io::Cursor::new(&*enc.ciphertext),
+            &enc.nonce,
+        )
+        .map_err(|e| {
+            let inner_error = e.to_string();
+            let msg = format!(
+                "dlc='{}' path='{}' {}",
+                enc.dlc_id,
+                path_string.unwrap_or_else(|| "<unknown>".to_string()),
+                if inner_error.is_empty() {
+                    "".to_string()
+                } else {
+                    format!("{}", inner_error)
+                }
+            );
 
-                DlcLoaderError::DecryptionFailed(msg)
-            })?;
+            DlcLoaderError::DecryptionFailed(msg)
+        })?;
 
         // Choose an extension for the nested load so Bevy can pick a concrete
         // loader if one exists. We keep the extension around so we can retry

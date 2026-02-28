@@ -215,136 +215,11 @@ impl BlockMetadata {
     }
 }
 
-/// Trait for converting between pack versions.
-/// Allows extensible, efficient pack format migrations.
-/// 
-/// Converters should stream data when possible to avoid loading entire packs into memory.
-pub trait PackConverter: Send + Sync {
-    /// Check if this converter can convert from `from_version` to `to_version`
-    fn can_convert(&self, from_version: u8, to_version: u8) -> bool;
-
-    /// Perform the conversion. Input is raw pack bytes; output is converted pack bytes.
-    /// 
-    /// Note: Current implementation requires full data in memory. Future versions will
-    /// support streaming via Read trait.
-    fn convert(&self, data: &[u8]) -> Result<Vec<u8>, DlcError>;
-}
-
-/// Converts v3 packs (single-block tar.gz) to v4 (multi-block hybrid format)
-pub struct V3toV4Converter;
-
-impl PackConverter for V3toV4Converter {
-    fn can_convert(&self, from: u8, to: u8) -> bool {
-        from == 3 && to == 4
-    }
-
-    fn convert(&self, data: &[u8]) -> Result<Vec<u8>, DlcError> {
-        // Parse v3 pack
-        let mut reader = PackReader::new(std::io::Cursor::new(data));
-        let header = PackHeader::read(&mut reader)?;
-
-        if header.version != 3 {
-            return Err(DlcError::Other(format!(
-                "Expected v3 pack, got version {}",
-                header.version
-            )));
-        }
-
-        // Read v3 manifest
-        let manifest_len = reader.read_u32()? as usize;
-        let manifest_bytes = reader.read_bytes(manifest_len)?;
-        let v3_manifest: Vec<ManifestEntry> = serde_json::from_slice(&manifest_bytes)
-            .map_err(|e| DlcError::Other(format!("manifest parse: {}", e)))?;
-
-        // Read v3 encrypted tar.gz
-        let shared_nonce = reader.read_nonce()?;
-        let ciphertext_len = reader.read_u32()? as usize;
-        let ciphertext = reader.read_bytes(ciphertext_len)?;
-
-        // We need the encryption key to decompress and re-chunk
-        let dlc_id = DlcId::from(header.dlc_id.clone());
-        let ek = crate::encrypt_key_registry::get(&dlc_id.to_string())
-            .ok_or_else(|| DlcError::Other(format!("encryption key for {} not found in registry; conversion aborted", dlc_id)))?;
-
-        // Decrypt
-        let pt = decrypt_with_key(&ek, &ciphertext, &shared_nonce)?;
-        
-        // Decompress and get items
-        use flate2::read::GzDecoder;
-        let mut decoder = GzDecoder::new(&pt[..]);
-        let mut archive = tar::Archive::new(&mut decoder);
-        
-        let mut items = Vec::new();
-        for entry_res in archive.entries().map_err(|e| DlcError::Other(e.to_string()))? {
-            let mut entry = entry_res.map_err(|e| DlcError::Other(e.to_string()))?;
-            let path = entry.path().map_err(|e| DlcError::Other(e.to_string()))?.to_string_lossy().to_string();
-            let mut pt_data = Vec::new();
-            std::io::copy(&mut entry, &mut pt_data).map_err(|e| DlcError::Other(e.to_string()))?;
-            
-            // Re-find metadata from v3 manifest
-            let m_entry = v3_manifest.iter().find(|e| e.path == path).ok_or_else(|| DlcError::Other(format!("entry {} not in manifest", path)))?;
-            
-            items.push(PackItem {
-                path,
-                plaintext: pt_data,
-                original_extension: m_entry.original_extension.clone(),
-                type_path: m_entry.type_path.clone(),
-            });
-        }
-
-// Re-pack as v4
-        pack_encrypted_pack_v4(
-            &dlc_id,
-            &items,
-            &Product::from(header.product),
-            &ek,
-            DEFAULT_BLOCK_SIZE,
-        )
-    }
-}
-
-/// Registry for pack converters. Extensible for future format versions.
-pub struct PackConverterRegistry {
-    converters: Vec<Box<dyn PackConverter>>,
-}
-
-impl PackConverterRegistry {
-    pub fn new() -> Self {
-        let mut registry = PackConverterRegistry {
-            converters: Vec::new(),
-        };
-        registry.converters.push(Box::new(V3toV4Converter));
-        registry
-    }
-
-    pub fn convert(&self, from_version: u8, to_version: u8, data: &[u8]) -> Result<Vec<u8>, DlcError> {
-        for converter in &self.converters {
-            if converter.can_convert(from_version, to_version) {
-                return converter.convert(data);
-            }
-        }
-        Err(DlcError::Other(format!(
-            "no converter found for v{}→v{}",
-            from_version, to_version
-        )))
-    }
-
-    /// Get the number of registered converters
-    pub fn count(&self) -> usize {
-        self.converters.len()
-    }
-
-    /// Register a custom converter
-    pub fn register(&mut self, converter: Box<dyn PackConverter>) {
-        self.converters.push(converter);
-    }
-}
-
-impl Default for PackConverterRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// converters and migration helpers have been removed – the crate
+// now only supports v4 packs.  The old `PackConverter` trait, the
+// `V3toV4Converter` implementation and the `PackConverterRegistry` type
+// were used to upgrade on‑disk packs to the latest format; they are
+// retained in history if needed but no longer compiled.
 
 /// Internal helper for binary parsing with offset management.
 pub(crate) struct PackReader<R: std::io::Read> {
@@ -356,10 +231,26 @@ impl<R: std::io::Read> PackReader<R> {
         Self { inner }
     }
 
+    /// Read a byte.
     pub fn read_u8(&mut self) -> std::io::Result<u8> {
         let mut buf = [0u8; 1];
         self.inner.read_exact(&mut buf)?;
         Ok(buf[0])
+    }
+
+    /// Convenience method: read `len` bytes and immediately decrypt them with
+    /// the provided AES-GCM key/nonce.
+    #[allow(dead_code)]
+    pub fn read_and_decrypt(
+        &mut self,
+        key: &crate::EncryptionKey,
+        len: usize,
+        nonce: &[u8],
+    ) -> Result<Vec<u8>, DlcError> {
+        let ciphertext = self.read_bytes(len)?;
+
+        let cursor = std::io::Cursor::new(ciphertext);
+        crate::pack_format::decrypt_with_key(key, cursor, nonce)
     }
 
     pub fn read_u16(&mut self) -> std::io::Result<u16> {
@@ -412,6 +303,14 @@ impl<R: std::io::Read> PackReader<R> {
     }
 }
 
+// additional helpers available when the inner reader also implements `Seek`
+impl<R: std::io::Read + std::io::Seek> PackReader<R> {
+    /// Seek the underlying reader to `pos` and return the new position.
+    pub fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
 /// Internal helper for binary packing.
 pub(crate) struct PackWriter<W: std::io::Write> {
     inner: W,
@@ -420,6 +319,25 @@ pub(crate) struct PackWriter<W: std::io::Write> {
 impl<W: std::io::Write> PackWriter<W> {
     pub fn new(inner: W) -> Self {
         Self { inner }
+    }
+
+    /// Encrypt `plaintext` with the provided key/nonce and write the
+    /// resulting ciphertext to the underlying writer.
+    #[allow(dead_code)]
+    pub fn write_encrypted(
+        &mut self,
+        key: &crate::EncryptionKey,
+        nonce: &[u8],
+        plaintext: &[u8],
+    ) -> Result<(), DlcError> {
+        use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+        let cipher = key.with_secret(|kb| {
+            Aes256Gcm::new_from_slice(kb).map_err(|e| DlcError::CryptoError(e.to_string()))
+        })?;
+        let ct = cipher
+            .encrypt(Nonce::from_slice(nonce), plaintext)
+            .map_err(|_| DlcError::EncryptionFailed("block encryption failed".into()))?;
+        self.write_bytes(&ct).map_err(|e| DlcError::Other(e.to_string()))
     }
 
     pub fn write_u8(&mut self, val: u8) -> std::io::Result<()> {
@@ -509,16 +427,23 @@ impl PackHeader {
 /// the pack format helpers to perform decryption without pulling in the
 /// higher-level API.
 
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::AeadInPlace};
 use secure_gate::ExposeSecret;
 
 use crate::{DlcError, DlcId, EncryptionKey, PackItem, Product};
 
-pub fn decrypt_with_key(
+pub(crate) fn decrypt_with_key<R: std::io::Read>(
     key: &crate::EncryptionKey,
-    ciphertext: &[u8],
+    mut reader: R,
     nonce: &[u8],
 ) -> Result<Vec<u8>, DlcError> {
+    // read ciphertext into a single buffer; decrypt it in-place to avoid
+    // allocating a second plaintext buffer.
+    let mut buf = Vec::new();
+    reader
+        .read_to_end(&mut buf)
+        .map_err(|e| DlcError::Other(e.to_string()))?;
+
     key.with_secret(|key_bytes| {
         if key_bytes.len() != 32 {
             return Err(DlcError::InvalidEncryptKey(
@@ -533,12 +458,16 @@ pub fn decrypt_with_key(
         let cipher = Aes256Gcm::new_from_slice(key_bytes)
             .map_err(|e| DlcError::CryptoError(e.to_string()))?;
         let nonce = Nonce::from_slice(nonce);
-        cipher.decrypt(nonce, ciphertext).map_err(|_| {
-            DlcError::DecryptionFailed(
-                "authentication failed (incorrect key or corrupted ciphertext)".to_string(),
+        // decrypt in-place; `buf` will be overwritten with plaintext
+        cipher
+            .decrypt_in_place(nonce, &[], &mut buf)
+            .map_err(|_|
+                DlcError::DecryptionFailed(
+                    "authentication failed (incorrect key or corrupted ciphertext)".to_string(),
+                )
             )
-        })
-    })
+    })?;
+    Ok(buf)
 }
 
 /// Compression level for packing. Controls the trade-off between pack size and packing time.
@@ -847,10 +776,9 @@ pub fn parse_encrypted_pack<R: std::io::Read>(
 /// Pack multiple entries into a single `.dlcpack` container.
 ///
 /// Arguments:
-/// - `dlc_id`: the DLC ID this pack belongs to (used for registry lookup and validation)
+/// - `dlc_id`: the [DlcId] this pack belongs to (used for registry lookup and validation)
 /// - `items`: a list of [PackItem]s containing the plaintext data to be packed
-/// - `product`: the product identifier to bind the pack to
-/// - `dlc_key`: the `DlcKey` containing the private key used to sign the pack (must be a `DlcKey::Private`)
+/// - `product`: the [Product] identifier to bind the pack to
 /// - `key`: the symmetric encryption key used to encrypt the pack contents (must be 32 bytes for AES-256)
 pub fn pack_encrypted_pack(
     dlc_id: &DlcId,
@@ -859,32 +787,6 @@ pub fn pack_encrypted_pack(
     key: &EncryptionKey,
 ) -> Result<Vec<u8>, DlcError> {
     pack_encrypted_pack_v4(dlc_id, items, product, key, DEFAULT_BLOCK_SIZE)
-}
-
-/// Convert a .dlcpack file from one format version to another.
-///
-/// This function uses a registered converter to transform the pack format.
-/// For v3→v4 conversion, the format will be upgraded to the hybrid block-based format.
-///
-/// Arguments:
-/// - `from_version`: Source format version
-/// - `to_version`: Target format version
-/// - `reader`: A reader containing the pack file contents
-///
-/// Returns the converted pack bytes or an error if no converter is available.
-pub fn convert_pack_format<R: std::io::Read>(
-    from_version: u8,
-    to_version: u8,
-    reader: R,
-) -> Result<Vec<u8>, DlcError> {
-    // Current converters expect &[u8], so we still need to read it into memory.
-    // Future: implement streaming in converters.
-    let mut pack_bytes = Vec::new();
-    let mut r = reader;
-    r.read_to_end(&mut pack_bytes).map_err(|e| DlcError::Other(e.to_string()))?;
-
-    let registry = PackConverterRegistry::default();
-    registry.convert(from_version, to_version, &pack_bytes)
 }
 
 #[cfg(test)]

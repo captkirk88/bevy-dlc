@@ -17,6 +17,7 @@ mod macros;
 mod pack_format;
 
 pub use asset_loader::{DlcLoader, DlcPack, DlcPackLoader, EncryptedAsset, parse_encrypted};
+
 pub use pack_format::{
     DLC_PACK_MAGIC,
     DLC_PACK_VERSION_LATEST,
@@ -24,17 +25,12 @@ pub use pack_format::{
     ManifestEntry,
     V4ManifestEntry,
     BlockMetadata,
-    PackConverter,
-    V3toV4Converter,
-    PackConverterRegistry,
     CompressionLevel,
     is_data_executable,
     is_forbidden_extension,
     is_malicious_file,
-    decrypt_with_key,
     parse_encrypted_pack,
     pack_encrypted_pack,
-    convert_pack_format,
 };
 
 use serde::{Deserialize, Serialize};
@@ -59,7 +55,7 @@ pub mod prelude {
     pub use crate::ext::*;
     pub use crate::{
         DlcError, DlcId, DlcKey, DlcLoader, DlcPack, DlcPackLoader, DlcPlugin, EncryptedAsset,
-        PackItem, Product, SignedLicense, VerifiedLicense, asset_loader::DlcPackEntry,
+        PackItem, Product, SignedLicense, asset_loader::DlcPackEntry,
         asset_loader::DlcPackLoaded, is_dlc_entry_loaded, is_dlc_loaded,
     };
 }
@@ -307,6 +303,24 @@ pub fn extract_dlc_ids_from_license(license: &SignedLicense) -> Vec<String> {
     })
 }
 
+/// Extract the `product` field from a signed license's payload.
+/// Returns `None` if the token is malformed or the field is missing.
+pub fn extract_product_from_license(license: &SignedLicense) -> Option<String> {
+    license.with_secret(|token_str| {
+        let parts: Vec<&str> = token_str.split('.').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        if let Ok(payload) = URL_SAFE_NO_PAD.decode(parts[0].as_bytes()) {
+            if let Ok(payload_json) = serde_json::from_slice::<serde_json::Value>(&payload) {
+                if let Some(prod) = payload_json.get("product").and_then(|v| v.as_str()) {
+                    return Some(prod.to_string());
+                }
+            }
+        }
+        None
+    })
+}
 /// Product: non-secret identifier wrapper (keeps same API surface)
 #[derive(Resource, Clone, PartialEq, Eq, Debug)]
 pub struct Product(String);
@@ -592,47 +606,32 @@ impl DlcKey {
     }
 
     /// Verify a compact signed-license (signature + payload) using this key's public key
-    /// and return a typed `VerifiedLicense`. This only checks signature + parsing.
-    pub fn verify_signed_license(
-        &self,
-        license: &SignedLicense,
-    ) -> Result<VerifiedLicense, DlcError> {
+    /// Verify a compact signed-license using this key's public key.
+    ///
+    /// Returns `true` if the signature is valid and the token is well-formed,
+    /// `false` otherwise.  No further payload validation is performed.
+    pub fn verify_signed_license(&self, license: &SignedLicense) -> bool {
         license.with_secret(|full_token| {
             let parts: Vec<&str> = full_token.split('.').collect();
             if parts.len() != 2 {
-                return Err(DlcError::MalformedLicense(
-                    "expected signed-license with two dot-separated parts".into(),
-                ));
+                return false;
             }
 
-            let payload = URL_SAFE_NO_PAD
-                .decode(parts[0])
-                .map_err(|e| DlcError::MalformedLicense(format!("payload base64: {}", e)))?;
-            let sig_bytes = URL_SAFE_NO_PAD
-                .decode(parts[1])
-                .map_err(|e| DlcError::MalformedLicense(format!("signature base64: {}", e)))?;
+            let payload = URL_SAFE_NO_PAD.decode(parts[0]);
+            let sig_bytes = URL_SAFE_NO_PAD.decode(parts[1]);
+            if payload.is_err() || sig_bytes.is_err() {
+                return false;
+            }
+            let payload = payload.unwrap();
+            let sig_bytes = sig_bytes.unwrap();
 
             if sig_bytes.len() != 64 {
-                return Err(DlcError::MalformedLicense(
-                    "signature bytes length must be 64".into(),
-                ));
+                return false;
             }
 
             let public = self.get_public_key().0;
             let public_key = UnparsedPublicKey::new(&ED25519, public);
-            public_key
-                .verify(&payload, &sig_bytes)
-                .map_err(|_| DlcError::SignatureInvalid)?;
-
-            let lic: LicensePayload = serde_json::from_slice(&payload)
-                .map_err(|e| DlcError::PayloadInvalid(e.to_string()))?;
-
-            Ok(VerifiedLicense {
-                dlcs: lic.dlcs,
-                iat: lic.iat,
-                nonce: lic.nonce,
-                product: lic.product,
-            })
+            public_key.verify(&payload, &sig_bytes).is_ok()
         })
     }
 }
@@ -661,28 +660,7 @@ impl From<&DlcKey> for String {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct LicensePayload {
-    pub dlcs: Vec<String>,
-    pub iat: Option<u64>,
-    pub nonce: Option<String>,
-    pub product: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub encrypt_key: Option<String>,
-}
 
-/// Typed, verified private key returned by `DlcKey::verify_signed_license`.
-#[derive(Debug, Clone)]
-pub struct VerifiedLicense {
-    /// List of DLC ids included in the token (as strings; these are converted to `DlcId` when applied/unlocked).
-    pub dlcs: Vec<String>,
-    /// Issued-at timestamp (optional) — not validated by the crate but can be used
-    pub iat: Option<u64>,
-    /// Optional nonce (e.g. for replay protection) — not validated by the crate but can be used by platforms that require it.
-    pub nonce: Option<String>,
-    /// Product binding (string) — this is checked against the manager's product when unlocking, but the crate does not enforce any particular format for this field.
-    pub product: String,
-}
 
 
 /// Helper struct for building DLC pack entries with optional metadata.
@@ -938,13 +916,12 @@ mod tests {
             .extend_signed_license(&initial, &["expansion_c"], product.clone())
             .expect("extend license");
 
-        let verified = dlc_key
-            .verify_signed_license(&extended)
-            .expect("verify extended license");
-        assert_eq!(verified.dlcs.len(), 3);
-        assert!(verified.dlcs.contains(&"expansion_a".to_string()));
-        assert!(verified.dlcs.contains(&"expansion_b".to_string()));
-        assert!(verified.dlcs.contains(&"expansion_c".to_string()));
+        assert!(dlc_key.verify_signed_license(&extended));
+        let verified_dlcs = extract_dlc_ids_from_license(&extended);
+        assert_eq!(verified_dlcs.len(), 3);
+        assert!(verified_dlcs.contains(&"expansion_a".to_string()));
+        assert!(verified_dlcs.contains(&"expansion_b".to_string()));
+        assert!(verified_dlcs.contains(&"expansion_c".to_string()));
     }
 
     #[test]
@@ -960,10 +937,9 @@ mod tests {
             .extend_signed_license(&initial, &["expansion_a"], product.clone())
             .expect("extend license");
 
-        let verified = dlc_key
-            .verify_signed_license(&extended)
-            .expect("verify extended license");
-        let count = verified.dlcs.iter().filter(|d| d == &"expansion_a").count();
+        assert!(dlc_key.verify_signed_license(&extended));
+        let verified_dlcs = extract_dlc_ids_from_license(&extended);
+        let count = verified_dlcs.iter().filter(|d| d == &"expansion_a").count();
         assert_eq!(count, 1, "Should not duplicate dlc_ids");
     }
 
