@@ -18,9 +18,7 @@ use bevy::{asset::AssetServer, log::LogPlugin};
 use clap::{Parser, Subcommand};
 
 use bevy_dlc::{
-    EncryptionKey, PackItem, extract_dlc_ids_from_license,
-    extract_product_from_license, extract_encrypt_key_from_license,
-    pack_encrypted_pack, parse_encrypted_pack, prelude::*,
+    DLC_PACK_VERSION_LATEST, EncryptionKey, PackItem, extract_dlc_ids_from_license, extract_encrypt_key_from_license, extract_product_from_license, pack_encrypted_pack, parse_encrypted_pack, prelude::*
 };
 use owo_colors::{AnsiColors, OwoColorize};
 use secure_gate::ExposeSecret;
@@ -387,14 +385,7 @@ async fn resolve_type_paths_from_bevy(
 }
 
 fn print_pack_entries(version: usize, ents: &[(String, bevy_dlc::EncryptedAsset)]) {
-    if version >= 2 {
-        if let Some((_, first_enc)) = ents.first() {
-            println!(
-                " ciphertext_len={} nonce={}",
-                first_enc.ciphertext.len(),
-                hex::encode(first_enc.nonce)
-            );
-        }
+    if version as u8 == DLC_PACK_VERSION_LATEST {
         for (p, enc) in ents.iter() {
             println!(
                 " - {} (ext={}) type={}",
@@ -404,16 +395,7 @@ fn print_pack_entries(version: usize, ents: &[(String, bevy_dlc::EncryptedAsset)
             );
         }
     } else {
-        for (p, enc) in ents.iter() {
-            println!(
-                " - {} (ext={}) ciphertext_len={} nonce={} type={}",
-                p,
-                enc.original_extension,
-                enc.ciphertext.len(),
-                hex::encode(enc.nonce),
-                enc.type_path.clone().unwrap_or("None".to_string())
-            );
-        }
+        println!("Version {} is not supported anymore. Repack your DLC assets using the 'pack' command.", version);
     }
 }
 
