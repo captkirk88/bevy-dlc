@@ -819,7 +819,7 @@ fn find_dlcpack(
     for p in candidates {
         let file = std::fs::File::open(&p)?;
         let mut reader = std::io::BufReader::new(file);
-        let (prod, did, version, ents, blocks) = parse_encrypted_pack(&mut reader)?;
+        let (prod, did, version, ents, _blocks) = parse_encrypted_pack(&mut reader)?;
         let did = DlcId::from(did);
         // if dlc_id is not an exact match, skip
         if did != dlc_id {
@@ -831,9 +831,8 @@ fn find_dlcpack(
             prod,
             version as u8,
             ents.into_iter()
-                .map(|(path, encrypted)| DlcPackEntry { path, encrypted })
+                .map(|(path, encrypted)| DlcPackEntry::new(path, encrypted))
                 .collect(),
-            blocks,
         );
         best_match = Some((p, version, pack));
         break;
@@ -880,7 +879,7 @@ async fn pack_command(
         .as_ref()
         .map(|t| parse_type_overrides(t))
         .unwrap_or_default();
-    let type_path_map = resolve_type_paths_from_bevy(app, &selected_files, &type_overrides).await?;
+    let type_path_map = bevy::tasks::block_on(async { resolve_type_paths_from_bevy(app, &selected_files, &type_overrides).await })?;
 
     let mut items: Vec<PackItem> = Vec::new();
     for file in &selected_files {
@@ -985,8 +984,7 @@ async fn pack_command(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create headless Bevy app to set up asset loaders
     let mut app = App::new();
     app.add_plugins(
@@ -1045,7 +1043,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pubkey,
             signed_license,
         } => {
-            pack_command(
+            bevy::tasks::block_on( async {pack_command(
                 &mut app,
                 dlc_id_str,
                 files,
@@ -1057,7 +1055,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 signed_license,
                 cli.dry_run,
             )
-            .await?;
+            .await})?;
         }
 
         Commands::List { dlc } => {

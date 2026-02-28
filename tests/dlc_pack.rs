@@ -27,7 +27,7 @@ fn dlcpack_runtime_loads_and_decrypts_when_unlocked() {
     assert_eq!(pack.id().0, "dlcA");
 
     // decrypt the entry using the pack API
-    let bytes = pack.decrypt_entry_bytes("note.txt").expect("decrypt");
+    let bytes = pack.decrypt_entry("note.txt").expect("decrypt");
     assert_eq!(&bytes, b"hello dlc");
 }
 
@@ -92,7 +92,7 @@ fn dlcpack_runtime_loads_but_locked_without_key() {
     let packs = t.resource::<bevy::prelude::Assets<bevy_dlc::DlcPack>>();
     let pack = packs.get(&handle).expect("pack loaded");
 
-    let res = pack.decrypt_entry_bytes("secret.txt");
+    let res = pack.decrypt_entry("secret.txt");
     eprintln!("DlcLocked error (expected): {}", format!("{res:?}").red());
     assert!(res.is_err(), "expected DlcLocked or DecryptionFailed");
 }

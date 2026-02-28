@@ -2,9 +2,11 @@
 //! associated with which DLC id, and which asset paths are associated with which DLC id
 //! so that they can be reloaded when the DLC is unlocked.
 
+use std::sync::{Arc, LazyLock};
+
 use crate::EncryptionKey;
 use dashmap::DashMap;
-use once_cell::sync::Lazy;
+
 use secure_gate::ExposeSecret;
 
 #[derive(Default)]
@@ -13,17 +15,17 @@ struct DlcRegistration {
     path: Option<String>,
 }
 
-static REGISTRY: Lazy<DashMap<String, DlcRegistration>> = Lazy::new(|| DashMap::new());
+static REGISTRY: LazyLock<Arc<DashMap<String, DlcRegistration>>> = LazyLock::new(|| Arc::new(DashMap::new()));
 
 /// Insert or replace the encrypt key for `dlc_id`.
-pub(crate) fn insert(dlc_id: &str, key: EncryptionKey) {
+pub fn insert(dlc_id: &str, key: EncryptionKey) {
     let mut entry = REGISTRY.entry(dlc_id.to_owned()).or_default();
     entry.key = Some(key);
 }
 
 /// Remove the encrypt key for `dlc_id`.
 #[allow(unused)]
-pub(crate) fn remove(dlc_id: &str) {
+pub fn remove(dlc_id: &str) {
     REGISTRY.remove(dlc_id);
 }
 
@@ -35,7 +37,7 @@ pub struct DlcEntry {
 
 /// Return an owned [EncryptionKey] (cloned) if present.
 /// The clone is performed within the secure closure to minimize exposure time.
-pub(crate) fn get(dlc_id: &str) -> Option<EncryptionKey> {
+pub fn get(dlc_id: &str) -> Option<EncryptionKey> {
     REGISTRY.get(dlc_id).and_then(|v| {
         v.key.as_ref().map(|k| {
             k.with_secret(|b| {
@@ -47,7 +49,7 @@ pub(crate) fn get(dlc_id: &str) -> Option<EncryptionKey> {
 }
 
 /// Return both the key and the registered path for a given `dlc_id`.
-pub(crate) fn get_full(dlc_id: &str) -> Option<DlcEntry> {
+pub fn get_full(dlc_id: &str) -> Option<DlcEntry> {
     REGISTRY.get(dlc_id).and_then(|v| {
         v.key.as_ref().map(|k| DlcEntry {
             key: k.with_secret(|b| EncryptionKey::from(b.to_vec())),
@@ -59,7 +61,7 @@ pub(crate) fn get_full(dlc_id: &str) -> Option<DlcEntry> {
 /// Register an asset path for a given `dlc_id`. Each DLC ID can only have
 /// ONE associated pack file. This enforces the design constraint that each
 /// DLC release is shipped as a single .dlcpack.
-pub(crate) fn register_asset_path(dlc_id: &str, path: &str) {
+pub fn register_asset_path(dlc_id: &str, path: &str) {
     REGISTRY
         .entry(dlc_id.to_owned())
         .and_modify(|e| e.path = Some(path.to_owned()))
@@ -71,7 +73,7 @@ pub(crate) fn register_asset_path(dlc_id: &str, path: &str) {
 
 /// Return the registered asset path for a given `dlc_id`. This is used by the asset loader to determine which DLC pack file(s) to load when a DLC is unlocked. Since each DLC ID can only have one associated pack file, this will return a vector with either zero or one path.
 #[allow(unused)]
-pub(crate) fn asset_path_for(dlc_id: &str) -> String {
+pub fn asset_path_for(dlc_id: &str) -> String {
     REGISTRY
         .get(dlc_id)
         .and_then(|v| v.path.as_ref().map(|p| p.clone()))

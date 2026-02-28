@@ -41,7 +41,7 @@ fn main() -> AppExit {
         .add_systems(Startup, startup)
         .add_systems(
             Update,
-            (insert_cursor.run_if(is_dlc_entry_loaded("dlcA", "blue.cur")),),
+            insert_cursor.run_if(is_dlc_entry_loaded("dlcA", "blue.cur")),
         )
         .add_observer(on_dlc_pack_loaded)
         .run()
@@ -91,11 +91,11 @@ fn insert_cursor(
     let Some(c) = static_cursors.get(&cursors.0.clone()) else {
         return;
     };
-
+    
     commands
         .entity(*window)
         .insert(bevy::window::CursorIcon::Custom(
-            CustomCursorImageBuilder::from_static_cursor(c, None).build(),
+            CustomCursorImageBuilder::from_static_cursor(c, Some(5)).build(),
         ));
 
     *setup = true;

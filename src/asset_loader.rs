@@ -5,11 +5,51 @@ use bevy::asset::{
 use bevy::ecs::reflect::AppTypeRegistry;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
+use futures_lite::{AsyncReadExt, AsyncSeekExt};
 use std::io;
 use std::sync::Arc;
 use thiserror::Error;
 
 use crate::{DlcId, PackItem, Product};
+
+use std::io::{Read, Seek, SeekFrom};
+
+/// Adapter that exposes a `std::io::Read + std::io::Seek` view over a
+/// `bevy::asset::io::Reader`.  This is used by pack-parsing routines so we can
+/// operate on the async reader without copying the entire file into memory.
+///
+/// The implementation simply blocks on the underlying async methods using
+/// [`pollster::block_on`].  Seeking works only when the wrapped reader is
+/// seekable; otherwise the `seek()` call returns an error.
+pub struct SyncReader<'a> {
+    inner: &'a mut dyn bevy::asset::io::Reader,
+}
+
+impl<'a> SyncReader<'a> {
+    pub fn new(inner: &'a mut dyn bevy::asset::io::Reader) -> Self {
+        SyncReader { inner }
+    }
+}
+
+impl<'a> Read for SyncReader<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        bevy::tasks::block_on(self.inner.read(buf))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+}
+
+impl<'a> Seek for SyncReader<'a> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        match self.inner.seekable() {
+            Ok(seek) => bevy::tasks::block_on(seek.seek(pos))
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "reader not seekable",
+            )),
+        }
+    }
+}
 
 /// Decompress a gzip‑compressed tar archive from `plaintext` and return a map from
 /// internal path -> contents.  Errors are mapped into `DlcLoaderError::DecryptionFailed`
@@ -360,12 +400,16 @@ where
 #[derive(TypePath, Clone, Debug)]
 pub struct DlcPackEntry {
     /// Relative path inside the pack (as authored when packing)
-    pub path: String,
+    path: String,
     /// Encrypted asset metadata and ciphertext
-    pub encrypted: EncryptedAsset,
+    encrypted: EncryptedAsset,
 }
 
 impl DlcPackEntry {
+    pub fn new(path: String, encrypted: EncryptedAsset) -> Self {
+        DlcPackEntry { path, encrypted }
+    }
+
     /// Convenience: load this entry's registered path via `AssetServer::load`.
     pub fn load_untyped(
         &self,
@@ -385,7 +429,7 @@ impl DlcPackEntry {
     /// Decrypt and return the plaintext bytes for this entry.
     /// This consults the global encrypt-key registry and will return
     /// `DlcLoaderError::DlcLocked` when the encrypt key is not present.
-    pub fn decrypt_bytes(&self) -> Result<Vec<u8>, DlcLoaderError> {
+    pub(crate) fn decrypt_bytes(&self) -> Result<Vec<u8>, DlcLoaderError> {
         let entry_ek = crate::encrypt_key_registry::get_full(&self.encrypted.dlc_id)
             .ok_or_else(|| DlcLoaderError::DlcLocked(self.encrypted.dlc_id.clone()))?;
         let encrypt_key = entry_ek.key;
@@ -434,30 +478,28 @@ impl From<(String, EncryptedAsset)> for DlcPackEntry {
     }
 }
 
+impl From<&(String, EncryptedAsset)> for DlcPackEntry {
+    fn from((path, encrypted): &(String, EncryptedAsset)) -> Self {
+        DlcPackEntry { path: path.clone(), encrypted: encrypted.clone() }
+    }
+}
+
 /// Represents a `.dlcpack` bundle (multiple encrypted entries).
 #[derive(Asset, TypePath, Clone, Debug)]
 pub struct DlcPack {
-    pub dlc_id: DlcId,
-    pub product: Product,
-    pub version: u8,
-    pub entries: Vec<DlcPackEntry>,
-    pub block_metadatas: Vec<crate::pack_format::BlockMetadata>,
+    dlc_id: DlcId,
+    product: Product,
+    version: u8,
+    entries: Vec<DlcPackEntry>,
 }
 
 impl DlcPack {
-    pub fn new(
-        id: DlcId,
-        product: Product,
-        version: u8,
-        entries: Vec<DlcPackEntry>,
-        block_metadatas: Vec<crate::pack_format::BlockMetadata>,
-    ) -> Self {
+    pub fn new(id: DlcId, product: Product, version: u8, entries: Vec<DlcPackEntry>) -> Self {
         DlcPack {
             dlc_id: id,
             product,
             version,
             entries,
-            block_metadatas,
         }
     }
 
@@ -501,7 +543,7 @@ impl DlcPack {
 
     /// Decrypt an entry (accepts either `name` or `packfile.dlcpack#name`).
     /// Returns plaintext or `DlcLocked`.
-    pub fn decrypt_entry_bytes(
+    pub fn decrypt_entry(
         &self,
         entry_path: &str,
     ) -> Result<Vec<u8>, crate::asset_loader::DlcLoaderError> {
@@ -524,33 +566,6 @@ impl DlcPack {
             None => return None,
         };
         Some(asset_server.load::<A>(entry.path()))
-    }
-}
-
-impl From<(DlcId, Vec<(String, EncryptedAsset)>)> for DlcPack {
-    fn from((dlc_id, entries): (DlcId, Vec<(String, EncryptedAsset)>)) -> Self {
-        DlcPack {
-            dlc_id,
-            product: Product::from(""),
-            version: 3,
-            entries: entries
-                .into_iter()
-                .map(|(path, encrypted)| DlcPackEntry::from((path, encrypted)))
-                .collect(),
-            block_metadatas: Vec::new(),
-        }
-    }
-}
-
-impl From<(DlcId, Vec<DlcPackEntry>)> for DlcPack {
-    fn from((dlc_id, entries): (DlcId, Vec<DlcPackEntry>)) -> Self {
-        DlcPack {
-            dlc_id,
-            product: Product::from(""),
-            version: 3,
-            entries,
-            block_metadatas: Vec::new(),
-        }
     }
 }
 
@@ -693,19 +708,24 @@ impl AssetLoader for DlcPackLoader {
     ) -> Result<Self::Asset, Self::Error> {
         let path_string = load_context.path().path().to_string_lossy().to_string();
 
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes).await.map_err(|e| {
-            error!(
-                "Failed to read DLC pack file at '{}': {}. \
-                    \nCheck that the file exists and is readable in your configured asset source.",
-                path_string, e
-            );
-            DlcLoaderError::Io(e)
-        })?;
+        // Adapt the async `reader` to a synchronous `std::io::Read` so we can
+        // drive the existing pack‑parsing logic without buffering the whole file
+        // up front.  If the underlying reader is seekable we will also be able
+        // rewind it later in order to extract the raw bytes needed for
+        // decryption.
+        let mut sync_reader = SyncReader::new(reader);
 
-        let (product, dlc_id, version, manifest_entries, block_metadatas) =
-            crate::parse_encrypted_pack(&bytes[..])
+        let (product, dlc_id, version, manifest_entries, _block_metadatas) =
+            crate::parse_encrypted_pack(&mut sync_reader)
                 .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
+
+        // rewind the reader back to the start so decryption routines can re‑parse the file as needed.  If the reader is not seekable, error.
+        sync_reader.seek(SeekFrom::Start(0)).map_err(|_| {
+            DlcLoaderError::Io(io::Error::new(
+                io::ErrorKind::NotSeekable,
+                format!("reader not seekable, cannot load pack '{}'", path_string),
+            ))
+        })?;
 
         // Check for DLC ID conflicts: reject if a DIFFERENT pack file is being loaded for the same DLC ID.
         // Allow the same pack file to be loaded multiple times (e.g., when accessing labeled sub-assets).
@@ -729,16 +749,8 @@ impl AssetLoader for DlcPackLoader {
         // we don't block the asset loader threads on heavy CPU work. If the key
         // is missing we still populate the manifest so callers can inspect
         // entries; a reload after unlock will add the typed sub-assets.
-        let decrypted_items: Option<Vec<PackItem>> = {
-            // clone bytes for the blocking task so we can continue to own the
-            // original `bytes` for `container_bytes` later
-            let bytes_for_task = bytes.clone();
-            let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
-                let cursor = std::io::Cursor::new(bytes_for_task);
-                decrypt_pack_entries(cursor)
-            });
-
-            match task.await {
+        let decrypted_items = {
+            match decrypt_pack_entries(sync_reader) {
                 Ok::<(DlcId, Vec<PackItem>), DlcLoaderError>((_id, items)) => Some(items),
                 Err(DlcLoaderError::DlcLocked(_)) => None,
                 Err(e) => return Err(e),
@@ -906,7 +918,6 @@ impl AssetLoader for DlcPackLoader {
             product,
             version as u8,
             out_entries,
-            block_metadatas,
         ))
     }
 }
@@ -1041,7 +1052,6 @@ mod tests {
             Product::from("test"),
             4,
             vec![entry.clone()],
-            vec![],
         );
 
         // exercise getters (reads `dlc_id` + `entries` fields)
@@ -1241,7 +1251,8 @@ where
         // and then downcast the result to `A`. This mirrors how the normal
         // AssetServer would work when loading a file from disk.
         if !ext.is_empty() {
-            let mut ext_reader = bevy::asset::io::VecReader::new(bytes_clone);
+            // rewind original reader and clone again
+            let mut ext_reader = bevy::asset::io::VecReader::new(bytes_clone.clone());
             let attempt = load_context
                 .loader()
                 .immediate()

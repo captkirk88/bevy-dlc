@@ -54,24 +54,23 @@ fn setup_fps_display(mut commands: Commands, anchor: Res<FpsAnchor>) {
         },
     };
 
-    commands
-        .spawn((
-            Text(String::from("FPS: ...")),
-            // match the styling pattern from other examples
-            TextFont {
-                font_size: 20.0,
-                ..default()
-            },
-            TextColor(Color::WHITE),
-            style,
-            FpsText,
-        ));
+    commands.spawn((
+        Text(String::from("FPS: ...")),
+        // match the styling pattern from other examples
+        TextFont {
+            font_size: 20.0,
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        style,
+        FpsText,
+    ));
 }
 
 /// Each frame compute FPS from the `Time` resource and update the text.
 fn update_fps_text(
     time: Res<Time>,
-    mut query: Query<(&mut Text, &mut TextColor), With<FpsText>>,
+    mut single: Single<(&mut Text, &mut TextColor), With<FpsText>>,
 ) {
     // avoid a divide-by-zero just in case
     let fps = if time.delta_secs() > 0.0 {
@@ -89,10 +88,8 @@ fn update_fps_text(
     };
     let colour = Color::linear_rgb(red_intensity, 1.0 - red_intensity, 0.0);
 
-    for (mut text, mut text_color) in query.iter_mut() {
-        text.0 = format!("FPS: {:.0}", fps);
-        text_color.0 = colour;
-    }
+    single.0.0 = format!("FPS: {:.0}", fps);
+    single.1.0 = colour;
 }
 
 // A simple text/string asset used in the examples.  the helper macro generates
@@ -136,8 +133,8 @@ impl Plugin for ExamplePlugin {
         // compute the FPS ourselves from the `Time` resource rather than
         // pulling a value out of a non-resource type.
         app.insert_resource(FpsAnchor(self.fps_anchor))
-            .add_systems(Startup,setup_fps_display)
-            .add_systems(Update,update_fps_text);
+            .add_systems(Startup, setup_fps_display)
+            .add_systems(Update, update_fps_text);
     }
 }
 

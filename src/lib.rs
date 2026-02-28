@@ -6,7 +6,7 @@ use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use secure_gate::{ExposeSecret, dynamic_alias, fixed_alias};
 
 mod asset_loader;
-pub(crate) mod encrypt_key_registry;
+pub mod encrypt_key_registry;
 mod ext;
 
 #[macro_use]
@@ -198,16 +198,16 @@ impl std::fmt::Display for DlcId {
     }
 }
 
+impl Clone for DlcId {
+    fn clone(&self) -> Self {
+        DlcId(self.0.clone())
+    }
+}
+
 impl DlcId {
     /// Return the underlying string slice.
     pub fn as_str(&self) -> &str {
         self.0.as_str()
-    }
-}
-
-impl Clone for DlcId {
-    fn clone(&self) -> Self {
-        DlcId(self.0.clone())
     }
 }
 

@@ -1,5 +1,4 @@
-use once_cell::sync::Lazy;
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::LazyLock};
 
 /// .dlcpack container magic header (4 bytes) used to identify encrypted pack containers.
 pub const DLC_PACK_MAGIC: &[u8; 4] = b"BDLP";
@@ -18,7 +17,7 @@ pub const FORBIDDEN_EXTENSIONS: &[&str] = &[
 ];
 
 /// Lazy hash set used by [`is_forbidden_extension`].
-static FORBIDDEN_SET: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+static FORBIDDEN_SET: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     FORBIDDEN_EXTENSIONS.iter().copied().collect()
 });
 
