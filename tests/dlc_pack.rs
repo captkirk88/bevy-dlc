@@ -72,3 +72,34 @@ fn dlcpack_runtime_loads_but_locked_without_key() {
     eprintln!("DlcLocked error (expected): {}", format!("{res:?}").red());
     assert!(res.is_err(), "expected DlcLocked or DecryptionFailed");
 }
+
+
+#[test]
+#[serial_test::serial]
+fn cli_check_command_finds_license_and_succeeds() {
+    // create a temporary CLI test context
+    let ctx = CliTestCtx::new();
+
+    // write a trivial asset into the workspace
+    ctx.write_file("foo.txt", b"hello from CLI");
+
+    let product = "cli_product";
+    let dlc_id = "cli_dlc";
+
+    // to keep the encrypt key consistent, first generate the license files
+    // using the CLI helper and then build the pack via the library so it uses
+    // the same key that is embedded in the license.
+    ctx.generate(product, &[dlc_id], None, false).success();
+
+    // pack a single file (foo.txt) using the library with the derived key
+    let items = bevy_dlc::pack_items![
+        "foo.txt" => b"hello from CLI".to_vec(); ext="txt"; type="examples::TextAsset",
+    ];
+
+    // create + write the pack into the tempdir
+    ctx.pack(product,dlc_id, Some(&items)).success();
+
+    // now run the `check` command against the current directory – the CLI
+    // should recursively discover `<product>.slicense`/`.pubkey` and succeed.
+    ctx.run_args(&["check", ctx.path().to_str().unwrap_or("<unknown>")]).success();
+}

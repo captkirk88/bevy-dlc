@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-use bevy_dlc::{EncryptedAsset, parse_encrypted_pack};
+use bevy_dlc::{EncryptedAsset, PackItem, parse_encrypted_pack};
 
 #[allow(unused)]
 pub mod prelude {
@@ -85,7 +85,7 @@ impl CliTestCtx {
         &self,
         product: &str,
         dlc_id: &str,
-        type_override: Option<&str>,
+        items: Option<&[PackItem]>,
     ) -> assert_cmd::assert::Assert {
         let out_pack = self.pack_path(dlc_id);
 
@@ -97,12 +97,24 @@ impl CliTestCtx {
             .arg("-o")
             .arg(&out_pack);
 
-        if let Some(t) = type_override {
-            cmd.arg("--types").arg(t);
+        if let Some(items) = items {
+            cmd.arg("--types");
+            for item in items.iter() {
+                if let (Some(ext), Some(type_path)) = (item.ext(), item.type_path()) {
+                    cmd.arg(format!("{}={}", ext, type_path));
+                }
+            }
+
+            for item in items.iter() {
+                // append each item path as a separate arg after `--` for files to pack
+                let item_path = item.path().to_string();
+                cmd.arg("--").arg(item_path);
+            }
+        } else {
+            // default to packing everything in the tempdir if no items specified
+            cmd.arg("--").arg(self.td.path());
         }
 
-        // pack the whole tempdir by default
-        cmd.arg("--").arg(self.td.path());
         cmd.assert()
     }
 
@@ -111,7 +123,7 @@ impl CliTestCtx {
         &self,
         product: &str,
         dlc_id: &str,
-        type_override: Option<&str>,
+        items: Option<&[PackItem]>,
     ) -> Result<
         (
             bevy_dlc::Product,
@@ -122,7 +134,7 @@ impl CliTestCtx {
         ),
         Box<dyn std::error::Error>,
     > {
-        self.pack(product, dlc_id, type_override).success();
+        self.pack(product, dlc_id, items).success();
         let file = std::fs::File::open(self.pack_path(dlc_id))?;
         let parsed = parse_encrypted_pack(&file)?;
         Ok(parsed)

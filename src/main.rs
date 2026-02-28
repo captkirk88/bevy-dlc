@@ -671,13 +671,29 @@ fn test_decrypt_archive_with_key_from_reader<R: std::io::Read>(
     key_bytes: &[u8],
     signature_verified: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (_prod, _did, _v, entries, _blocks) = parse_encrypted_pack(&mut reader)?;
+    // parse once so we know the version and block metadata; we'll reopen the
+    // file later if we need to read raw ciphertext for v4 packs.
+    let (_prod, _did, version, entries, blocks) = parse_encrypted_pack(&mut reader)?;
     if entries.is_empty() {
         println!("container has no entries");
         return Ok(());
     }
-    let archive_nonce = entries[0].1.nonce;
-    let archive_ciphertext = &entries[0].1.ciphertext;
+
+    // determine nonce/ciphertext depending on pack version
+    let (archive_nonce, archive_ciphertext) = if version == 4 && !blocks.is_empty() {
+        // v4 packs don't store per-entry ciphertext; use the first block
+        // metadata to load the actual encrypted bytes.
+        let b = &blocks[0];
+        let mut f = std::fs::File::open(dlc_pack_file)?;
+        use std::io::Seek;
+        f.seek(std::io::SeekFrom::Start(b.file_offset))?;
+        let mut buf = vec![0u8; b.encrypted_size as usize];
+        f.read_exact(&mut buf)?;
+        (b.nonce, buf)
+    } else {
+        // earlier versions (v1, v2, v3) use the entry's nonce/ciphertext
+        (entries[0].1.nonce, entries[0].1.ciphertext.as_ref().to_vec())
+    };
 
     let ek = bevy_dlc::EncryptionKey::from(key_bytes.to_vec());
     // replicate the current in-place decrypt logic so we don't rely on the
@@ -686,9 +702,7 @@ fn test_decrypt_archive_with_key_from_reader<R: std::io::Read>(
     use aes_gcm::aead::AeadInPlace;
     use secure_gate::ExposeSecret;
 
-    // we need to copy the ciphertext into a buffer that will be replaced in
-    // place with plaintext.
-    let mut buf = archive_ciphertext.as_ref().to_vec();
+    let mut buf = archive_ciphertext.clone();
     let _ = ek.with_secret(|key_bytes| {
         if key_bytes.len() != 32 {
             return Err("encrypt key must be 32 bytes".to_string());
