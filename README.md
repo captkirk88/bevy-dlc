@@ -101,6 +101,16 @@ Contributions are very welcome!  Please open an issue or submit a pull request w
 > [!NOTE]
 > If your PR affects the pack format or encryption logic, it will be reviewed with extra scrutiny to ensure it doesn't introduce any security issues.  Please include tests and consider backward compatibility.
 
+### Benchmarks
+Benchmarks are included in `benches/dlc_bench.rs` and can be run with:
+
+```bash
+cargo install cargo-criterion
+cargo criterion
+```
+
+See [reports/criterion/index.html](reports/criterion/index.html) for generated benchmark reports.
+
 ## License
 
 MIT

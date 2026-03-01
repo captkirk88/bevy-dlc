@@ -1,6 +1,6 @@
 [package]
 name = "bevy-dlc"
-version = "1.18.12"
+version = "1.18.13"
 edition = "2024"
 rust-version = "1.93"
 authors = ["Kirk <github.com/captkirk88>"]
@@ -10,7 +10,7 @@ readme = "README.md"
 repository = "https://github.com/captkirk88/bevy-dlc"
 categories = ["game-development"]
 keywords = ["bevy", "dlc"]
-exclude = ["tests/**", "examples/**", "example_keys/**", "benches/**", "assets/**", "scripts/**", "**/*.md", "*.png"]
+exclude = ["/tests/**", "/examples/**", "/example_keys/**", "/benches/**", "/assets/**", "/scripts/**", "**/*.md", "*.png", "/reports/"]
 
 [features]
 default = []

@@ -744,14 +744,7 @@ impl AssetLoader for DlcPackLoader {
 
         // Check for DLC ID conflicts: reject if a DIFFERENT pack file is being loaded for the same DLC ID.
         // Allow the same pack file to be loaded multiple times (e.g., when accessing labeled sub-assets).
-        let existing_path = crate::encrypt_key_registry::asset_path_for(dlc_id.as_ref());
-        if let Some(existing_path) = existing_path {
-            return Err(DlcLoaderError::DlcIdConflict(
-                dlc_id.to_string(),
-                existing_path.clone(),
-                path_string.clone(),
-            ));
-        }
+        check_dlc_id_conflict(&dlc_id, &path_string)?;
 
         // Register this asset path for the dlc id so it can be reloaded on unlock.
         // If the path already exists for this DLC ID, it's idempotent (same pack file).
@@ -935,6 +928,27 @@ impl AssetLoader for DlcPackLoader {
             out_entries,
         ))
     }
+}
+
+/// Internal helper used by `DlcPackLoader` to determine whether a
+/// pack for `dlc_id` from `path_string` should be accepted or rejected.
+/// Registry holds at most one path per DLC ID; conflict only arises when
+/// that path is different.  Loading the same pack file twice (same path) is
+/// normal and should not trigger an error.
+fn check_dlc_id_conflict(
+    dlc_id: &DlcId,
+    path_string: &str,
+) -> Result<(), DlcLoaderError> {
+    if let Some(existing_path) = crate::encrypt_key_registry::asset_path_for(dlc_id.as_ref()) {
+        if existing_path != path_string {
+            return Err(DlcLoaderError::DlcIdConflict(
+                dlc_id.to_string(),
+                existing_path,
+                path_string.to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Decrypt entries out of a `.dlcpack` container.
@@ -1209,6 +1223,34 @@ mod tests {
         );
 
         crate::encrypt_key_registry::clear_all();
+    }
+
+    #[test]
+    #[serial]
+    fn dlc_loader_conflict_helper_allows_same_path() {
+        crate::encrypt_key_registry::clear_all();
+        let dlc_id = crate::DlcId::from("foo");
+        let path = "same_pack.dlcpack";
+        crate::encrypt_key_registry::register_asset_path(dlc_id.as_ref(), path);
+        // helper should consider loading the same path to be fine
+        assert!(check_dlc_id_conflict(&dlc_id, path).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn dlc_loader_conflict_helper_rejects_different_path() {
+        crate::encrypt_key_registry::clear_all();
+        let dlc_id = crate::DlcId::from("foo");
+        crate::encrypt_key_registry::register_asset_path(dlc_id.as_ref(), "other.dlcpack");
+        let err = check_dlc_id_conflict(&dlc_id, "new.dlcpack").expect_err("should conflict");
+        match err {
+            DlcLoaderError::DlcIdConflict(id, orig, newp) => {
+                assert_eq!(id, dlc_id.to_string());
+                assert_eq!(orig, "other.dlcpack");
+                assert_eq!(newp, "new.dlcpack");
+            }
+            _ => panic!("expected DlcIdConflict"),
+        }
     }
 }
 

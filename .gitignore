@@ -11,3 +11,6 @@
 **/.**
 # files starting with a .
 **.**.*
+
+# Criterion data
+/reports/criterion/data
