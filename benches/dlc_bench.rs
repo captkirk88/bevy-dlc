@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use criterion::{Criterion, criterion_group, criterion_main};
 
 use bevy_dlc::{
@@ -78,23 +80,18 @@ fn bench_decrypt_all_entries(c: &mut Criterion) {
         pack_path.to_str().unwrap(),
     );
 
-    c.benchmark_group("decrypt")
-        .sample_size(10)
-        .warm_up_time(std::time::Duration::from_secs(1))
-        .measurement_time(std::time::Duration::from_secs(5))
-        .bench_function("decrypt_all", |b| {
-            b.iter(|| {
-                for (path, _enc) in &entries {
-                    let _ = pack.decrypt_entry(path).expect("decrypt entry");
-                }
-            });
+    c.bench_function("decrypt_all", |b| {
+        b.iter(|| {
+            for (path, _enc) in &entries {
+                let _ = pack.decrypt_entry(path).expect("decrypt entry");
+            }
         });
+    });
 }
 
 criterion_group!(
-    dlc_benches,
-    bench_pack,
-    bench_parse,
-    bench_decrypt_all_entries
+    name = dlc_benches;
+    config = Criterion::default().sample_size(10).warm_up_time(Duration::from_secs(1));
+    targets = bench_pack, bench_parse, bench_decrypt_all_entries
 );
 criterion_main!(dlc_benches);
