@@ -109,7 +109,7 @@ cargo install cargo-criterion
 cargo criterion
 ```
 
-See [reports/criterion/index.html](reports/criterion/index.html) for generated benchmark reports.
+See the generated reports in `reports/criterion` for results.
 
 ## License
 
