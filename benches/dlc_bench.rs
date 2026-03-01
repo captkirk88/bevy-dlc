@@ -1,4 +1,4 @@
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, SamplingMode, criterion_group, criterion_main};
 
 use bevy_dlc::{
     DlcId, DlcPack, EncryptionKey, PackItem, Product, pack_encrypted_pack, parse_encrypted_pack,
@@ -22,12 +22,12 @@ fn bench_pack(c: &mut Criterion) {
     let dlc_id = DlcId::from("bench");
     let key = EncryptionKey::from_random();
 
-    c.bench_function("pack_100_files", |b| {
-        b.iter(|| {
+    c.bench_function("pack_100_files_of_1MB", |b| {
+        b.iter_with_large_drop(|| {
             // each iteration re-packs the same data; the overhead of preparing
             // the items has already been paid above so the benchmark focuses on
             // the pack_encrypted_pack path.
-            let _ = pack_encrypted_pack(&dlc_id, &items, &product, &key).unwrap();
+            pack_encrypted_pack(&dlc_id, &items, &product, &key, bevy_dlc::DEFAULT_BLOCK_SIZE).unwrap()
         });
     });
 }
@@ -39,12 +39,11 @@ fn bench_parse(c: &mut Criterion) {
     let key = EncryptionKey::from_random();
 
     // pre-generate a pack so parsing can be isolated
-    let pack_bytes = pack_encrypted_pack(&dlc_id, &items, &product, &key).unwrap();
+    let pack_bytes = pack_encrypted_pack(&dlc_id, &items, &product, &key, bevy_dlc::DEFAULT_BLOCK_SIZE).unwrap();
 
-    c.bench_function("parse_100_files", |b| {
-        b.iter(|| {
-            let mut slice = &pack_bytes[..];
-            let _ = parse_encrypted_pack(&mut slice).unwrap();
+    c.bench_function("parse_100_files_of_1MB", |b| {
+        b.iter_with_large_drop(|| {
+            parse_encrypted_pack(&mut &pack_bytes[..]).unwrap()
         });
     });
 }
@@ -55,7 +54,7 @@ fn bench_decrypt_all_entries(c: &mut Criterion) {
     let product = Product::from("bench");
     let dlc_id = DlcId::from("bench");
     let key = EncryptionKey::from_random();
-    let pack_bytes = pack_encrypted_pack(&dlc_id, &items, &product, &key).unwrap();
+    let pack_bytes = pack_encrypted_pack(&dlc_id, &items, &product, &key, bevy_dlc::DEFAULT_BLOCK_SIZE).unwrap();
 
     let (prod2, id2, version, entries, _blocks) =
         parse_encrypted_pack(&mut &pack_bytes[..]).expect("parse");
@@ -79,6 +78,7 @@ fn bench_decrypt_all_entries(c: &mut Criterion) {
     );
 
     c.benchmark_group("decrypt")
+        .sampling_mode(SamplingMode::Flat)
         .bench_function("decrypt_all", |b| {
             b.iter_with_large_drop(|| {
                 let mut combined = Vec::new();

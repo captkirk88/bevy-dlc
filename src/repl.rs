@@ -765,7 +765,7 @@ fn save_pack_optimized(
     }
 
     // 3. Re-pack using latest format
-    let bytes = bevy_dlc::pack_encrypted_pack(dlc_id, &items, product, ek)
+    let bytes = bevy_dlc::pack_encrypted_pack(dlc_id, &items, product, ek, bevy_dlc::DEFAULT_BLOCK_SIZE)
         .map_err(|e: bevy_dlc::DlcError| e.to_string())?;
     std::fs::write(path, bytes)?;
 
@@ -1034,6 +1034,7 @@ mod tests {
             &[item1],
             &product,
             &enc_key,
+            bevy_dlc::DEFAULT_BLOCK_SIZE
         )
         .unwrap();
 
@@ -1043,6 +1044,7 @@ mod tests {
             &[item2],
             &product,
             &enc_key,
+            bevy_dlc::DEFAULT_BLOCK_SIZE
         )
         .unwrap();
 
@@ -1243,6 +1245,7 @@ mod tests {
             &[item],
             &product,
             &enc_key,
+            bevy_dlc::DEFAULT_BLOCK_SIZE
         )
         .unwrap();
 
@@ -1329,7 +1332,7 @@ mod tests {
         let item1 = PackItem::new("a.txt", b"one".to_vec()).unwrap();
         let item2 = PackItem::new("b.txt", b"two".to_vec()).unwrap();
         let bytes =
-            pack_encrypted_pack(&id, &[item1, item2], &product, &enc_key).unwrap();
+            pack_encrypted_pack(&id, &[item1, item2], &product, &enc_key, bevy_dlc::DEFAULT_BLOCK_SIZE).unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("pack.dlcpack");
         std::fs::write(&path, &bytes).unwrap();
@@ -1408,6 +1411,7 @@ mod tests {
             &[item],
             &product,
             &enc_key,
+            bevy_dlc::DEFAULT_BLOCK_SIZE
         )
         .unwrap();
 
@@ -1440,6 +1444,7 @@ mod tests {
             &[item],
             &product,
             &enc_key,
+            bevy_dlc::DEFAULT_BLOCK_SIZE
         )
         .unwrap();
         std::fs::write(&pack_path, &bytes).unwrap();
@@ -1475,6 +1480,7 @@ mod tests {
             &[item_a],
             &product,
             &enc_key,
+            bevy_dlc::DEFAULT_BLOCK_SIZE
         )
         .unwrap();
         let item_b = PackItem::new("b.txt", b"bar".to_vec()).unwrap();
@@ -1483,6 +1489,7 @@ mod tests {
             &[item_b],
             &product,
             &enc_key,
+            bevy_dlc::DEFAULT_BLOCK_SIZE
         )
         .unwrap();
 
@@ -1645,6 +1652,7 @@ mod tests {
             &[item],
             &product,
             &enc_key,
+            bevy_dlc::DEFAULT_BLOCK_SIZE
         )
         .unwrap();
         std::fs::write(&pack_path, &bytes).unwrap();

@@ -265,15 +265,10 @@ impl<R: std::io::Read> PackReader<R> {
 
     pub fn read_string_u16(&mut self) -> std::io::Result<String> {
         let len = self.read_u16()? as usize;
-        self.read_string_internal(len)
+        self.read_string(len)
     }
 
-    pub fn read_string_u8(&mut self) -> std::io::Result<String> {
-        let len = self.read_u8()? as usize;
-        self.read_string_internal(len)
-    }
-
-    fn read_string_internal(&mut self, len: usize) -> std::io::Result<String> {
+    pub fn read_string(&mut self, len: usize) -> std::io::Result<String> {
         let bytes = self.read_bytes(len)?;
         // Avoid allocation for UTF-8 validation by using from_utf8_lossy internally,
         // but preserve error semantics for actual validation
@@ -289,6 +284,7 @@ impl<R: std::io::Read> PackReader<R> {
 }
 
 // additional helpers available when the inner reader also implements `Seek`
+#[allow(unused)]
 impl<R: std::io::Read + std::io::Seek> PackReader<R> {
     /// Seek the underlying reader to `pos` and return the new position.
     pub fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
@@ -477,8 +473,8 @@ impl From<CompressionLevel> for flate2::Compression {
     }
 }
 
-/// Pack multiple entries into a v4 hybrid format `.dlcpack` container.
-pub fn pack_encrypted_pack_v4(
+/// Pack multiple entries into a single encrypted `.dlcpack` binary using the latest version format.  This is the main entry point for pack creation and is used by the CLI tool; it can also be used by other tools that want to generate packs programmatically.
+pub fn pack_encrypted_pack(
     dlc_id: &DlcId,
     items: &[PackItem],
     product: &Product,
@@ -630,6 +626,8 @@ pub fn pack_encrypted_pack_v4(
     Ok(out)
 }
 
+pub type Version = usize;
+
 /// Returns: (product, dlc_id, version, entries)
 pub fn parse_encrypted_pack<R: std::io::Read>(
     reader: R,
@@ -637,7 +635,7 @@ pub fn parse_encrypted_pack<R: std::io::Read>(
     (
         Product,
         DlcId,
-        usize,
+        Version,
         Vec<(String, crate::asset_loader::EncryptedAsset)>,
         Vec<BlockMetadata>,
     ),
@@ -649,44 +647,11 @@ pub fn parse_encrypted_pack<R: std::io::Read>(
     let header = PackHeader::read(&mut reader)?;
     let mut block_metadatas = Vec::new();
 
-    let entries = if header.version == 1 {
-        // legacy v1 format: each entry has its own metadata and ciphertext
-        let entry_count = reader.read_u16()? as usize;
-        let mut out = Vec::with_capacity(entry_count);
-        for _ in 0..entry_count {
-            let path = reader.read_string_u16()?;
-            let original_extension = reader.read_string_u8()?;
-            
-            // v1: optional type_path
-            let tlen = reader.read_u16()? as usize;
-            let type_path = if tlen == 0 {
-                None
-            } else {
-                let bytes = reader.read_bytes(tlen)?;
-                let s = String::from_utf8(bytes)
-                    .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
-                Some(s)
-            };
-
-            let nonce = reader.read_nonce()?;
-            let ciphertext_len = reader.read_u32()? as usize;
-            let ciphertext = reader.read_bytes(ciphertext_len)?.into();
-
-            out.push((
-                path,
-                crate::asset_loader::EncryptedAsset {
-                    dlc_id: header.dlc_id.clone(),
-                    original_extension,
-                    type_path,
-                    nonce,
-                    ciphertext,
-                    block_id: 0,
-                    block_offset: 0,
-                    size: 0,
-                },
-            ));
-        }
-        out
+    let entries = if header.version < DLC_PACK_VERSION_LATEST {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            format!("unsupported pack version: {}", header.version),
+        ));
     } else if header.version == 4 {
         // version 4: hybrid multi-block format
         let manifest_count = reader.read_u32()? as usize;
@@ -756,22 +721,6 @@ pub fn parse_encrypted_pack<R: std::io::Read>(
         entries,
         block_metadatas,
     ))
-}
-
-/// Pack multiple entries into a single `.dlcpack` container.
-///
-/// Arguments:
-/// - `dlc_id`: the [DlcId] this pack belongs to (used for registry lookup and validation)
-/// - `items`: a list of [PackItem]s containing the plaintext data to be packed
-/// - `product`: the [Product] identifier to bind the pack to
-/// - `key`: the symmetric encryption key used to encrypt the pack contents (must be 32 bytes for AES-256)
-pub fn pack_encrypted_pack(
-    dlc_id: &DlcId,
-    items: &[PackItem],
-    product: &Product,
-    key: &EncryptionKey,
-) -> Result<Vec<u8>, DlcError> {
-    pack_encrypted_pack_v4(dlc_id, items, product, key, DEFAULT_BLOCK_SIZE)
 }
 
 #[cfg(test)]

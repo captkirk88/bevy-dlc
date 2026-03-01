@@ -937,6 +937,7 @@ async fn pack_command(
         &items,
         &Product::from(product.clone()),
         &encrypt_key,
+        bevy_dlc::DEFAULT_BLOCK_SIZE
     )?;
 
     handle_license_output(

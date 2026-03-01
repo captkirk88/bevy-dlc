@@ -58,6 +58,19 @@ pub fn get_full(dlc_id: &str) -> Option<DlcEntry> {
     })
 }
 
+pub fn get_from_path(path: &str) -> Option<DlcEntry> {
+    REGISTRY.iter().find_map(|v| {
+        if v.value().path.as_deref() == Some(path) {
+            v.value().key.as_ref().map(|k| DlcEntry {
+                key: k.with_secret(|b| EncryptionKey::new(*b)),
+                path: v.value().path.clone(),
+            })
+        } else {
+            None
+        }
+    })
+}
+
 /// Register an asset path for a given `dlc_id`. Each DLC ID can only have
 /// ONE associated pack file. This enforces the design constraint that each
 /// DLC release is shipped as a single .dlcpack.

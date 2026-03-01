@@ -795,8 +795,8 @@ impl AssetLoader for DlcPackLoader {
         // is missing we still populate the manifest so callers can inspect
         // entries; a reload after unlock will add the typed sub-assets.
         let decrypted_items = {
-            match decrypt_pack_entries(sync_reader) {
-                Ok::<(DlcId, Vec<PackItem>), DlcLoaderError>((_id, items)) => Some(items),
+            match decrypt_pack_entries(&dlc_id, &manifest_entries, &_block_metadatas, sync_reader) {
+                Ok(items) => Some(items),
                 Err(DlcLoaderError::DlcLocked(_)) => None,
                 Err(e) => return Err(e),
             }
@@ -983,34 +983,16 @@ fn check_dlc_id_conflict(dlc_id: &DlcId, path_string: &str) -> Result<(), DlcLoa
     Ok(())
 }
 
-/// Decrypt entries out of a `.dlcpack` container.
-/// Returns `(dlc_id, Vec<(path, original_extension, plaintext)>)`.
-/// Decrypt entries out of a `.dlcpack` container.
-///
-/// This no-longer requires keeping the entire file in memory; the caller
-/// provides a `Read+Seek` reader.  Only the current v4 hybrid format is
-/// supported, earlier versions have been removed along with their legacy
-/// semantics.
-///
-/// Returns `(dlc_id, Vec<(path, original_extension, plaintext)>)`.
+/// Decrypt all entries in a pack using the block-based decryption method. This is used by `DlcPackLoader` when the encrypt key is available at load time, and also by `DlcPackEntry::decrypt_bytes` for individual entries when accessed via `pack.dlcpack#entry`.
 fn decrypt_pack_entries<R: std::io::Read + std::io::Seek>(
-    mut reader: R,
-) -> Result<(crate::DlcId, Vec<crate::PackItem>), DlcLoaderError> {
-    let (_product, dlc_id, version, entries, block_metadatas) =
-        crate::parse_encrypted_pack(&mut reader)
-            .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
-
+    dlc_id: &crate::DlcId,
+    entries: &[(String, EncryptedAsset)],
+    block_metadatas: &[crate::pack_format::BlockMetadata],
+    reader: R,
+) -> Result<Vec<crate::PackItem>, DlcLoaderError> {
     // lookup encrypt key in global registry
     let encrypt_key = crate::encrypt_key_registry::get(dlc_id.as_ref())
         .ok_or_else(|| DlcLoaderError::DlcLocked(dlc_id.to_string()))?;
-
-    // only v4 is supported anymore
-    if version != 4 {
-        return Err(DlcLoaderError::InvalidFormat(format!(
-            "unsupported pack version: {}",
-            version
-        )));
-    }
 
     let mut extracted_all = std::collections::HashMap::new();
     // use reader in a PackReader for convenience
@@ -1040,7 +1022,7 @@ fn decrypt_pack_entries<R: std::io::Read + std::io::Seek>(
         let normalized = path.replace("\\", "/");
         let plaintext = extracted_all
             .remove(&normalized)
-            .or_else(|| extracted_all.remove(&path))
+            .or_else(|| extracted_all.remove(path.as_str()))
             .ok_or_else(|| {
                 DlcLoaderError::DecryptionFailed(format!("entry {} not found in any block", path))
             })?;
@@ -1049,16 +1031,16 @@ fn decrypt_pack_entries<R: std::io::Read + std::io::Seek>(
             .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
         if !enc.original_extension.is_empty() {
             item = item
-                .with_extension(enc.original_extension)
+                .with_extension(enc.original_extension.clone())
                 .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
         }
-        if let Some(tp) = enc.type_path {
-            item = item.with_type_path(tp);
+        if let Some(tp) = &enc.type_path {
+            item = item.with_type_path(tp.clone());
         }
         out.push(item);
     }
 
-    Ok((dlc_id, out))
+    Ok(out)
 }
 
 #[derive(Error, Debug)]
@@ -1167,17 +1149,26 @@ mod tests {
 
     #[test]
     #[serial]
-    fn decrypt_pack_entries_without_key_returns_locked_error() {
+    fn decrypt_pack_entries_v4_without_key_returns_locked_error() {
         crate::encrypt_key_registry::clear_all();
         let dlc_id = crate::DlcId::from("locked_dlc");
         let items = vec![PackItem::new("a.txt", b"hello".to_vec()).expect("pack item")];
         let key = EncryptionKey::from_random();
         let _dlc_key = crate::DlcKey::generate_random();
         let product = crate::Product::from("test");
-        let container = crate::pack_encrypted_pack(&dlc_id, &items, &product, &key).expect("pack");
+        let container = crate::pack_encrypted_pack(&dlc_id, &items, &product, &key, crate::pack_format::DEFAULT_BLOCK_SIZE).expect("pack");
 
-        let err =
-            decrypt_pack_entries(std::io::Cursor::new(container)).expect_err("should be locked");
+        let mut cursor = std::io::Cursor::new(container);
+        let (_product, parsed_dlc_id, _version, parsed_entries, block_metadatas) =
+            crate::parse_encrypted_pack(&mut cursor).expect("parse");
+
+        let err = decrypt_pack_entries(
+            &parsed_dlc_id,
+            &parsed_entries,
+            &block_metadatas,
+            cursor,
+        )
+        .expect_err("should be locked");
         match err {
             DlcLoaderError::DlcLocked(id) => assert_eq!(id, "locked_dlc"),
             _ => panic!("expected DlcLocked error, got {:?}", err),
@@ -1186,7 +1177,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn decrypt_pack_entries_with_wrong_key_reports_entry_and_dlc() {
+    fn decrypt_pack_entries_v4_with_wrong_key_reports_entry_and_dlc() {
         crate::encrypt_key_registry::clear_all();
         let dlc_id = crate::DlcId::from("badkey_dlc");
         let items = vec![PackItem::new("b.txt", b"world".to_vec()).expect("pack item")];
@@ -1194,7 +1185,7 @@ mod tests {
         let _dlc_key = crate::DlcKey::generate_random();
         let product = crate::Product::from("test");
         let container =
-            crate::pack_encrypted_pack(&dlc_id, &items, &product, &real_key).expect("pack");
+            crate::pack_encrypted_pack(&dlc_id, &items, &product, &real_key, crate::pack_format::DEFAULT_BLOCK_SIZE).expect("pack");
 
         // insert an incorrect key for this DLC
         let wrong_key: [u8; 32] = rand::random();
@@ -1203,8 +1194,17 @@ mod tests {
             crate::EncryptionKey::from(wrong_key),
         );
 
-        let err = decrypt_pack_entries(std::io::Cursor::new(container))
-            .expect_err("should fail decryption");
+        let mut cursor = std::io::Cursor::new(container);
+        let (_product, parsed_dlc_id, _version, parsed_entries, block_metadatas) =
+            crate::parse_encrypted_pack(&mut cursor).expect("parse");
+
+        let err = decrypt_pack_entries(
+            &parsed_dlc_id,
+            &parsed_entries,
+            &block_metadatas,
+            cursor,
+        )
+        .expect_err("should fail decryption");
         match err {
             DlcLoaderError::DecryptionFailed(msg) => {
                 assert!(msg.contains("dlc='badkey_dlc'"));

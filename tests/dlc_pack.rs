@@ -81,6 +81,7 @@ fn dlcpack_runtime_loads_but_locked_without_key() {
         &items,
         &product,
         &enc_key,
+        bevy_dlc::DEFAULT_BLOCK_SIZE
     )
     .expect("pack_encrypted_pack");
 

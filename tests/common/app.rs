@@ -96,7 +96,7 @@ impl TestAppBuilder {
             dlc_key: self.dlc_key,
             product: Product::from(self.product),
             dlc_ids: self.dlc_ids,
-            signed_license: signed_license_for_testapp,
+            initial_signed_license: signed_license_for_testapp,
             asset_dir: self.temp_dir,
         };
         app.init();
@@ -114,7 +114,7 @@ pub struct TestApp {
     pub dlc_ids: Vec<String>,
     /// The signed license supplied at construction — use this when creating
     /// packs so the embedded `encrypt_key` matches the runtime registry.
-    signed_license: SignedLicense,
+    initial_signed_license: SignedLicense,
     // isolated asset folder used by AssetServer
     asset_dir: TempDir,
 }
@@ -156,13 +156,17 @@ impl TestApp {
 
     /// Recreate a `SignedLicense` that matches the current TestApp state.
     /// Useful when tests need to pass a token to CLI/validation helpers.
+    /// Return the original signed license that was provided to the plugin
+    /// during app construction.  This license contains the encryption key that
+    /// is stored in the global registry; using it ensures any packs we create
+    /// later will be encrypted with the same key.  The returned value is a
+    /// clone of the internal copy so callers may mutate or re-serialize it
+    /// without affecting the app state.
     pub fn signed_license(&self) -> SignedLicense {
-        self.dlc_key
-            .create_signed_license(
-                self.dlc_ids.iter().map(|s| s.as_str()),
-                self.product.clone(),
-            )
-            .expect("create signed license")
+        // rebuild a copy from the stored token string so callers receive a
+        // fresh `SignedLicense`.  This mirrors what we did in
+        // `TestAppBuilder::build` when constructing the field.
+        SignedLicense::from(self.initial_signed_license.expose_secret().as_str())
     }
 
     /// Path to the app's temporary asset folder
@@ -353,7 +357,7 @@ impl TestApp {
             .expect("create pack item")
             .with_extension(original_ext.unwrap_or_default())
             .expect("valid extension");
-        // derive encryption key and pack same as before
+        // derive encryption key from the original license stored in the app
         let signed: SignedLicense = self.signed_license();
         let enc_key =
             bevy_dlc::extract_encrypt_key_from_license(&signed).expect("encrypt_key in license");
@@ -363,6 +367,7 @@ impl TestApp {
             &[item],
             &self.product,
             &enc_key,
+            bevy_dlc::DEFAULT_BLOCK_SIZE
         )
         .expect("pack_encrypted_pack");
 
@@ -375,7 +380,7 @@ impl TestApp {
 
     /// Original helper maintaining previous signature (items list)
     pub fn pack_and_load(&mut self, dlc_id: &str, items: &[PackItem]) -> Handle<bevy_dlc::DlcPack> {
-        // derive the encryption key embedded in the signed license
+        // derive the encryption key embedded in the original signed license
         let signed: SignedLicense = self.signed_license();
         let enc_key: EncryptionKey =
             bevy_dlc::extract_encrypt_key_from_license(&signed).expect("encrypt_key in license");
@@ -385,6 +390,7 @@ impl TestApp {
             items,
             &self.product,
             &enc_key,
+            bevy_dlc::DEFAULT_BLOCK_SIZE
         )
         .expect("pack_encrypted_pack");
 
