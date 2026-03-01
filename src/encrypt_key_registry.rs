@@ -2,7 +2,7 @@
 //! associated with which DLC id, and which asset paths are associated with which DLC id
 //! so that they can be reloaded when the DLC is unlocked.
 
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 use crate::EncryptionKey;
 use dashmap::DashMap;
@@ -15,7 +15,7 @@ struct DlcRegistration {
     path: Option<String>,
 }
 
-static REGISTRY: LazyLock<Arc<DashMap<String, DlcRegistration>>> = LazyLock::new(|| Arc::new(DashMap::new()));
+static REGISTRY: LazyLock<DashMap<String, DlcRegistration>> = LazyLock::new(|| DashMap::new());
 
 /// Insert or replace the encrypt key for `dlc_id`.
 pub fn insert(dlc_id: &str, key: EncryptionKey) {
@@ -69,6 +69,11 @@ pub fn register_asset_path(dlc_id: &str, path: &str) {
             key: None,
             path: Some(path.to_owned()),
         });
+}
+
+/// Helper for systems to see all registered DLC IDs.
+pub fn iter_ids() -> impl Iterator<Item = String> {
+    REGISTRY.iter().map(|r| r.key().clone())
 }
 
 /// Return the registered asset path for a given `dlc_id`. This is used by the asset loader to determine if a DLC pack file has already been registered for a given DLC ID, which allows it to avoid registering/loading the same pack multiple times. Returns Some(path) if a path is registered, None otherwise.

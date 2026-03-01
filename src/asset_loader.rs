@@ -478,6 +478,11 @@ impl DlcPackEntry {
         bevy::asset::AssetPath::parse(&self.path)
     }
 
+    /// Get the raw entry path (relative path within the pack, without pack prefix)
+    pub fn entry_path(&self) -> &str {
+        &self.path
+    }
+
     pub fn original_extension(&self) -> &String {
         &self.encrypted.original_extension
     }
@@ -495,7 +500,10 @@ impl From<(String, EncryptedAsset)> for DlcPackEntry {
 
 impl From<&(String, EncryptedAsset)> for DlcPackEntry {
     fn from((path, encrypted): &(String, EncryptedAsset)) -> Self {
-        DlcPackEntry { path: path.clone(), encrypted: encrypted.clone() }
+        DlcPackEntry {
+            path: path.clone(),
+            encrypted: encrypted.clone(),
+        }
     }
 }
 
@@ -506,6 +514,9 @@ pub struct DlcPack {
     product: Product,
     version: u8,
     entries: Vec<DlcPackEntry>,
+
+    /// The file path from which this pack was loaded (for registry purposes)
+    pack_path: String,
 }
 
 impl DlcPack {
@@ -515,7 +526,13 @@ impl DlcPack {
             product,
             version,
             entries,
+            pack_path: String::new(),
         }
+    }
+
+    /// Get the pack file path
+    pub fn pack_path(&self) -> &str {
+        &self.pack_path
     }
 
     /// Return the DLC identifier for this pack.
@@ -575,12 +592,32 @@ impl DlcPack {
         &self,
         asset_server: &bevy::prelude::AssetServer,
         entry_path: &str,
-    ) -> Option<Handle<A>> {
+    ) -> Handle<A> {
         let entry = match self.find_entry(entry_path) {
             Some(e) => e,
-            None => return None,
+            None => panic!("entry not found: {}", entry_path),
         };
-        Some(asset_server.load::<A>(entry.path()))
+        asset_server.load::<A>(entry.path())
+    }
+
+    fn with_path(&self, path_string: String) -> DlcPack {
+        DlcPack {
+            dlc_id: self.dlc_id.clone(),
+            product: self.product.clone(),
+            version: self.version,
+            entries: self.entries.clone(),
+            pack_path: path_string,
+        }
+    }
+}
+
+/// Settings for `DlcPackLoader` that control asset registration behavior.
+#[derive(Clone, TypePath, serde::Serialize, serde::Deserialize)]
+pub struct DlcPackLoaderSettings {}
+
+impl Default for DlcPackLoaderSettings {
+    fn default() -> Self {
+        DlcPackLoaderSettings {}
     }
 }
 
@@ -708,7 +745,7 @@ pub(crate) fn collect_pack_registrars(
 
 impl AssetLoader for DlcPackLoader {
     type Asset = DlcPack;
-    type Settings = ();
+    type Settings = DlcPackLoaderSettings;
     type Error = DlcLoaderError;
 
     fn extensions(&self) -> &[&str] {
@@ -921,12 +958,10 @@ impl AssetLoader for DlcPackLoader {
             );
         }
 
-        Ok(DlcPack::new(
-            dlc_id.clone(),
-            product,
-            version as u8,
-            out_entries,
-        ))
+        Ok(
+            DlcPack::new(dlc_id.clone(), product, version as u8, out_entries)
+                .with_path(path_string),
+        )
     }
 }
 
@@ -935,10 +970,7 @@ impl AssetLoader for DlcPackLoader {
 /// Registry holds at most one path per DLC ID; conflict only arises when
 /// that path is different.  Loading the same pack file twice (same path) is
 /// normal and should not trigger an error.
-fn check_dlc_id_conflict(
-    dlc_id: &DlcId,
-    path_string: &str,
-) -> Result<(), DlcLoaderError> {
+fn check_dlc_id_conflict(dlc_id: &DlcId, path_string: &str) -> Result<(), DlcLoaderError> {
     if let Some(existing_path) = crate::encrypt_key_registry::asset_path_for(dlc_id.as_ref()) {
         if existing_path != path_string {
             return Err(DlcLoaderError::DlcIdConflict(
@@ -961,7 +993,7 @@ fn check_dlc_id_conflict(
 /// semantics.
 ///
 /// Returns `(dlc_id, Vec<(path, original_extension, plaintext)>)`.
-pub fn decrypt_pack_entries<R: std::io::Read + std::io::Seek>(
+fn decrypt_pack_entries<R: std::io::Read + std::io::Seek>(
     mut reader: R,
 ) -> Result<(crate::DlcId, Vec<crate::PackItem>), DlcLoaderError> {
     let (_product, dlc_id, version, entries, block_metadatas) =
@@ -1073,9 +1105,7 @@ mod tests {
         let key = EncryptionKey::from_random();
 
         crate::encrypt_key_registry::clear_all();
-        crate::encrypt_key_registry::insert(dlc_id, key.with_secret(|k| {
-            EncryptionKey::from(*k)
-        }));
+        crate::encrypt_key_registry::insert(dlc_id, key.with_secret(|k| EncryptionKey::from(*k)));
 
         // build a small standalone encrypted blob using PackWriter
         let nonce = [0u8; 12];
@@ -1293,7 +1323,9 @@ where
                 DlcLoaderError::DecryptionFailed(msg) => DlcLoaderError::DecryptionFailed(format!(
                     "dlc='{}' path='{}' {}",
                     enc.dlc_id,
-                    path_string.clone().unwrap_or_else(|| "<unknown>".to_string()),
+                    path_string
+                        .clone()
+                        .unwrap_or_else(|| "<unknown>".to_string()),
                     msg,
                 )),
                 other => other,

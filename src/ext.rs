@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use crate::{DlcLoader, asset_loader};
 
 pub trait AppExt {
-    /// Register a `DlcLoader` for the given asset type `T`. This is required for any asset type
+     /// Register a `DlcLoader` for the given asset type `T`. This is required for any asset type
     /// that may be loaded from a DLC pack. The plugin registers loaders for common asset types
     /// (Image, Scene, Mesh, Font, AudioSource, etc.) but you must register loaders for any custom
     /// asset types.

@@ -24,7 +24,7 @@ fn main() -> AppExit {
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
         "example_license"
     );
-    
+
     let dlc_key = DlcKey::public(include_str!("../example_keys/example.pubkey"))
         .expect("invalid example pubkey");
 
@@ -64,14 +64,11 @@ fn on_dlc_pack_loaded(
     asset_server: Res<AssetServer>,
     mut commands: Commands,
 ) {
-    let pack = event.pack();
+    // This system demonstrates how to access the loaded pack and its entries when a DLC pack is loaded. You can use this approach to trigger any custom logic you want when a pack is loaded, such as spawning entities based on the contents of the pack, or performing additional asset loading/processing.
+    let img = event.pack().load(&asset_server, "dlc.png");
+    commands.spawn(Sprite::from_image(img));
 
-    for entry in pack.find_by_type::<Image>() {
-        let img: Handle<Image> = asset_server.load(entry.path());
-        commands.spawn(Sprite::from_image(img));
-    }
-
-    for entry in pack.find_by_type::<TextAsset>() {
+    for entry in event.pack().find_by_type::<TextAsset>() {
         let text_asset: Handle<TextAsset> = asset_server.load(entry.path());
         commands.spawn(DlcAText(text_asset));
     }
