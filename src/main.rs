@@ -449,10 +449,10 @@ fn derive_encrypt_key(
         ) {
             enc_key
         } else {
-            EncryptionKey::from_random(32)
+            EncryptionKey::from_random()
         }
     } else {
-        EncryptionKey::from_random(32)
+        EncryptionKey::from_random()
     })
 }
 
@@ -695,7 +695,7 @@ fn test_decrypt_archive_with_key_from_reader<R: std::io::Read>(
         (entries[0].1.nonce, entries[0].1.ciphertext.as_ref().to_vec())
     };
 
-    let ek = bevy_dlc::EncryptionKey::from(key_bytes.to_vec());
+    let ek = bevy_dlc::EncryptionKey::new(key_bytes.try_into().map_err(|_| "encryption key must be 32 bytes")?);
     // replicate the current in-place decrypt logic so we don't rely on the
     // pack_format module being public.
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
@@ -704,9 +704,6 @@ fn test_decrypt_archive_with_key_from_reader<R: std::io::Read>(
 
     let mut buf = archive_ciphertext.clone();
     let _ = ek.with_secret(|key_bytes| {
-        if key_bytes.len() != 32 {
-            return Err("encrypt key must be 32 bytes".to_string());
-        }
         let cipher = Aes256Gcm::new_from_slice(key_bytes).map_err(|e| e.to_string())?;
         let nonce = Nonce::from_slice(&archive_nonce);
         cipher
@@ -1233,7 +1230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // optionally emit a random 32-byte AES key (base64url)
             if aes_key {
                 if !cli.dry_run {
-                    let ek = EncryptionKey::from_random(32);
+                    let ek = EncryptionKey::from_random();
                     ek.with_secret(|kb| {
                         println!(
                             "{} {}",
@@ -1292,7 +1289,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 None
             }
-            .map(|k| EncryptionKey::from(k));
+            .map(|k| {
+                let k = match k.try_into() {
+                    Ok(arr) => arr,
+                    Err(_) => panic!("encryption key must be 32 bytes"),
+                };
+                EncryptionKey::new(k)
+            });
 
             // pass along any trailing arguments as a one-shot command
             let initial = if command.is_empty() {

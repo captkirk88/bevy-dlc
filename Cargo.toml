@@ -31,7 +31,7 @@ dashmap = "6.1"
 zeroize = "1.8"
 ring = "0.17"
 secure-gate = { version = "0.7.0-rc.14", features = ["secure", "rand", "cloneable", "ct-eq"] }
-byte-aes = "0.2.2"
+byte-aes = "0.2"
 owo-colors = "4.3"
 infer = "0.19"
 crc32fast = "1.5"
@@ -45,9 +45,12 @@ serial_test = "3.4"
 bevy_common_assets = { version = "0.15.0", features = ["json"] }
 bevy_cursor_kit = { version = "0.8.0", features = ["serde"] }
 tempfile = "3.26"
-criterion = "0.8"
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [profile.dev]
+incremental = false
+
+[profile.dev.package."*"]
 incremental = false
 
 [profile.release]
@@ -61,10 +64,6 @@ panic = 'abort'
 opt-level = "z"
 strip = "symbols"
 codegen-units = 1
-
-[[example]]
-name = "real"
-path = "examples/real/main.rs"
 
 [[bench]]
 name = "dlc_bench"

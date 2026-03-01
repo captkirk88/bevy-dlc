@@ -110,8 +110,19 @@ pub(crate) fn decrypt_pack_entry_block_bytes<R: std::io::Read + std::io::Seek>(
             DlcLoaderError::DecryptionFailed(format!("block {} not found in pack", enc.block_id))
         })?;
 
-    // 2. Decrypt
-    let pt_gz = crate::pack_format::decrypt_with_key(&key, reader, &block.nonce)
+    // 2. Decrypt only the bytes corresponding to the desired block.  The
+    // pack format writes all blocks concatenated after the metadata, and
+    // `parse_encrypted_pack` leaves the reader positioned at the start of the
+    // ciphertext region.  We still seek explicitly to the recorded offset to
+    // be robust and to support callers that may have moved the reader.
+    reader
+        .seek(std::io::SeekFrom::Start(block.file_offset))
+        .map_err(|e| DlcLoaderError::Io(e))?;
+
+    // limit the reader to the block size so `decrypt_with_key` doesn't read
+    // past the boundary when multiple blocks exist.
+    let mut limited = reader.take(block.encrypted_size as u64);
+    let pt_gz = crate::pack_format::decrypt_with_key(&key, &mut limited, &block.nonce)
         .map_err(|e| DlcLoaderError::DecryptionFailed(e.to_string()))?;
 
     // 3. Decompress and find entry
@@ -276,17 +287,26 @@ pub struct EncryptedAsset {
     pub size: u32,
 }
 
-/// Parse the binary encrypted-asset container.
-///
-/// The old single-asset format used a `BDLC` magic header, but that format has
-/// been deprecated.  This parser no longer enforces a specific magic string and
-/// simply assumes the serialized fields follow the documented layout.
-///
-/// Returns metadata (dlc id, original extension, optional `type_path`) plus
-/// the ciphertext — no decryption is performed here.
-///
-/// Layout: version(1) | dlc_len(u16) | dlc_id | ext_len(u8) | ext |
-///         type_len(u16) | type_path | nonce(12) | ciphertext
+impl EncryptedAsset {
+    /// Decrypt the ciphertext contained in this `EncryptedAsset`, using the
+    /// global encryption-key registry to look up the correct key for
+    /// `self.dlc_id`.
+    pub(crate) fn decrypt_bytes(&self) -> Result<Vec<u8>, DlcLoaderError> {
+        // lookup key
+        let encrypt_key = crate::encrypt_key_registry::get(&self.dlc_id)
+            .ok_or_else(|| DlcLoaderError::DlcLocked(self.dlc_id.clone()))?;
+
+        // decrypt using the pack-format helper
+        crate::pack_format::decrypt_with_key(
+            &encrypt_key,
+            std::io::Cursor::new(&*self.ciphertext),
+            &self.nonce,
+        )
+        .map_err(|e| DlcLoaderError::DecryptionFailed(e.to_string()))
+    }
+}
+
+/// Parse the binary encrypted-asset format from a byte slice. This is used by the pack loader when parsing the pack metadata, and also by the `DlcLoader` when decrypting individual entries (since the entry metadata is stored in the same format as a standalone encrypted file).
 pub fn parse_encrypted(bytes: &[u8]) -> Result<EncryptedAsset, io::Error> {
     // make sure we can read the fixed-size header fields without panicking:
     // version (1 byte) + dlc_len (2 bytes) + ext_len (1 byte) + nonce (12 bytes)
@@ -446,17 +466,12 @@ impl DlcPackEntry {
             DlcLoaderError::DecryptionFailed(format!("failed to open pack file: {}", e))
         })?;
 
-        let plaintext = crate::asset_loader::decrypt_pack_entry_block_bytes(
+        crate::asset_loader::decrypt_pack_entry_block_bytes(
             &mut file,
             &self.encrypted,
             &encrypt_key,
             &self.path,
         )
-        .map_err(|e| {
-            DlcLoaderError::DecryptionFailed(format!("entry='{}' {}", self.path, e.to_string()))
-        })?;
-
-        Ok(plaintext)
     }
 
     pub fn path(&self) -> AssetPath<'_> {
@@ -730,7 +745,7 @@ impl AssetLoader for DlcPackLoader {
         // Check for DLC ID conflicts: reject if a DIFFERENT pack file is being loaded for the same DLC ID.
         // Allow the same pack file to be loaded multiple times (e.g., when accessing labeled sub-assets).
         let existing_path = crate::encrypt_key_registry::asset_path_for(dlc_id.as_ref());
-        if !existing_path.is_empty() && existing_path != path_string {
+        if let Some(existing_path) = existing_path {
             return Err(DlcLoaderError::DlcIdConflict(
                 dlc_id.to_string(),
                 existing_path.clone(),
@@ -1031,8 +1046,49 @@ impl From<std::io::Error> for DlcLoaderError {
 mod tests {
     use super::*;
     use crate::{EncryptionKey, PackItem};
+    use secure_gate::ExposeSecret;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
+    fn encrypted_asset_decrypts_with_registry() {
+        // pick a DLC id and prepare a static random key material so we can
+        // construct two distinct `EncryptionKey` instances that share the same
+        // bytes (one goes in the registry, the other is used for encryption).
+        let dlc_id = "standalone";
+        let key = EncryptionKey::from_random();
+
+        crate::encrypt_key_registry::clear_all();
+        crate::encrypt_key_registry::insert(dlc_id, key.with_secret(|k| {
+            EncryptionKey::from(*k)
+        }));
+
+        // build a small standalone encrypted blob using PackWriter
+        let nonce = [0u8; 12];
+        let mut ciphertext = Vec::new();
+        {
+            let mut pw = crate::pack_format::PackWriter::new(&mut ciphertext);
+            pw.write_encrypted(&key, &nonce, b"hello").expect("encrypt");
+        }
+
+        let ct_len = ciphertext.len() as u32;
+        let enc = EncryptedAsset {
+            dlc_id: dlc_id.to_string(),
+            original_extension: "".to_string(),
+            type_path: None,
+            nonce,
+            ciphertext: ciphertext.into(),
+            block_id: 0,
+            block_offset: 0,
+            size: ct_len,
+        };
+
+        let plaintext = enc.decrypt_bytes().expect("decrypt");
+        assert_eq!(&plaintext, b"hello");
+    }
+
+    #[test]
+    #[serial]
     fn dlcpack_accessors_work_and_fields_read() {
         let entry = DlcPackEntry {
             path: "a.txt".to_string(),
@@ -1066,11 +1122,12 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn decrypt_pack_entries_without_key_returns_locked_error() {
         crate::encrypt_key_registry::clear_all();
         let dlc_id = crate::DlcId::from("locked_dlc");
         let items = vec![PackItem::new("a.txt", b"hello".to_vec()).expect("pack item")];
-        let key = EncryptionKey::from_random(32);
+        let key = EncryptionKey::from_random();
         let _dlc_key = crate::DlcKey::generate_random();
         let product = crate::Product::from("test");
         let container = crate::pack_encrypted_pack(&dlc_id, &items, &product, &key).expect("pack");
@@ -1084,11 +1141,12 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn decrypt_pack_entries_with_wrong_key_reports_entry_and_dlc() {
         crate::encrypt_key_registry::clear_all();
         let dlc_id = crate::DlcId::from("badkey_dlc");
         let items = vec![PackItem::new("b.txt", b"world".to_vec()).expect("pack item")];
-        let real_key = EncryptionKey::from_random(32);
+        let real_key = EncryptionKey::from_random();
         let _dlc_key = crate::DlcKey::generate_random();
         let product = crate::Product::from("test");
         let container =
@@ -1098,7 +1156,7 @@ mod tests {
         let wrong_key: [u8; 32] = rand::random();
         crate::encrypt_key_registry::insert(
             &dlc_id.to_string(),
-            crate::EncryptionKey::from(wrong_key.to_vec()),
+            crate::EncryptionKey::from(wrong_key),
         );
 
         let err = decrypt_pack_entries(std::io::Cursor::new(container))
@@ -1115,6 +1173,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn dlc_id_conflict_detection() {
         // Verify conflict detection logic for a DLC ID.  We avoid checking the
         // registered path string directly because other tests may clear the
@@ -1184,30 +1243,19 @@ where
             crate::encrypt_key_registry::register_asset_path(&enc.dlc_id, p);
         }
 
-        // lookup encrypt key in global registry (loader-executed outside ECS)
-        let encrypt_key = crate::encrypt_key_registry::get(&enc.dlc_id)
-            .ok_or_else(|| DlcLoaderError::DlcLocked(enc.dlc_id.clone()))?;
-
-        // decrypt bytes
-        let plaintext = crate::pack_format::decrypt_with_key(
-            &encrypt_key,
-            std::io::Cursor::new(&*enc.ciphertext),
-            &enc.nonce,
-        )
-        .map_err(|e| {
-            let inner_error = e.to_string();
-            let msg = format!(
-                "dlc='{}' path='{}' {}",
-                enc.dlc_id,
-                path_string.unwrap_or_else(|| "<unknown>".to_string()),
-                if inner_error.is_empty() {
-                    "".to_string()
-                } else {
-                    format!("{}", inner_error)
-                }
-            );
-
-            DlcLoaderError::DecryptionFailed(msg)
+        // decrypt using helper on `EncryptedAsset`; this hides the registry
+        // lookup and error formatting so the loader remains lean.
+        let plaintext = enc.decrypt_bytes().map_err(|e| {
+            // augment the error message with the requested path for context
+            match e {
+                DlcLoaderError::DecryptionFailed(msg) => DlcLoaderError::DecryptionFailed(format!(
+                    "dlc='{}' path='{}' {}",
+                    enc.dlc_id,
+                    path_string.clone().unwrap_or_else(|| "<unknown>".to_string()),
+                    msg,
+                )),
+                other => other,
+            }
         })?;
 
         // Choose an extension for the nested load so Bevy can pick a concrete

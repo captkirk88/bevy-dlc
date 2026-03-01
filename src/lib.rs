@@ -88,7 +88,7 @@ impl Plugin for DlcPlugin {
         if let Some(encrypt_key) = extract_encrypt_key_from_license(&self.signed_license) {
             let dlcs = extract_dlc_ids_from_license(&self.signed_license);
             for dlc_id in dlcs {
-                let key_for_dlc = encrypt_key.with_secret(|kb| EncryptionKey::from(kb.to_vec()));
+                let key_for_dlc = encrypt_key.with_secret(|kb| EncryptionKey::new(*kb));
                 encrypt_key_registry::insert(&dlc_id, key_for_dlc);
             }
         }
@@ -165,7 +165,7 @@ fn trigger_dlc_events(
 /// ```
 pub fn is_dlc_loaded(dlc_id: impl Into<DlcId>) -> impl Fn() -> bool + Send + Sync + 'static {
     let id_string = dlc_id.into().0;
-    move || !encrypt_key_registry::asset_path_for(&id_string).is_empty()
+    move || !encrypt_key_registry::asset_path_for(&id_string).is_none()
 }
 
 /// A Bevy system condition that returns `true` when a specific DLC pack entry is loaded.
@@ -176,7 +176,7 @@ pub fn is_dlc_entry_loaded(
     let id_string = dlc_id.into().0;
     let entry_name = entry.into();
     move |dlc_packs: Res<Assets<DlcPack>>| {
-        if !encrypt_key_registry::asset_path_for(&id_string).is_empty() {
+        if !encrypt_key_registry::asset_path_for(&id_string).is_none() {
             dlc_packs
                 .iter()
                 .filter(|p| p.1.id() == &DlcId::from(id_string.clone()))
@@ -263,7 +263,11 @@ pub fn extract_encrypt_key_from_license(license: &SignedLicense) -> Option<Encry
         URL_SAFE_NO_PAD
             .decode(key_b64.as_bytes())
             .ok()
-            .map(EncryptionKey::from)
+            .and_then(|key_bytes| {
+                Some(EncryptionKey::new(key_bytes
+                    .try_into()
+                    .ok()?))
+            })
     })
 }
 
@@ -344,7 +348,7 @@ impl From<&str> for Product {
     }
 }
 
-dynamic_alias!(pub EncryptionKey, Vec<u8>, "A secure encrypt key (symmetric key for encrypting DLC pack entries). This should be protected and never exposed in logs or error messages.");
+fixed_alias!(pub EncryptionKey, 32, "A secure encrypt key (symmetric key for encrypting DLC pack entries). This should be protected and never exposed in logs or error messages.");
 
 /// Client-side wrapper for Ed25519 key operations: verify tokens and (when
 /// private) create compact signed tokens.

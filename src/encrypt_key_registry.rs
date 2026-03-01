@@ -42,7 +42,7 @@ pub fn get(dlc_id: &str) -> Option<EncryptionKey> {
         v.key.as_ref().map(|k| {
             k.with_secret(|b| {
                 // Clone directly into a new EncryptionKey wrapper to ensure it's zeroized
-                EncryptionKey::from(b.to_vec())
+                EncryptionKey::new(*b)
             })
         })
     })
@@ -52,7 +52,7 @@ pub fn get(dlc_id: &str) -> Option<EncryptionKey> {
 pub fn get_full(dlc_id: &str) -> Option<DlcEntry> {
     REGISTRY.get(dlc_id).and_then(|v| {
         v.key.as_ref().map(|k| DlcEntry {
-            key: k.with_secret(|b| EncryptionKey::from(b.to_vec())),
+            key: k.with_secret(|b| EncryptionKey::new(*b)),
             path: v.path.clone(),
         })
     })
@@ -71,13 +71,12 @@ pub fn register_asset_path(dlc_id: &str, path: &str) {
         });
 }
 
-/// Return the registered asset path for a given `dlc_id`. This is used by the asset loader to determine which DLC pack file(s) to load when a DLC is unlocked. Since each DLC ID can only have one associated pack file, this will return a vector with either zero or one path.
+/// Return the registered asset path for a given `dlc_id`. This is used by the asset loader to determine if a DLC pack file has already been registered for a given DLC ID, which allows it to avoid registering/loading the same pack multiple times. Returns Some(path) if a path is registered, None otherwise.
 #[allow(unused)]
-pub fn asset_path_for(dlc_id: &str) -> String {
+pub fn asset_path_for(dlc_id: &str) -> Option<String> {
     REGISTRY
         .get(dlc_id)
         .and_then(|v| v.path.as_ref().map(|p| p.clone()))
-        .unwrap_or_default()
 }
 
 /// Check if the registry already has a record of the given `dlc_id` and `path`. This is used by the asset loader to determine if a DLC pack file has already been registered for a given DLC ID, which allows it to avoid registering/loading the same pack multiple times. Returns true if the registry has a matching record, false otherwise.

@@ -537,7 +537,9 @@ pub fn run_edit_repl(
                                         if let Some(lic) = resolved_license.as_ref() {
                         if let Some(enc_key) = bevy_dlc::extract_encrypt_key_from_license(lic) {
                             let key_bytes: Vec<u8> = enc_key.with_secret(|kb| kb.to_vec());
-                            encrypt_key = Some(EncryptionKey::from(key_bytes));
+                            encrypt_key = Some(EncryptionKey::new(
+                                key_bytes.try_into().map_err(|_| "encryption key must be 32 bytes")?,
+                            ));
                         }
                     }
                                     }
@@ -1023,7 +1025,7 @@ mod tests {
     fn merge_pack_into_adds_new_files() {
         // prepare two simple packs with different entries
         let _dlc_key = DlcKey::generate_random();
-        let enc_key = EncryptionKey::from_random(32);
+        let enc_key = EncryptionKey::from_random();
         let product = Product::from("prod");
 
         let item1 = PackItem::new("a.txt", b"foo".to_vec()).unwrap();
@@ -1233,7 +1235,7 @@ mod tests {
 
         // create a pristine pack containing a single entry
         let _dlc_key = DlcKey::generate_random();
-        let enc_key = EncryptionKey::from_random(32);
+        let enc_key = EncryptionKey::from_random();
         let product = Product::from("example");
         let item = PackItem::new("a.txt", b"hello".to_vec()).unwrap();
         let base_pack = pack_encrypted_pack(
@@ -1321,7 +1323,7 @@ mod tests {
         // ensure that removing an item and saving does not leave its data in
         // the encrypted archive.
         let _dlc_key = DlcKey::generate_random();
-        let enc_key = EncryptionKey::from_random(32);
+        let enc_key = EncryptionKey::from_random();
         let product = Product::from("prod");
         let id = DlcId::from("removal".to_string());
         let item1 = PackItem::new("a.txt", b"one".to_vec()).unwrap();
@@ -1398,7 +1400,7 @@ mod tests {
     fn edit_one_shot_ls() {
         // verify that providing a command after '--' runs it and exits
         let _dlc_key = DlcKey::generate_random();
-        let enc_key = EncryptionKey::from_random(32);
+        let enc_key = EncryptionKey::from_random();
         let product = Product::from("prod");
         let item = PackItem::new("foo.txt", b"hello".to_vec()).unwrap();
         let bytes = pack_encrypted_pack(
@@ -1430,7 +1432,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let pack_path = tmp.path().join("p.dlcpack");
         let _dlc_key = DlcKey::generate_random();
-        let enc_key = EncryptionKey::from_random(32);
+        let enc_key = EncryptionKey::from_random();
         let product = Product::from("prod");
         let item = PackItem::new("foo.txt", b"hello".to_vec()).unwrap();
         let bytes = pack_encrypted_pack(
