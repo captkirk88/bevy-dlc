@@ -32,7 +32,6 @@ use crate::asset_loader::DlcPackLoaded;
 
 #[allow(unused_imports)]
 pub use bevy_dlc_macro::include_signed_license_aes;
-pub use secure::include_secure_str_aes;
 #[doc(hidden)]
 pub use crate::macros::__decode_embedded_signed_license_aes;
 
@@ -57,7 +56,6 @@ pub mod prelude {
         is_dlc_loaded,
     };
     pub use bevy_dlc_macro::include_signed_license_aes;
-    pub use secure::include_secure_str_aes;
     pub use crate::include_dlc_key_and_license_aes;
 }
 

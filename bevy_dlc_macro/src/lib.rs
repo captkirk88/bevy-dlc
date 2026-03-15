@@ -44,12 +44,14 @@ pub fn include_signed_license_aes(input: TokenStream) -> TokenStream {
     }
 
     let resolved = resolve_path(&path.value());
-    let mut license_bytes = std::fs::read(&resolved)
+    let license_bytes = std::fs::read(&resolved)
         .unwrap_or_else(|e| panic!("Cannot read signed license from '{}': {e}", resolved.display()));
+    let license_str = String::from_utf8(license_bytes)
+        .unwrap_or_else(|e| panic!("Signed license is not valid UTF-8 at '{}': {e}", resolved.display()));
     let cryptor = byte_aes::Aes256Cryptor::try_from(key_value.as_str())
         .expect("license key must be exactly 32 characters");
-    let encrypted_bytes = cryptor.encrypt(&license_bytes);
-    license_bytes.fill(0);
+    let encrypted_bytes = cryptor.encrypt(&license_str);
+    drop(license_str);
     let encrypted_b64 = base64::Engine::encode(
         &base64::prelude::BASE64_STANDARD,
         encrypted_bytes,

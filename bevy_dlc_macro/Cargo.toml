@@ -18,3 +18,4 @@ quote = "1"
 syn = { version = "2", features = ["full"] }
 base64 = "0.22"
 byte-aes = "0.2"
+secure = "0.3"

@@ -33,11 +33,10 @@ ring = "0.17"
 secure-gate = { version = "0.7.0-rc.14", features = ["secure", "rand", "cloneable", "ct-eq"] }
 byte-aes = "0.2"
 owo-colors = "4.3"
-secure = "0.3"
 infer = "0.19"
 crc32fast = "1.5"
 futures-lite = "2.6"
-bevy_dlc_macro = { version = "1.0" }
+bevy_dlc_macro = { version = "1.0", path = "bevy_dlc_macro" }
 
 [dev-dependencies]
 assert_cmd = "2.1"
