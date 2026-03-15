@@ -17,28 +17,23 @@ use examples::*;
 fn main() -> AppExit {
     // DO NOT USE ABCD... as your choice of secure key. This is just a placeholder for the example.
     // This is the RECOMMENDED approach:
-    // Create cryptographically secure license key that can't be decrypted from your compiled binary (game).
-    secure::include_secure_str_aes!(
-        "examples/example_keys/example.slicense",
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
-        "example_license"
-    );
-    
-    let dlc_key = DlcKey::public(include_str!("../example_keys/example.pubkey"))
-        .expect("invalid example pubkey");
 
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(ExamplePlugin::default())
-        .add_plugins(DlcPlugin::new(
-            dlc_key,
-            SignedLicense::from(get_example_license()),
-        ))
+        .add_plugins(DlcPlugin::from(bevy_dlc::include_dlc_key_and_license_aes!(
+            "../example_keys/example.pubkey",
+            "examples/example_keys/example.slicense",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+        )))
         .init_resource::<DlcPacks>()
         .add_plugins(JsonAssetPlugin::<JsonAsset>::new(&["json"]))
         .register_dlc_type::<JsonAsset>()
         .add_systems(Startup, startup)
-        .add_systems(Update, display_loaded_text.run_if(is_dlc_entry_loaded("dlcA", "test.json")))
+        .add_systems(
+            Update,
+            display_loaded_text.run_if(is_dlc_entry_loaded("dlcA", "test.json")),
+        )
         .add_observer(on_dlc_pack_loaded)
         .run()
 }

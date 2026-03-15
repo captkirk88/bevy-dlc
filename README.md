@@ -48,6 +48,7 @@ bevy-dlc generate -o keys/ my-game dlcA
 This will generate two files in `keys/`:
 - `dlcA.slicense` — a secure license token that can be safely embedded in your game binary (e.g. with `secure::include_secure_str_aes!()`) or stored securely on disk.  This token contains the encrypted symmetric key needed to unlock the DLC, but can't be decrypted without the private key.
 - `dlcA.pubkey` — the public key that your game uses to verify the license and extract the symmetric key to unlock the DLC.
+- If you later want to add more DLC regenerate 
 
 ### Create a pack
 

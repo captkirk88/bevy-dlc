@@ -179,3 +179,17 @@ macro_rules! dlc_simple_asset {
         }
     };
 }
+
+/// Includes a secure license token and a public key from files.
+///
+/// Returns a `(DlcKey, SignedLicense)` tuple.
+#[macro_export]
+macro_rules! include_dlc_key_and_license_aes {
+    ($pubkey_path:expr, $license_path:expr, $license_key:expr $(,)?) => {{
+        let signed_license = $crate::include_signed_license_aes!($license_path, $license_key);
+        let dlc_key = $crate::DlcKey::public(include_str!($pubkey_path))
+            .expect("invalid dlc pubkey");
+        (dlc_key, signed_license)
+    }};
+}
+

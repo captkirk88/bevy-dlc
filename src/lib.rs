@@ -30,6 +30,10 @@ use thiserror::Error;
 
 use crate::asset_loader::DlcPackLoaded;
 
+#[allow(unused_imports)]
+pub use bevy_dlc_macro::include_signed_license_aes;
+pub use secure::include_secure_str_aes;
+
 pub use crate::ext::AppExt;
 
 /// Register an encryption key for a DLC ID in the global registry.
@@ -50,6 +54,9 @@ pub mod prelude {
         asset_loader::DlcPackEntry, asset_loader::DlcPackLoaded, is_dlc_entry_loaded,
         is_dlc_loaded,
     };
+    pub use bevy_dlc_macro::include_signed_license_aes;
+    pub use secure::include_secure_str_aes;
+    pub use crate::include_dlc_key_and_license_aes;
 }
 
 pub struct DlcPlugin {
@@ -63,11 +70,17 @@ impl DlcPlugin {
     ///
     /// The plugin will extract the encryption key from the signed license
     /// during `build` and register it in the global key registry.
-    pub fn new(dlc_key: DlcKey, signed_license: SignedLicense) -> Self {
+    pub(crate) fn new(dlc_key: DlcKey, signed_license: SignedLicense) -> Self {
         Self {
             dlc_key,
             signed_license,
         }
+    }
+}
+
+impl From<(DlcKey, SignedLicense)> for DlcPlugin {
+    fn from(tuple: (DlcKey, SignedLicense)) -> Self {
+        DlcPlugin::new(tuple.0, tuple.1)
     }
 }
 
