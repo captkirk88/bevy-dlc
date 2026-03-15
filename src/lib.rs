@@ -20,7 +20,7 @@ pub use asset_loader::{
 
 pub use pack_format::{
     BlockMetadata, CompressionLevel, DEFAULT_BLOCK_SIZE, DLC_PACK_MAGIC, DLC_PACK_VERSION_LATEST,
-    ManifestEntry, V4ManifestEntry, is_data_executable, is_forbidden_extension,
+    ManifestEntry, V4ManifestEntry, is_data_executable,
     pack_encrypted_pack, parse_encrypted_pack,
 };
 
@@ -690,15 +690,6 @@ impl PackItem {
             .extension()
             .and_then(|e| e.to_str());
 
-        if let Some(ext) = ext_str {
-            if pack_format::is_forbidden_extension(ext) {
-                return Err(DlcError::Other(format!(
-                    "input path contains forbidden extension (.{}): {}",
-                    ext, path
-                )));
-            }
-        }
-
         Ok(Self {
             path: path.clone(),
             original_extension: ext_str.map(|s| s.to_string()),
@@ -709,12 +700,6 @@ impl PackItem {
 
     pub fn with_extension(mut self, ext: impl Into<String>) -> Result<Self, DlcError> {
         let ext_s = ext.into();
-        if pack_format::is_forbidden_extension(&ext_s) {
-            return Err(DlcError::Other(format!(
-                "forbidden extension (.{}): {}",
-                ext_s, self.path
-            )));
-        }
         self.original_extension = Some(ext_s);
         Ok(self)
     }

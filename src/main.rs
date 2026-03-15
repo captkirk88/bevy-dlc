@@ -18,7 +18,9 @@ use bevy::{asset::AssetServer, log::LogPlugin};
 use clap::{Parser, Subcommand};
 
 use bevy_dlc::{
-    DLC_PACK_VERSION_LATEST, EncryptionKey, PackItem, extract_dlc_ids_from_license, extract_encrypt_key_from_license, extract_product_from_license, pack_encrypted_pack, parse_encrypted_pack, prelude::*
+    DLC_PACK_VERSION_LATEST, EncryptionKey, PackItem, extract_dlc_ids_from_license,
+    extract_encrypt_key_from_license, extract_product_from_license, pack_encrypted_pack,
+    parse_encrypted_pack, prelude::*,
 };
 use owo_colors::{AnsiColors, OwoColorize};
 use secure_gate::ExposeSecret;
@@ -45,7 +47,7 @@ enum Commands {
     #[command(
         about = "Print version information",
         long_about = "Display version information for bevy-dlc and the encrypted pack format. If a .dlcpack file is supplied, also display the embedded pack version.",
-        alias = "v",
+        alias = "v"
     )]
     Version {
         /// Optional path to a .dlcpack file; when supplied the command will
@@ -56,7 +58,7 @@ enum Commands {
     #[command(
         about = "Pack assets into a .dlcpack bundle",
         long_about = "Encrypts the provided input files into a single bevy-dlc .dlcpack bundle. Use --list to preview container metadata.",
-        alias = "p",
+        alias = "p"
     )]
     Pack {
         /// DLC identifier to embed in the container/private key
@@ -140,7 +142,7 @@ enum Commands {
         about = "Validate a .dlcpack file against a signed license and public key",
         long_about = "Checks that the .dlcpack's embedded DLC id is covered by the signed license, and that the signature is valid for the given public key. If the license does not include the DLC id but is otherwise valid, the command will attempt to extend the license with the missing DLC id (if a private key is available) and print the extended token.",
         alias = "validate",
-        alias = "c",
+        alias = "c"
     )]
     Check {
         /// path to a .dlcpack file
@@ -160,7 +162,7 @@ enum Commands {
     #[command(
         about = "Generate a product .slicense and .pubkey.",
         long_about = "Create a signed-license token and write <product>.slicense and <product>.pubkey; these files are used as defaults by other commands when present.",
-        alias = "g",
+        alias = "g"
     )]
     Generate {
         /// Product name to bind the license to (also used to name the output files)
@@ -310,14 +312,22 @@ fn print_signed_license_and_pubkey(
             let dir = out_dir.unwrap_or_else(|| std::path::Path::new("."));
             if !dir.exists() {
                 if let Err(e) = std::fs::create_dir_all(dir) {
-                    print_error(&format!("failed to create output directory {}: {}", dir.display(), e));
+                    print_error(&format!(
+                        "failed to create output directory {}: {}",
+                        dir.display(),
+                        e
+                    ));
                     return;
                 }
             }
             let slicense_path = dir.join(format!("{}.slicense", prod));
             let pubkey_path = dir.join(format!("{}.pubkey", prod));
             if let Err(e) = std::fs::write(&slicense_path, signedlicense) {
-                print_error(&format!("failed to write {}: {}", slicense_path.display(), e));
+                print_error(&format!(
+                    "failed to write {}: {}",
+                    slicense_path.display(),
+                    e
+                ));
             }
             if let Err(e) = std::fs::write(&pubkey_path, pubkey_b64) {
                 print_error(&format!("failed to write {}: {}", pubkey_path.display(), e));
@@ -403,7 +413,10 @@ fn print_pack_entries(version: usize, ents: &[(String, bevy_dlc::EncryptedAsset)
             );
         }
     } else {
-        println!("Version {} is not supported anymore. Repack your DLC assets using the 'pack' command.", version);
+        println!(
+            "Version {} is not supported anymore. Repack your DLC assets using the 'pack' command.",
+            version
+        );
     }
 }
 
@@ -470,9 +483,9 @@ fn derive_encrypt_key(
     signed_license: Option<&str>,
 ) -> Result<EncryptionKey, Box<dyn std::error::Error>> {
     Ok(if let Some(lic_str) = signed_license {
-        if let Some(enc_key) = extract_encrypt_key_from_license(
-            &bevy_dlc::SignedLicense::from(lic_str.to_string()),
-        ) {
+        if let Some(enc_key) =
+            extract_encrypt_key_from_license(&bevy_dlc::SignedLicense::from(lic_str.to_string()))
+        {
             enc_key
         } else {
             EncryptionKey::from_random()
@@ -499,35 +512,42 @@ fn handle_license_output(
                 return Err("supplied signed-license verification failed".into());
             }
             let final_license = SignedLicense::from(sup_license.to_string());
-            let verified_product = extract_product_from_license(&final_license)
-                .unwrap_or_default();
+            let verified_product = extract_product_from_license(&final_license).unwrap_or_default();
             if verified_product != product {
                 return Err("supplied signed-license product does not match --product".into());
             }
 
-            // If the dlc_id is not in the license, try to extend it
+            // If the dlc_id is not in the license, try to extend it (requires private key).
+            // If only a public key is available, print a warning and continue — the pack
+            // is still created with the correct encryption key; the user should regenerate
+            // the license with the DLC id included if they want it to unlock this pack.
             let mut final_license = SignedLicense::from(sup_license.to_string());
             if !extract_dlc_ids_from_license(&final_license)
                 .iter()
                 .any(|d| d == &dlc_id_str)
             {
-                if let Some(dlc_key) = signer_key {
-                    let extended = dlc_key.extend_signed_license(
-                        &final_license,
-                        &[DlcId::from(dlc_id_str.to_string())],
-                        Product::from(product.to_string()),
-                    )?;
-                    println!("{}", "note: supplied license did not include requested DLC id, extending it now.".yellow());
-                    final_license = extended;
-                } else {
-                    return Err("supplied signed-license does not include the requested DLC id (and no private key available to extend it)".into());
+                let extended = signer_key.and_then(|dlc_key| {
+                    dlc_key
+                        .extend_signed_license(
+                            &final_license,
+                            &[DlcId::from(dlc_id_str.to_string())],
+                            Product::from(product.to_string()),
+                        )
+                        .ok()
+                });
+                match extended {
+                    Some(ext) => {
+                        println!("{}", "note: supplied license did not include requested DLC id, extending it now.".white().bold());
+                        final_license = ext;
+                    }
+                    None => {
+                        print_warning(&format!(
+                            "license does not include DLC id '{}'; the pack was created but users need a license that covers this DLC id to unlock it. Re-run `generate` with this DLC id to update the license.",
+                            dlc_id_str
+                        ));
+                    }
                 }
             }
-
-            final_license.with_secret(|s| {
-                println!("{}:\n{}", "SIGNED LICENSE".green().bold(), s);
-                println!("{}: {}", "PUB KEY".blue().bold(), pubkey_str);
-            });
 
             final_license.with_secret(|s| {
                 println!("{}:\n{}", "SIGNED LICENSE".green().bold(), s);
@@ -550,7 +570,8 @@ fn handle_license_output(
                     println!(
                         "{}",
                         "note: existing license did not include requested DLC id, extended with it"
-                            .yellow()
+                            .white()
+                            .bold()
                     );
                     extended
                 } else {
@@ -577,13 +598,7 @@ fn handle_license_output(
             )?;
             signedlicense.with_secret(|s| {
                 if write_files {
-                    print_signed_license_and_pubkey(
-                        s.as_str(),
-                        dlc_key,
-                        false,
-                        Some(product),
-                        None,
-                    )
+                    print_signed_license_and_pubkey(s.as_str(), dlc_key, false, Some(product), None)
                 } else {
                     println!("{}:\n{}", "SIGNED LICENSE".green().bold(), s);
                 }
@@ -596,13 +611,7 @@ fn handle_license_output(
             )?;
             signedlicense.with_secret(|s| {
                 if write_files {
-                    print_signed_license_and_pubkey(
-                        s.as_str(),
-                        &dlc_key,
-                        true,
-                        Some(product),
-                        None,
-                    )
+                    print_signed_license_and_pubkey(s.as_str(), &dlc_key, true, Some(product), None)
                 } else {
                     println!("{}:\n{}", "SIGNED LICENSE".green().bold(), s);
                 }
@@ -666,11 +675,10 @@ fn resolve_keys(
         None
     });
 
-    let resolved_pubkey = resolved_pubkey_str
-        .and_then(|s| match crate::DlcKey::public(&s) {
-            Ok(k) => Some(k),
-            Err(_) => None,
-        });
+    let resolved_pubkey = resolved_pubkey_str.and_then(|s| match crate::DlcKey::public(&s) {
+        Ok(k) => Some(k),
+        Err(_) => None,
+    });
 
     let resolved_license = resolved_license_str.map(crate::SignedLicense::from);
 
@@ -734,14 +742,21 @@ fn test_decrypt_archive_with_key_from_reader<R: std::io::Read>(
         (b.nonce, buf)
     } else {
         // earlier versions (v1, v2, v3) use the entry's nonce/ciphertext
-        (entries[0].1.nonce, entries[0].1.ciphertext.as_ref().to_vec())
+        (
+            entries[0].1.nonce,
+            entries[0].1.ciphertext.as_ref().to_vec(),
+        )
     };
 
-    let ek = bevy_dlc::EncryptionKey::new(key_bytes.try_into().map_err(|_| "encryption key must be 32 bytes")?);
+    let ek = bevy_dlc::EncryptionKey::new(
+        key_bytes
+            .try_into()
+            .map_err(|_| "encryption key must be 32 bytes")?,
+    );
     // replicate the current in-place decrypt logic so we don't rely on the
     // pack_format module being public.
-    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
     use aes_gcm::aead::AeadInPlace;
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
     use secure_gate::ExposeSecret;
 
     let mut buf = archive_ciphertext.clone();
@@ -805,21 +820,20 @@ fn validate_dlc_file(
 
     // when a pubkey is supplied, verify the signed-license and check DLC coverage
     if let Some(pk) = supplied_pubkey.as_ref() {
-            let verifier = pk;
-            if !verifier.verify_signed_license(&supplied_license) {
-                return Err("signed-license verification failed".into());
-            }
-            // we can inspect the license directly without cloning
-            let verified_product = extract_product_from_license(&supplied_license)
-                .unwrap_or_default();
-            if Product::from(verified_product) != prod {
-                return Err("license product does not match pack".into());
-            }
-            let verified_dlcs = extract_dlc_ids_from_license(&supplied_license);
-            if !verified_dlcs.iter().any(|d| d == &dlc_id.as_ref()) {
-                return Err(format!("license does not include DLC id '{}'", dlc_id).into());
-            }
+        let verifier = pk;
+        if !verifier.verify_signed_license(&supplied_license) {
+            return Err("signed-license verification failed".into());
         }
+        // we can inspect the license directly without cloning
+        let verified_product = extract_product_from_license(&supplied_license).unwrap_or_default();
+        if Product::from(verified_product) != prod {
+            return Err("license product does not match pack".into());
+        }
+        let verified_dlcs = extract_dlc_ids_from_license(&supplied_license);
+        if !verified_dlcs.iter().any(|d| d == &dlc_id.as_ref()) {
+            return Err(format!("license does not include DLC id '{}'", dlc_id).into());
+        }
+    }
     // extract the encrypt key from the license's payload and attempt to decrypt the first archive entry to verify correctness. Note that this does not verify the signature, so we print a warning if no pubkey was supplied.
     // use library helper now that we have a SignedLicense value
     if let Some(enc_key) = extract_encrypt_key_from_license(&supplied_license) {
@@ -928,7 +942,9 @@ async fn pack_command(
         .as_ref()
         .map(|t| parse_type_overrides(t))
         .unwrap_or_default();
-    let type_path_map = bevy::tasks::block_on(async { resolve_type_paths_from_bevy(app, &selected_files, &type_overrides).await })?;
+    let type_path_map = bevy::tasks::block_on(async {
+        resolve_type_paths_from_bevy(app, &selected_files, &type_overrides).await
+    })?;
 
     let mut items: Vec<PackItem> = Vec::new();
     for file in &selected_files {
@@ -989,7 +1005,7 @@ async fn pack_command(
         &items,
         &Product::from(product.clone()),
         &encrypt_key,
-        bevy_dlc::DEFAULT_BLOCK_SIZE
+        bevy_dlc::DEFAULT_BLOCK_SIZE,
     )?;
 
     handle_license_output(
@@ -1100,19 +1116,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pubkey,
             signed_license,
         } => {
-            bevy::tasks::block_on( async {pack_command(
-                &mut app,
-                dlc_id_str,
-                files,
-                list,
-                out,
-                product,
-                types,
-                pubkey,
-                signed_license,
-                cli.dry_run,
-            )
-            .await})?;
+            bevy::tasks::block_on(async {
+                pack_command(
+                    &mut app,
+                    dlc_id_str,
+                    files,
+                    list,
+                    out,
+                    product,
+                    types,
+                    pubkey,
+                    signed_license,
+                    cli.dry_run,
+                )
+                .await
+            })?;
         }
 
         Commands::List { dlc } => {
@@ -1319,7 +1337,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     slicense_path.display(),
                     pubkey_path.display()
                 );
-                print_warning("Do NOT SHARE these files or the contents printed above with untrusted parties.");
+                print_warning(
+                    "Do NOT SHARE these files or the contents printed above with untrusted parties.",
+                );
             }
             return Ok(());
         }
@@ -1345,8 +1365,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // extract the encryption key from the license if present
             let encrypt_key = if let Some(lic) = sup_lic.as_ref() {
-                extract_encrypt_key_from_license(lic)
-                    .map(|ek| ek.with_secret(|kb| kb.to_vec()))
+                extract_encrypt_key_from_license(lic).map(|ek| ek.with_secret(|kb| kb.to_vec()))
             } else {
                 None
             }

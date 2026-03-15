@@ -1,5 +1,3 @@
-use std::{collections::HashSet, sync::LazyLock};
-
 /// .dlcpack container magic header (4 bytes) used to identify encrypted pack containers.
 pub const DLC_PACK_MAGIC: &[u8; 4] = b"BDLP";
 
@@ -17,20 +15,9 @@ pub const FORBIDDEN_EXTENSIONS: &[&str] = &[
 ];
 
 /// Lazy hash set used by [`is_forbidden_extension`].
-static FORBIDDEN_SET: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    FORBIDDEN_EXTENSIONS.iter().copied().collect()
-});
-
-/// Return true if the extension (case‑insensitive) is in the forbidden list.
-pub fn is_forbidden_extension(ext: &str) -> bool {
-    let lowercase = ext.trim_start_matches('.').to_ascii_lowercase();
-    FORBIDDEN_SET.contains(lowercase.as_str())
-}
-
-// `is_malicious_file` used to live here but its functionality is now
-// subsumed by `is_data_executable` which is called during packing.  Keeping
-// the helper around only bloated the public API and required test plumbing
-// that we no longer need, so the function has been removed.
+// static FORBIDDEN_SET: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+//     FORBIDDEN_EXTENSIONS.iter().copied().collect()
+// });
 
 // NOTE: if additional heuristics are required in the future they can be
 // reintroduced or re‑exported from the CLI/generation layer rather than the
@@ -42,6 +29,13 @@ pub fn is_data_executable(data: &[u8]) -> bool {
     if infer::is_app(data) {
         return true;
     }
+    
+    for ext in FORBIDDEN_EXTENSIONS {
+        if infer::is(data, *ext) {
+            return true;
+        }
+    }
+
     if data.starts_with(b"#!") {
         return true;
     }
@@ -726,13 +720,6 @@ pub fn parse_encrypted_pack<R: std::io::Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn forbidden_list_contains_known() {
-        assert!(is_forbidden_extension("exe"));
-        assert!(is_forbidden_extension("EXE"));
-        assert!(!is_forbidden_extension("png"));
-    }
 
     #[test]
     fn manifest_roundtrip() {
