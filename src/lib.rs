@@ -33,6 +33,8 @@ use crate::asset_loader::DlcPackLoaded;
 #[allow(unused_imports)]
 pub use bevy_dlc_macro::include_signed_license_aes;
 pub use secure::include_secure_str_aes;
+#[doc(hidden)]
+pub use crate::macros::__decode_embedded_signed_license_aes;
 
 pub use crate::ext::AppExt;
 

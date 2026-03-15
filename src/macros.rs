@@ -5,6 +5,28 @@
 //! The macros are all exported at the crate root so you can invoke them as
 //! `bevy_dlc::pack_items!()`, `bevy_dlc::dlc_register_types!()`, etc.
 
+#[doc(hidden)]
+pub fn __decode_embedded_signed_license_aes(encrypted_b64: &str, key: &str) -> crate::SignedLicense {
+    use base64::Engine as _;
+
+    let value = base64::prelude::BASE64_STANDARD
+        .decode(encrypted_b64.as_bytes())
+        .expect("invalid embedded base64 in signed license");
+    let cryptor = byte_aes::Aes256Cryptor::try_from(key)
+        .expect("invalid AES key for signed license");
+    let decoded_data = cryptor
+        .decrypt(value)
+        .expect("failed to decrypt embedded signed license");
+
+    // String::from_utf8 moves decoded_data without cloning — same heap
+    // allocation, now owned by SignedLicense, which zeroes it on drop
+    // via dynamic_alias!.
+    crate::SignedLicense::from(
+        String::from_utf8(decoded_data)
+            .expect("embedded signed license is not valid UTF-8"),
+    )
+}
+
 /// format a byte count into a human-readable string (KB/MB/GB)
 ///
 /// The macro returns a `String`; the formatting matches the previous

@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
-use proc_macro2::Span;
 use quote::quote;
-use syn::{parse_macro_input, parse::Parse, parse::ParseStream, Ident, LitStr, Token};
+use std::path::{Path, PathBuf};
+use syn::{parse_macro_input, parse::Parse, parse::ParseStream, LitStr, Token};
 
 struct IncludeSignedLicenseAesArgs {
     path: LitStr,
@@ -36,40 +36,53 @@ impl Parse for IncludeSignedLicenseAesArgs {
 #[proc_macro]
 pub fn include_signed_license_aes(input: TokenStream) -> TokenStream {
     let IncludeSignedLicenseAesArgs { path, key } = parse_macro_input!(input as IncludeSignedLicenseAesArgs);
+    let key_value = key.value();
 
-    // Replace path separators and extension separators so the generated function name is valid.
-    let sanitized = sanitize_path(&path.value());
-    let name_literal = LitStr::new(&sanitized, Span::call_site());
+    // The AES-256 key for byte-aes must be 32 bytes.
+    if key_value.len() != 32 {
+        panic!("license key must be exactly 32 characters");
+    }
 
-    let func_ident = Ident::new(&format!("get_{}", sanitized), Span::call_site());
+    let resolved = resolve_path(&path.value());
+    let mut license_bytes = std::fs::read(&resolved)
+        .unwrap_or_else(|e| panic!("Cannot read signed license from '{}': {e}", resolved.display()));
+    let cryptor = byte_aes::Aes256Cryptor::try_from(key_value.as_str())
+        .expect("license key must be exactly 32 characters");
+    let encrypted_bytes = cryptor.encrypt(&license_bytes);
+    license_bytes.fill(0);
+    let encrypted_b64 = base64::Engine::encode(
+        &base64::prelude::BASE64_STANDARD,
+        encrypted_bytes,
+    );
+    let encrypted_b64_lit = LitStr::new(&encrypted_b64, proc_macro2::Span::call_site());
 
     quote! {{
-        ::bevy_dlc::include_secure_str_aes!(#path, #key, #name_literal);
-        ::bevy_dlc::SignedLicense::from(#func_ident())
+        ::bevy_dlc::__decode_embedded_signed_license_aes(#encrypted_b64_lit, #key)
     }}
     .into()
 }
 
-fn sanitize_path(path: &str) -> String {
-    let mut s = path
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-
-    if s.is_empty() {
-        return "bevy_dlc_signed_license".to_string();
+fn resolve_path(path: &str) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        return path.to_path_buf();
     }
 
-    // Ensure the identifier doesn't start with a digit.
-    if s.chars().next().map_or(false, |c| c.is_ascii_digit()) {
-        s.insert(0, '_');
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let manifest_path = Path::new(&manifest_dir);
+        let candidate = manifest_path.join(path);
+        if candidate.exists() {
+            return candidate;
+        }
+
+        // Support paths typically written relative to `src/` call sites.
+        let src_candidate = manifest_path.join("src").join(path);
+        if src_candidate.exists() {
+            return src_candidate;
+        }
+
+        return candidate;
     }
 
-    s
+    path.to_path_buf()
 }

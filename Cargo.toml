@@ -37,7 +37,7 @@ secure = "0.3"
 infer = "0.19"
 crc32fast = "1.5"
 futures-lite = "2.6"
-bevy_dlc_macro = { version = "1.0.0" }
+bevy_dlc_macro = { version = "1.0.1" }
 
 [dev-dependencies]
 assert_cmd = "2.1"

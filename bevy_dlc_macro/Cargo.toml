@@ -16,4 +16,5 @@ proc-macro = true
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
-secure = { version = "0.3" }
+base64 = "0.22"
+byte-aes = "0.2"
