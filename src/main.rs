@@ -311,28 +311,31 @@ fn collect_files_recursive(
                 }
             }
 
-            // Always skip files whose extension marks them as non-asset / binary artifacts.
             let file_ext = path
                 .extension()
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            const EXCLUDE_EXTENSIONS: &[&str] = &[
-                "dlcpack", "slicense", "pubkey",
-                "exe", "dll", "so", "dylib",
-                "pdb", "ilk", "exp", "lib", "a", "o", "rlib",
-            ];
-            if EXCLUDE_EXTENSIONS.contains(&file_ext.as_str()) {
-                continue;
-            }
 
             match ext_filter {
                 Some(filter) => {
+                    // Targeted search: return files matching the requested extension only.
                     if file_ext.eq_ignore_ascii_case(filter) {
                         out.push(path);
                     }
                 }
-                None => out.push(path),
+                None => {
+                    // Asset-collection mode: skip non-asset / binary artifacts so they
+                    // are never accidentally packed.
+                    const EXCLUDED_EXTENSIONS: &[&str] = &[
+                        "dlcpack", "slicense", "pubkey",
+                        "exe", "dll", "so", "dylib",
+                        "pdb", "ilk", "exp", "lib", "a", "o", "rlib",
+                    ];
+                    if !EXCLUDED_EXTENSIONS.contains(&file_ext.as_str()) {
+                        out.push(path);
+                    }
+                }
             }
         }
     }
@@ -1540,23 +1543,30 @@ mod tests {
         assert_eq!(collected.len(), 3, "unexpected files collected: {:?}", names);
     }
 
-    /// When an ext_filter IS specified the forbidden-extension check still prevents forbidden
-    /// files from leaking through (e.g. someone won't accidentally request ext_filter="dlcpack"
-    /// in a generic helper call and get pack files back).
+    /// When an ext_filter IS specified, the targeted search works correctly: only
+    /// files with the requested extension are returned, and no excluded-extension
+    /// filtering is applied (because callers like `list`, `check`, and `find_dlcpack`
+    /// need to locate `.dlcpack` files by extension).
     #[test]
-    fn collect_files_ext_filter_still_blocks_forbidden() {
+    fn collect_files_ext_filter_returns_matching_files() {
         let tmp = tempdir().unwrap();
         std::fs::write(tmp.path().join("bundle.dlcpack"), b"data").unwrap();
+        std::fs::write(tmp.path().join("other.dlcpack"), b"data").unwrap();
         std::fs::write(tmp.path().join("good.txt"), b"data").unwrap();
 
         let mut collected = Vec::new();
-        // explicitly requesting "dlcpack" as the filter — those must still be excluded.
         collect_files_recursive(tmp.path(), &mut collected, Some("dlcpack"), 5).unwrap();
-        assert!(
-            collected.is_empty(),
-            "dlcpack files leaked through ext_filter: {:?}",
-            collected
+
+        // .dlcpack files must be found when explicitly requested via ext_filter.
+        assert_eq!(
+            collected.len(), 2,
+            "expected 2 .dlcpack files, got: {:?}", collected
         );
+        assert!(collected.iter().any(|p| p.file_name().unwrap() == "bundle.dlcpack"));
+        assert!(collected.iter().any(|p| p.file_name().unwrap() == "other.dlcpack"));
+
+        // .txt must not appear since it doesn't match the filter.
+        assert!(!collected.iter().any(|p| p.extension().and_then(|e| e.to_str()) == Some("txt")));
     }
 
     /// Hidden files (names starting with `.`) must never be collected.
