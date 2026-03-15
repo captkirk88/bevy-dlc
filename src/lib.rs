@@ -70,15 +70,13 @@ impl DlcPlugin {
     ///
     /// The plugin will extract the encryption key from the signed license
     /// during `build` and register it in the global key registry.
-    pub(crate) fn new(dlc_key: DlcKey, signed_license: SignedLicense) -> Self {
-        Self {
-            dlc_key,
-            signed_license,
-        }
+    pub fn new(dlc_key: DlcKey, signed_license: SignedLicense) -> Self {
+        Self { dlc_key, signed_license }
     }
 }
 
 impl From<(DlcKey, SignedLicense)> for DlcPlugin {
+    /// Create the plugin from a tuple of `(DlcKey, SignedLicense)`, for ergonomic construction using the `include_dlc_key_and_license_aes!` macro.
     fn from(tuple: (DlcKey, SignedLicense)) -> Self {
         DlcPlugin::new(tuple.0, tuple.1)
     }
