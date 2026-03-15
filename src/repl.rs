@@ -692,15 +692,16 @@ fn save_pack_optimized(
         let (_old_prod, _old_did, _old_v, old_entries, blocks) = parse_encrypted_pack(&mut file)?;
         (old_entries, blocks)
     };
+
     let removed = old_entries.len() > entries.len();
 
-    // simple metadata-only update (if nothing added/removed)
+    // Fast path: no structural changes — just rewrite the manifest headers.
     if added_files.is_empty() && !removed {
         return update_manifest(path, bevy_dlc::DLC_PACK_VERSION_LATEST as usize, product, dlc_id, entries);
     }
 
     let ek = encrypt_key
-        .ok_or("Re-packing with new files requires a signed license (--signed-license)")?;
+        .ok_or("Re-packing (adding or removing files) requires a signed license (--signed-license)")?;
 
     let mut items = Vec::new();
     let cipher = ek
