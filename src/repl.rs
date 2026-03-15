@@ -1547,7 +1547,18 @@ mod tests {
         let file_path = tmp.path().join("foo.txt");
         std::fs::write(&file_path, b"data").unwrap();
 
-        // pack dry-run
+        // Create a signed license so pack can run (pack now requires an existing license).
+        let dlc_key = DlcKey::generate_random();
+        let signed_license = dlc_key
+            .create_signed_license(&[DlcId::from("mypack".to_string())], Product::from("prod"))
+            .unwrap();
+        let mut lic_str = String::new();
+        signed_license.with_secret(|s| lic_str = s.to_string());
+        let pub_b64 = URL_SAFE_NO_PAD.encode(dlc_key.get_public_key().0);
+        std::fs::write(tmp.path().join("prod.slicense"), &lic_str).unwrap();
+        std::fs::write(tmp.path().join("prod.pubkey"), &pub_b64).unwrap();
+
+        // pack dry-run (should succeed, but should not create output files)
         let mut cmd = Command::new(pkg_name!());
         cmd.current_dir(tmp.path());
         cmd.arg("--dry-run")
@@ -1555,39 +1566,38 @@ mod tests {
             .arg("mypack")
             .arg("--product")
             .arg("prod")
-            .arg("--types")
-            .arg("txt=DummyType")
-            .arg("--")
-            .arg(file_path.to_str().unwrap());
-        // run pack command with dry-run; we don't need to examine stderr in
-        // the final test version since functionality is covered by earlier
-        // debugging.
-        let mut cmd = Command::new(pkg_name!());
-        cmd.current_dir(tmp.path());
-        cmd.arg("--dry-run")
-            .arg("pack")
-            .arg("mypack")
-            .arg("--product")
-            .arg("prod")
+            .arg("--signed-license")
+            .arg("prod.slicense")
+            .arg("--pubkey")
+            .arg("prod.pubkey")
             .arg("--types")
             .arg("txt=DummyType")
             .arg("--")
             .arg(file_path.to_str().unwrap());
         cmd.assert().success();
         assert!(!tmp.path().join("mypack.dlcpack").exists());
-        assert!(!tmp.path().join("prod.slicense").exists());
-        assert!(!tmp.path().join("prod.pubkey").exists());
+        assert!(tmp.path().join("prod.slicense").exists());
+        assert!(tmp.path().join("prod.pubkey").exists());
 
-        // generate dry-run
+        // generate dry-run (should not modify existing files)
+        let slicense_path = tmp.path().join("prod.slicense");
+        let pubkey_path = tmp.path().join("prod.pubkey");
+        let original_slicense = std::fs::read_to_string(&slicense_path).unwrap();
+        let original_pubkey = std::fs::read_to_string(&pubkey_path).unwrap();
+
         let mut cmd2 = Command::new(pkg_name!());
         cmd2.current_dir(tmp.path());
         cmd2.arg("--dry-run")
             .arg("generate")
             .arg("prod")
-            .arg("dlc1");
+            .arg("dlc1")
+            .arg("--force");
         cmd2.assert().success();
-        assert!(!tmp.path().join("prod.slicense").exists());
-        assert!(!tmp.path().join("prod.pubkey").exists());
+
+        assert!(slicense_path.exists());
+        assert!(pubkey_path.exists());
+        assert_eq!(std::fs::read_to_string(&slicense_path).unwrap(), original_slicense);
+        assert_eq!(std::fs::read_to_string(&pubkey_path).unwrap(), original_pubkey);
     }
 
     #[test]

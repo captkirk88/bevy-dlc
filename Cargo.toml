@@ -47,21 +47,15 @@ bevy_cursor_kit = { version = "0.8.0", features = ["serde"] }
 tempfile = "3.26"
 criterion = { version = "0.8", features = ["html_reports"] }
 
-[profile.dev]
-incremental = false
-
-[profile.dev.package."*"]
-incremental = false
-
 [profile.release]
-opt-level = "z"
+opt-level = 3
 strip = "symbols"
 lto = "thin"
 codegen-units = 1
 panic = 'abort'
 
 [profile.release.package."*"]
-opt-level = "z"
+opt-level = 3
 strip = "symbols"
 codegen-units = 1
 

@@ -237,7 +237,7 @@ fn collect_files_recursive(
 
         if path.is_dir() {
             // Skip hidden directories and common build/dependency artifacts to avoid searching too much
-            if name_str.starts_with('.') {
+            if name_str.starts_with('.') || name_str == "target" || name_str == "node_modules" {
                 continue;
             }
             if max_depth > 0 {
@@ -407,16 +407,35 @@ fn print_pack_entries(version: usize, ents: &[(String, bevy_dlc::EncryptedAsset)
     }
 }
 
+/// If `val` is a path to an existing file, return its trimmed contents;
+/// otherwise return `val` unchanged. This lets `--pubkey` and `--signed-license`
+/// accept either a raw token/base64url string or a file path.
+fn resolve_file_or_value(val: String) -> String {
+    let path = std::path::Path::new(&val);
+    if path.is_file() {
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .unwrap_or(val)
+    } else {
+        val
+    }
+}
+
 /// Helper: Resolve pubkey and signed license from CLI args or defaults files
 fn resolve_pubkey_and_license(
     pubkey: Option<String>,
     signed_license: Option<String>,
     product: &str,
 ) -> (Option<String>, Option<String>) {
-    // Priority: explicit CLI args → product files in CWD → product files anywhere under CWD (recursive)
+    // Priority: explicit CLI args (including file paths) → product files in CWD → product files anywhere under CWD (recursive)
+
+    // Normalize explicit args: if the user passed a file path, read its contents.
+    let pubkey = pubkey.map(resolve_file_or_value);
+    let signed_license = signed_license.map(resolve_file_or_value);
 
     // Helper to search recursively for a product file with given extension
-    fn find_product_file_recursive(product: &str, ext: &str) -> Option<String> {
+    fn find_file_recursive(product: &str, ext: &str) -> Option<String> {
         let file_name = format!("{}.{}", product, ext);
         // check CWD first
         if std::path::Path::new(&file_name).exists() {
@@ -440,9 +459,8 @@ fn resolve_pubkey_and_license(
         None
     }
 
-    let resolved_pubkey = pubkey.or_else(|| find_product_file_recursive(product, "pubkey"));
-    let resolved_license =
-        signed_license.or_else(|| find_product_file_recursive(product, "slicense"));
+    let resolved_pubkey = pubkey.or_else(|| find_file_recursive(product, "pubkey"));
+    let resolved_license = signed_license.or_else(|| find_file_recursive(product, "slicense"));
 
     (resolved_pubkey, resolved_license)
 }
@@ -601,9 +619,13 @@ fn resolve_keys(
     product: Option<Product>,
     embedded_product: Option<Product>,
 ) -> (Option<crate::DlcKey>, Option<crate::SignedLicense>) {
+    // Normalize explicit args: accept either raw token/base64url **or** a file path.
+    let pubkey = pubkey.map(resolve_file_or_value);
+    let signed_license = signed_license.map(resolve_file_or_value);
+
     // Priority: explicit args → product/embedded_product files in CWD → recursive search for product files
 
-    fn find_product_file_recursive_opt(name: &str, ext: &str) -> Option<String> {
+    fn find_file_recursive_opt(name: &str, ext: &str) -> Option<String> {
         let file_name = format!("{}.{}", name, ext);
         if std::path::Path::new(&file_name).exists() {
             return std::fs::read_to_string(&file_name)
@@ -628,7 +650,7 @@ fn resolve_keys(
     let resolved_pubkey_str = pubkey.or_else(|| {
         // try product / embedded_product first
         if let Some(prod) = product.as_ref().or_else(|| embedded_product.as_ref()) {
-            if let Some(found) = find_product_file_recursive_opt(prod.as_ref(), "pubkey") {
+            if let Some(found) = find_file_recursive_opt(prod.as_ref(), "pubkey") {
                 return Some(found);
             }
         }
@@ -637,7 +659,7 @@ fn resolve_keys(
 
     let resolved_license_str = signed_license.or_else(|| {
         if let Some(prod) = product.as_ref().or_else(|| embedded_product.as_ref()) {
-            if let Some(found) = find_product_file_recursive_opt(prod.as_ref(), "slicense") {
+            if let Some(found) = find_file_recursive_opt(prod.as_ref(), "slicense") {
                 return Some(found);
             }
         }
@@ -875,6 +897,16 @@ async fn pack_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // extracted from main::Commands::Pack
     let (pubkey, signed_license) = resolve_pubkey_and_license(pubkey, signed_license, &product);
+
+    // A signed license is required so the same encryption key is used consistently.
+    // Use `generate` to create one if you don't have one yet.
+    if signed_license.is_none() {
+        return Err(format!(
+            "no signed license found for product '{product}'. \
+             Run `bevy-dlc generate {product} <dlc_id>` to create one first, \
+             then use `--signed-license <path-or-token>` or place `{product}.slicense` in the current directory."
+        ).into());
+    }
 
     // Collect all input files (from files or directories)
     let mut selected_files: Vec<PathBuf> = Vec::new();
