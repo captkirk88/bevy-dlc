@@ -63,7 +63,7 @@ pub fn run_edit_repl(
         format!("{}", "Adding new files disabled, no signed license.".yellow())
     };
 
-    safe_println!("{}.", adding_enabled);
+    safe_println!("{}", adding_enabled);
     safe_println!("Type 'help' for commands.");
 
     let mut dirty = false;

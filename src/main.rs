@@ -142,13 +142,7 @@ enum Commands {
         )]
         out: Option<PathBuf>,
         /// Product identifier to embed in the private key
-        #[arg(
-            short,
-            long,
-            help = "Product identifier to embed in the signed private key",
-            long_help = "Embeds a product identifier in the private key. Tokens must include a matching product value to be accepted. Use this to restrict tokens to a specific game or application.",
-            value_name = "PRODUCT"
-        )]
+        #[arg(value_name = "PRODUCT", help = "Product identifier to embed in the signed private key")]
         product: String,
 
         /// Manual type overrides (ext=TypePath pairs)
@@ -233,13 +227,14 @@ enum Commands {
         /// Overwrite existing files if present
         #[arg(short, long)]
         force: bool,
-        /// Optionally emit a random 32-byte AES key (base64url/hex). Use `--aes-key` to print the key.
-        #[arg(
-            long = "aes-key",
-            help = "Print a random 32-byte AES key (base64url) for use with secure crate"
-        )]
-        aes_key: bool,
     },
+
+    #[command(
+        about = "Generate a random 32-character AES-256 key",
+        long_about = "Generate a cryptographically random 32-character key for use with include_signed_license_aes!. The key is printed as exactly 32 printable ASCII characters, matching the requirement of bevy_dlc_macro.",
+        alias = "aes"
+    )]
+    AesKey,
 
     #[command(
         about = "Interactive REPL to edit an existing .dlcpack metadata (add/remove entries, merge another pack, etc.)",
@@ -1291,7 +1286,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             dlcs,
             out_dir,
             force,
-            aes_key,
         } => {
             // create private key + signed license (private key seed becomes embedded encrypt_key)
             let dlc_key = DlcKey::generate_random();
@@ -1372,22 +1366,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             });
 
-            // optionally emit a random 32-byte AES key (base64url)
-            if aes_key {
-                if !cli.dry_run {
-                    let ek = EncryptionKey::from_random();
-                    ek.with_secret(|kb| {
-                        println!(
-                            "{} {}",
-                            "AES KEY (base64url):".color(AnsiColors::Cyan).bold(),
-                            URL_SAFE_NO_PAD.encode(kb)
-                        );
-                    });
-                } else {
-                    print_warning("dry-run: would generate and print a random AES key");
-                }
-            }
-
             if cli.dry_run {
                 print_warning(
                     format!(
@@ -1461,6 +1439,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => {
                 print_error(&e.to_string());
+            }
+        },
+        Commands::AesKey => {
+            if cli.dry_run {
+                print_warning("dry-run: would generate and print a random 32-character AES key");
+            } else {
+                let ek = EncryptionKey::from_random();
+                ek.with_secret(|kb| {
+                    // 64-char printable ASCII set; 256/64=4 so every char has equal probability
+                    let cryptor = byte_aes::Aes256Cryptor::new(kb.clone());
+                    let key = cryptor.key();
+                    let key: String = String::from_utf8_lossy(key).into_owned();
+                    println!(
+                        "{} {}",
+                        "AES KEY:".color(AnsiColors::Cyan).bold(),
+                        key
+                    );
+                });
             }
         },
     }

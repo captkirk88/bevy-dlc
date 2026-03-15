@@ -19,6 +19,14 @@ Works with Bevy's asset pipeline.
 - Product binding — prevent token reuse across games
 - Security checks to prevent common mistakes like packing executables or other packs
 
+## Recommended Approach
+
+1. Use `bevy-dlc` CLI to generate a public/private key pair and a signed license for your DLC.
+2. Use `bevy-dlc` CLI to create a `base.dlcpack` containing your base game assets, signing it with the same license.
+3. In your game, include the public key and signed license (see [examples](examples/)) and add `DlcPlugin` to your app.
+4. Load DLC assets with `AssetServer::load("base.dlcpack")` and then you can use `AssetServer::load("base.dlcpack#path/to/asset.png")` or via `DlcPackLoaded` events to access specific assets from the pack.
+5. When you want to ship DLC, create a new pack (e.g. `dlcA.dlcpack`) with the new assets, signing it with the same license.  The game can load it with `AssetServer::load("dlcA.dlcpack")` and access its assets with `AssetServer::load("dlcA.dlcpack#path/to/dlc_asset.png")` or via `DlcPackLoaded` events.
+
 ## Install
 
 Add to your `Cargo.toml`:
