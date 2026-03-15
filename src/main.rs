@@ -1,14 +1,70 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 // Windows exposes a hidden-file flag that we skip; on Unix/macOS the
 // conventional “hidden” file is simply one whose name begins with a dot.
 // Guard the import so the code still builds on non-Windows platforms.
+#[cfg(target_os = "windows")]
+use winapi::um::fileapi::GetFileAttributesA;
+#[cfg(target_os = "windows")]
+use winapi::um::winnt::FILE_ATTRIBUTE_HIDDEN;
+
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+use libc::{stat, UF_HIDDEN};
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-#[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::MetadataExt;
+
+/// Checks if the specified file is hidden.
+///
+/// # Arguments
+///
+/// * `path` - A reference to a `PathBuf` that holds the path of the file.
+///
+/// # Returns
+///
+/// * `Ok(true)` if the file is hidden.
+/// * `Ok(false)` if the file is not hidden.
+/// * `Err` if there is an error accessing the file metadata.
+fn is_hidden(path: &PathBuf) -> std::io::Result<bool> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid file name"))?;
+    if file_name.to_str().map_or(false, |s| s.starts_with('.')) {
+        return Ok(true);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let path_c = std::ffi::CString::new(path.to_str().unwrap())?;
+        let attributes = unsafe { GetFileAttributesA(path_c.as_ptr()) };
+        if attributes == u32::MAX {
+            return Err(std::io::Error::last_os_error());
+        }
+        return Ok((attributes & FILE_ATTRIBUTE_HIDDEN) != 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut file_stat: stat = unsafe { std::mem::zeroed() };
+        let path_c = std::ffi::CString::new(path.to_str().unwrap())?;
+        let ret = unsafe { libc::stat(path_c.as_ptr(), &mut file_stat) };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        return Ok((file_stat.st_flags & UF_HIDDEN as u32) != 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // just check if the file name starts with a dot which is done above
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, "Unsupported OS"));
+    }
+}
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -246,30 +302,27 @@ fn collect_files_recursive(
                 collect_files_recursive(&path, out, ext_filter, max_depth - 1)?;
             }
         } else if path.is_file() {
-            #[cfg(windows)]
-            if let Ok(meta) = path.metadata() {
-                if meta.file_attributes() & 0x00000002 != 0 {
-                    // Skip hidden files
-                    continue;
+            match is_hidden(&path) {
+                Ok(true) => continue, // skip hidden files
+                Ok(false) => {}      // continue processing
+                Err(e) => {
+                    eprintln!("Warning: failed to check if file is hidden '{}': {}", path.display(), e);
+                    continue; // skip files we can't access
                 }
             }
 
-            // Skip hidden files
-            if name_str.starts_with('.') {
-                continue;
-            }
             // Always skip files whose extension marks them as non-asset / binary artifacts.
             let file_ext = path
                 .extension()
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            const FORBIDDEN_EXTENSIONS: &[&str] = &[
+            const EXCLUDE_EXTENSIONS: &[&str] = &[
                 "dlcpack", "slicense", "pubkey",
                 "exe", "dll", "so", "dylib",
                 "pdb", "ilk", "exp", "lib", "a", "o", "rlib",
             ];
-            if FORBIDDEN_EXTENSIONS.contains(&file_ext.as_str()) {
+            if EXCLUDE_EXTENSIONS.contains(&file_ext.as_str()) {
                 continue;
             }
 
