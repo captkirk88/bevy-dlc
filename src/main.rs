@@ -16,43 +16,40 @@ use libc::{stat, UF_HIDDEN};
 use std::os::unix::fs::MetadataExt;
 
 /// Checks if the specified file is hidden.
-///
-/// # Arguments
-///
-/// * `path` - A reference to a `PathBuf` that holds the path of the file.
-///
-/// # Returns
-///
-/// * `Ok(true)` if the file is hidden.
-/// * `Ok(false)` if the file is not hidden.
-/// * `Err` if there is an error accessing the file metadata.
-fn is_hidden(path: &PathBuf) -> std::io::Result<bool> {
+fn is_hidden(path: &PathBuf) -> bool {
     let file_name = path
-        .file_name()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid file name"))?;
-    if file_name.to_str().map_or(false, |s| s.starts_with('.')) {
-        return Ok(true);
+        .file_name().and_then(|s| s.to_str());
+    if file_name.map_or(false, |s| s.starts_with('.')) {
+        return true;
     }
+
+            let path_str = match path.to_str() {
+            Some(s) => s,
+            None => return true, // treat non-UTF-8 paths as hidden to avoid packing them
+        };
+        let path_c = match std::ffi::CString::new(path_str) {
+            Ok(c) => c,
+            Err(_) => return true, // treat paths with null bytes as hidden to avoid packing them
+        };
+
     #[cfg(target_os = "windows")]
     {
-        let path_c = std::ffi::CString::new(path.to_str().unwrap())?;
         let attributes = unsafe { GetFileAttributesA(path_c.as_ptr()) };
         if attributes == u32::MAX {
-            return Err(std::io::Error::last_os_error());
+            return true; // treat inaccessible files as hidden to avoid packing them
         }
-        return Ok((attributes & FILE_ATTRIBUTE_HIDDEN) != 0);
+        return (attributes & FILE_ATTRIBUTE_HIDDEN) != 0;
     }
 
     #[cfg(target_os = "macos")]
     {
         let mut file_stat: stat = unsafe { std::mem::zeroed() };
-        let path_c = std::ffi::CString::new(path.to_str().unwrap())?;
         let ret = unsafe { libc::stat(path_c.as_ptr(), &mut file_stat) };
         if ret != 0 {
-            return Err(std::io::Error::last_os_error());
+            return true; // treat inaccessible files as hidden to avoid packing them
         }
 
-        return Ok((file_stat.st_flags & UF_HIDDEN as u32) != 0);
+        return (file_stat.st_flags & UF_HIDDEN as u32) != 0;
     }
 
     #[cfg(target_os = "linux")]
@@ -62,7 +59,8 @@ fn is_hidden(path: &PathBuf) -> std::io::Result<bool> {
 
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, "Unsupported OS"));
+        return false; // treat unsupported OS as not hidden
+
     }
 }
 
@@ -123,6 +121,9 @@ enum Commands {
             value_name = "DLC_ID"
         )]
         dlc_id: String,
+        /// Product identifier to embed in the private key
+        #[arg(value_name = "PRODUCT", help = "Product identifier to embed in the signed private key")]
+        product: String,
         /// Supply an explicit list of files to include (overrides directory recursion)
         #[arg(value_name = "FILES...", last = true)]
         files: Vec<PathBuf>,
@@ -141,9 +142,6 @@ enum Commands {
             value_name = "OUT"
         )]
         out: Option<PathBuf>,
-        /// Product identifier to embed in the private key
-        #[arg(value_name = "PRODUCT", help = "Product identifier to embed in the signed private key")]
-        product: String,
 
         /// Manual type overrides (ext=TypePath pairs)
         #[arg(
@@ -297,13 +295,8 @@ fn collect_files_recursive(
                 collect_files_recursive(&path, out, ext_filter, max_depth - 1)?;
             }
         } else if path.is_file() {
-            match is_hidden(&path) {
-                Ok(true) => continue, // skip hidden files
-                Ok(false) => {}      // continue processing
-                Err(e) => {
-                    eprintln!("Warning: failed to check if file is hidden '{}': {}", path.display(), e);
-                    continue; // skip files we can't access
-                }
+            if is_hidden(&path) {
+                continue;
             }
 
             let file_ext = path
