@@ -205,6 +205,17 @@ macro_rules! dlc_simple_asset {
 /// Includes a secure license token and a public key from files.
 ///
 /// Returns a `(DlcKey, SignedLicense)` tuple.
+/// 
+/// Example:
+/// ```rust,ignore
+/// use bevy_dlc::prelude::*;
+/// 
+/// let (dlc_key, signed_license) = include_dlc_key_and_license_aes!(
+///     "examples/example_keys/example.pubkey",
+///     "examples/example_keys/example.slicense",
+///     "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345", // Don't use a key like this in production! This is just an example for testing purposes. The key must be exactly 32 characters for AES-256.
+/// );
+/// ```
 #[macro_export]
 macro_rules! include_dlc_key_and_license_aes {
     ($pubkey_path:expr, $license_path:expr, $license_key:expr $(,)?) => {{
