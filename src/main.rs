@@ -258,14 +258,24 @@ fn collect_files_recursive(
             if name_str.starts_with('.') {
                 continue;
             }
+            // Always skip files whose extension marks them as non-asset / binary artifacts.
+            let file_ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            const FORBIDDEN_EXTENSIONS: &[&str] = &[
+                "dlcpack", "slicense", "pubkey",
+                "exe", "dll", "so", "dylib",
+                "pdb", "ilk", "exp", "lib", "a", "o", "rlib",
+            ];
+            if FORBIDDEN_EXTENSIONS.contains(&file_ext.as_str()) {
+                continue;
+            }
+
             match ext_filter {
                 Some(filter) => {
-                    if path
-                        .extension()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.eq_ignore_ascii_case(filter))
-                        .unwrap_or(false)
-                    {
+                    if file_ext.eq_ignore_ascii_case(filter) {
                         out.push(path);
                     }
                 }
@@ -1400,4 +1410,144 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_files_recursive;
+    use tempfile::tempdir;
+
+    /// `collect_files_recursive` with no ext_filter must never return files whose
+    /// extension appears in FORBIDDEN_EXTENSIONS (.dlcpack, .slicense, .pubkey,
+    /// native binaries, etc.).
+    #[test]
+    fn collect_files_skips_forbidden_extensions() {
+        let tmp = tempdir().unwrap();
+
+        // Create asset files that SHOULD be collected.
+        let txt  = tmp.path().join("sprite.txt");
+        let json = tmp.path().join("level.json");
+        let png  = tmp.path().join("icon.png");
+        std::fs::write(&txt,  b"hello").unwrap();
+        std::fs::write(&json, b"{}").unwrap();
+        std::fs::write(&png,  b"\x89PNG").unwrap();
+
+        // Create files whose extensions must be silently excluded.
+        let forbidden_cases = [
+            "bundle.dlcpack",
+            "game.slicense",
+            "game.pubkey",
+            "app.exe",
+            "runtime.dll",
+            "module.so",
+            "lib.dylib",
+            "debug.pdb",
+            "link.exp",
+            "link.lib",
+            "object.o",
+            "rustlib.rlib",
+            "archive.a",
+        ];
+        for name in &forbidden_cases {
+            std::fs::write(tmp.path().join(name), b"data").unwrap();
+        }
+
+        let mut collected = Vec::new();
+        collect_files_recursive(tmp.path(), &mut collected, None, 5).unwrap();
+
+        // Every collected path must NOT have a forbidden extension.
+        const FORBIDDEN: &[&str] = &[
+            "dlcpack", "slicense", "pubkey", "exe", "dll", "so", "dylib", "pdb",
+            "ilk", "exp", "lib", "a", "o", "rlib",
+        ];
+        for path in &collected {
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            assert!(
+                !FORBIDDEN.contains(&ext.as_str()),
+                "forbidden extension '.{}' was collected: {}",
+                ext,
+                path.display()
+            );
+        }
+
+        // All three asset files must be present.
+        let names: Vec<_> = collected
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"sprite.txt".to_string()),  "sprite.txt missing");
+        assert!(names.contains(&"level.json".to_string()),  "level.json missing");
+        assert!(names.contains(&"icon.png".to_string()),    "icon.png missing");
+
+        // Total count: exactly the three asset files (none of the forbidden ones).
+        assert_eq!(collected.len(), 3, "unexpected files collected: {:?}", names);
+    }
+
+    /// When an ext_filter IS specified the forbidden-extension check still prevents forbidden
+    /// files from leaking through (e.g. someone won't accidentally request ext_filter="dlcpack"
+    /// in a generic helper call and get pack files back).
+    #[test]
+    fn collect_files_ext_filter_still_blocks_forbidden() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("bundle.dlcpack"), b"data").unwrap();
+        std::fs::write(tmp.path().join("good.txt"), b"data").unwrap();
+
+        let mut collected = Vec::new();
+        // explicitly requesting "dlcpack" as the filter — those must still be excluded.
+        collect_files_recursive(tmp.path(), &mut collected, Some("dlcpack"), 5).unwrap();
+        assert!(
+            collected.is_empty(),
+            "dlcpack files leaked through ext_filter: {:?}",
+            collected
+        );
+    }
+
+    /// Hidden files (names starting with `.`) must never be collected.
+    #[test]
+    fn collect_files_skips_hidden_files() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join(".hidden"),     b"secret").unwrap();
+        std::fs::write(tmp.path().join("visible.txt"), b"data"  ).unwrap();
+
+        let mut collected = Vec::new();
+        collect_files_recursive(tmp.path(), &mut collected, None, 5).unwrap();
+
+        let names: Vec<_> = collected
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(!names.iter().any(|n| n.starts_with('.')), "hidden file collected");
+        assert!(names.contains(&"visible.txt".to_string()));
+    }
+
+    /// Directories named `target` or `node_modules` (and hidden dirs) must be skipped.
+    #[test]
+    fn collect_files_skips_build_dirs() {
+        let tmp = tempdir().unwrap();
+        let target_dir = tmp.path().join("target");
+        let nm_dir     = tmp.path().join("node_modules");
+        let hidden_dir = tmp.path().join(".git");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::create_dir_all(&nm_dir    ).unwrap();
+        std::fs::create_dir_all(&hidden_dir).unwrap();
+        std::fs::write(target_dir.join("artifact.txt"), b"build").unwrap();
+        std::fs::write(nm_dir    .join("dep.txt"),      b"dep"  ).unwrap();
+        std::fs::write(hidden_dir.join("config"),       b"cfg"  ).unwrap();
+        std::fs::write(tmp.path().join("asset.txt"),    b"asset").unwrap();
+
+        let mut collected = Vec::new();
+        collect_files_recursive(tmp.path(), &mut collected, None, 5).unwrap();
+
+        let names: Vec<_> = collected
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(!names.contains(&"artifact.txt".to_string()), "target/ was traversed");
+        assert!(!names.contains(&"dep.txt".to_string()),      "node_modules/ was traversed");
+        assert!(names.contains(&"asset.txt".to_string()));
+    }
 }

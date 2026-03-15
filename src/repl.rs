@@ -1657,6 +1657,58 @@ mod tests {
         assert!(out_dir.join("prod.pubkey").exists());
     }
 
+    /// Running `pack` on a directory that contains .dlcpack, .slicense, .pubkey and
+    /// binary files must succeed — those files must be silently excluded rather than
+    /// causing "no AssetLoader for extension '...'" errors.
+    #[test]
+    fn pack_directory_ignores_forbidden_extensions() {
+        let tmp = tempdir().unwrap();
+        let assets_dir = tmp.path().join("assets");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+
+        // A legitimate asset that should end up in the pack.
+        std::fs::write(assets_dir.join("data.txt"), b"game data").unwrap();
+
+        // Forbidden-extension files that sit alongside the asset — these must
+        // be skipped without causing an AssetLoader error.
+        std::fs::write(assets_dir.join("bundle.dlcpack"), b"dlc bytes").unwrap();
+        std::fs::write(assets_dir.join("game.slicense"),  b"license").unwrap();
+        std::fs::write(assets_dir.join("game.pubkey"),    b"pubkey").unwrap();
+        std::fs::write(assets_dir.join("win.exe"),        b"MZ").unwrap();
+        std::fs::write(assets_dir.join("lib.dll"),        b"MZ").unwrap();
+
+        // Create a real signed license so pack does not error on the missing license check.
+        let dlc_key = DlcKey::generate_random();
+        let signed_license = dlc_key
+            .create_signed_license(
+                &[DlcId::from("testpack".to_string())],
+                Product::from("prod"),
+            )
+            .unwrap();
+        let mut lic_str = String::new();
+        signed_license.with_secret(|s| lic_str = s.to_string());
+        let pub_b64 = URL_SAFE_NO_PAD.encode(dlc_key.get_public_key().0);
+        std::fs::write(tmp.path().join("prod.slicense"), &lic_str).unwrap();
+        std::fs::write(tmp.path().join("prod.pubkey"),   &pub_b64).unwrap();
+
+        let mut cmd = Command::new(pkg_name!());
+        cmd.current_dir(tmp.path());
+        cmd.arg("--dry-run")
+            .arg("pack")
+            .arg("testpack")
+            .arg("--product")
+            .arg("prod")
+            .arg("--signed-license")
+            .arg("prod.slicense")
+            .arg("--pubkey")
+            .arg("prod.pubkey")
+            .arg("--types")
+            .arg("txt=DummyType")
+            .arg("--")
+            .arg(assets_dir.to_str().unwrap());
+        cmd.assert().success();
+    }
+
     #[test]
     fn exit_prompt_saves_if_yes() {
         let tmp = tempdir().unwrap();
