@@ -2,7 +2,12 @@
 name = "bevy_dlc_macro"
 version = "1.0.0"
 edition = "2024"
-publish = false
+publish = true
+authors = ["Kirk <github.com/captkirk88>"]
+description = "Procedural macros for bevy-dlc"
+license = "MIT"
+categories = ["game-development"]
+keywords = ["bevy", "dlc"]
 
 [lib]
 proc-macro = true

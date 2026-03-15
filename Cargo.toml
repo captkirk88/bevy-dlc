@@ -10,7 +10,7 @@ readme = "README.md"
 repository = "https://github.com/captkirk88/bevy-dlc"
 categories = ["game-development"]
 keywords = ["bevy", "dlc"]
-exclude = ["/tests/**", "/examples/**", "/example_keys/**", "/benches/**", "/assets/**", "/scripts/**", "*.md", "*.png", "/reports/", "Criterion.toml"]
+exclude = ["/tests/**", "/examples/**", "/example_keys/**", "/benches/**", "/assets/**", "/scripts/**", "*.md", "*.png", "/reports/", "Criterion.toml", "bevy_dlc_macro/**"]
 
 [features]
 default = []
@@ -37,7 +37,7 @@ secure = "0.3"
 infer = "0.19"
 crc32fast = "1.5"
 futures-lite = "2.6"
-bevy_dlc_macro = { path = "bevy_dlc_macro", version = "1.0.0" }
+bevy_dlc_macro = { version = "1.0.0" }
 
 [dev-dependencies]
 assert_cmd = "2.1"
