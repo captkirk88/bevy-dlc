@@ -1,4 +1,4 @@
-/target
+**/target
 *.lock
 
 # publish script
@@ -13,5 +13,5 @@
 **.**.*
 
 # Criterion data
-/reports
+**/reports
 *.html
