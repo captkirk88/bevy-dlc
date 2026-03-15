@@ -299,6 +299,7 @@ fn print_signed_license_and_pubkey(
     dlc_key: &DlcKey,
     write_files: bool,
     product: Option<&str>,
+    out_dir: Option<&std::path::Path>,
 ) {
     let pubkey_b64 = URL_SAFE_NO_PAD.encode(dlc_key.get_public_key().0);
     if !write_files {
@@ -306,13 +307,20 @@ fn print_signed_license_and_pubkey(
         println!("{}: {}", "PUB KEY".blue().bold(), pubkey_b64);
     } else {
         if let Some(prod) = product {
-            let slicense_path = format!("{}.slicense", prod);
-            let pubkey_path = format!("{}.pubkey", prod);
+            let dir = out_dir.unwrap_or_else(|| std::path::Path::new("."));
+            if !dir.exists() {
+                if let Err(e) = std::fs::create_dir_all(dir) {
+                    print_error(&format!("failed to create output directory {}: {}", dir.display(), e));
+                    return;
+                }
+            }
+            let slicense_path = dir.join(format!("{}.slicense", prod));
+            let pubkey_path = dir.join(format!("{}.pubkey", prod));
             if let Err(e) = std::fs::write(&slicense_path, signedlicense) {
-                print_error(&format!("failed to write {}: {}", slicense_path, e));
+                print_error(&format!("failed to write {}: {}", slicense_path.display(), e));
             }
             if let Err(e) = std::fs::write(&pubkey_path, pubkey_b64) {
-                print_error(&format!("failed to write {}: {}", pubkey_path, e));
+                print_error(&format!("failed to write {}: {}", pubkey_path.display(), e));
             }
         } else {
             print_warning("no product name supplied; skipping file write");
@@ -551,7 +559,13 @@ fn handle_license_output(
             )?;
             signedlicense.with_secret(|s| {
                 if write_files {
-                    print_signed_license_and_pubkey(s.as_str(), dlc_key, false, Some(product))
+                    print_signed_license_and_pubkey(
+                        s.as_str(),
+                        dlc_key,
+                        false,
+                        Some(product),
+                        None,
+                    )
                 } else {
                     println!("{}:\n{}", "SIGNED LICENSE".green().bold(), s);
                 }
@@ -564,7 +578,13 @@ fn handle_license_output(
             )?;
             signedlicense.with_secret(|s| {
                 if write_files {
-                    print_signed_license_and_pubkey(s.as_str(), &dlc_key, true, Some(product))
+                    print_signed_license_and_pubkey(
+                        s.as_str(),
+                        &dlc_key,
+                        true,
+                        Some(product),
+                        None,
+                    )
                 } else {
                     println!("{}:\n{}", "SIGNED LICENSE".green().bold(), s);
                 }
@@ -957,18 +977,25 @@ async fn pack_command(
 
     let out_path = if let Some(out_val) = out {
         let path = PathBuf::from(&out_val);
-        if path.exists() && path.is_dir() {
-            // explicit existing directory
-            path.join(format!("{}.dlcpack", dlc_id_str))
-        } else if path.is_file() {
-            // explicit file
-            path
-        } else {
-            // no extension: treat as directory (create it if necessary)
-            if !path.exists() {
-                std::fs::create_dir_all(&path)?;
+        if path.exists() {
+            if path.is_dir() {
+                // explicit existing directory
+                path.join(format!("{}.dlcpack", dlc_id_str))
+            } else {
+                // explicit existing file
+                path
             }
-            path.join(format!("{}.dlcpack", dlc_id_str))
+        } else {
+            // If the path has an extension, treat it as a filename (even if it doesn't exist yet).
+            // Otherwise treat it as a directory and create it.
+            if path.extension().is_some() {
+                path
+            } else {
+                if !path.exists() {
+                    std::fs::create_dir_all(&path)?;
+                }
+                path.join(format!("{}.dlcpack", dlc_id_str))
+            }
         }
     } else {
         PathBuf::from(format!("{}.dlcpack", dlc_id_str))
@@ -1225,6 +1252,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &dlc_key,
                     write_files,
                     Some(product.as_str()),
+                    Some(&out_dir_path),
                 )
             });
 

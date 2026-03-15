@@ -1633,6 +1633,21 @@ mod tests {
     }
 
     #[test]
+    fn generate_creates_expected_files() {
+        let tmp = tempdir().unwrap();
+        let out_dir = tmp.path().join("output/");
+        let prod = "prod";
+
+        let mut cmd = Command::new(pkg_name!());
+        cmd.current_dir(tmp.path());
+        cmd.arg("generate").arg(prod).arg("dlcA").arg("-o").arg(&out_dir);
+        cmd.assert().success();
+
+        assert!(out_dir.join("prod.slicense").exists());
+        assert!(out_dir.join("prod.pubkey").exists());
+    }
+
+    #[test]
     fn exit_prompt_saves_if_yes() {
         let tmp = tempdir().unwrap();
         let pack_path = tmp.path().join("p.dlcpack");

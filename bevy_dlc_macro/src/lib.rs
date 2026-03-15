@@ -44,8 +44,8 @@ pub fn include_signed_license_aes(input: TokenStream) -> TokenStream {
     let func_ident = Ident::new(&format!("get_{}", sanitized), Span::call_site());
 
     quote! {{
-        secure::include_secure_str_aes!(#path, #key, #name_literal);
-        bevy_dlc::SignedLicense::from(#func_ident())
+        ::bevy_dlc::include_secure_str_aes!(#path, #key, #name_literal);
+        ::bevy_dlc::SignedLicense::from(#func_ident())
     }}
     .into()
 }
