@@ -12,9 +12,6 @@ Encrypt and ship your DLC!  Create your DLC logic and assets and securely unlock
 
 Works with Bevy's asset pipeline.
 
-> [!NOTE]
-> For `v1.18.22` install via `cargo install --git https://github.com/captkirk88/bevy-dlc --tag v1.18.22` until `secure-gate v0.8.0` is released.
-
 ## Features
 
 - AES-256-GCM encryption of DLC packs
@@ -38,13 +35,16 @@ Add to your `Cargo.toml`:
 cargo add bevy-dlc
 ```
 > [!NOTE]
-> `bevy-dlc` will always be compatible with Bevy 1.## with the minor version being used for bug fixes and new features.  So `bevy-dlc = "1.18"` will also work and automatically get you any compatible bug fixes and pack format version updates.
+> `bevy-dlc` will always be compatible with Bevy 1.## with the minor version being used for bug fixes and new features.  So `bevy-dlc = "1.18"` will also work and automatically get you any compatible bug fixes and pack format version updates.  Later update it using `cargo update` or `cargo add bevy-dlc@latest` to get the latest compatible version.
 
 To use the CLI tool:
 
 ```bash
 cargo install bevy-dlc
 ```
+
+> [!NOTE]
+> For `v1.18.22` install via `cargo install --git https://github.com/captkirk88/bevy-dlc --tag v1.18.22` until `secure-gate v0.8.0` is released.
 
 Then `bevy-dlc --help` for available commands.
 
