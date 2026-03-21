@@ -12,6 +12,9 @@ Encrypt and ship your DLC!  Create your DLC logic and assets and securely unlock
 
 Works with Bevy's asset pipeline.
 
+> [!NOTE]
+> For `v1.18.22` install via `cargo install --git https://github.com/captkirk88/bevy-dlc --tag v1.18.22` until `secure-gate v0.8.0` is released.
+
 ## Features
 
 - AES-256-GCM encryption of DLC packs
