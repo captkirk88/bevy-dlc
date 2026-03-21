@@ -946,7 +946,7 @@ fn merge_pack_into(
     // repack manually using `save` or the CLI.  Strays should not happen anymore.
     if !strays.is_empty() {
         safe_println!(
-            "{} pack contains unmanifested files; they were skipped. Repack using 'bevy-dlc pack':\n{}",
+            "{}: pack contains unmanifested files; they were skipped. Repack using 'bevy-dlc pack':\n{}",
             "warning".yellow().bold(),
             strays.join(", "),
         );
