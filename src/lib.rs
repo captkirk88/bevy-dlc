@@ -436,7 +436,7 @@ impl DlcKey {
     ///
     /// The public key is derived from the generated seed so the keypair is valid.
     pub fn generate_random() -> Self {
-        let privkey: PrivateKey = PrivateKey::from_random();
+        let privkey: PrivateKey = PrivateKey::new(rand::random());
 
         let pair = privkey
             .with_secret(|priv_bytes| Ed25519KeyPair::from_seed_unchecked(priv_bytes))

@@ -1084,7 +1084,7 @@ mod tests {
         // construct two distinct `EncryptionKey` instances that share the same
         // bytes (one goes in the registry, the other is used for encryption).
         let dlc_id = "standalone";
-        let key = EncryptionKey::from_random();
+        let key = EncryptionKey::new(rand::random());
 
         crate::encrypt_key_registry::clear_all();
         crate::encrypt_key_registry::insert(dlc_id, key.with_secret(|k| EncryptionKey::from(*k)));
@@ -1153,7 +1153,7 @@ mod tests {
         crate::encrypt_key_registry::clear_all();
         let dlc_id = crate::DlcId::from("locked_dlc");
         let items = vec![PackItem::new("a.txt", b"hello".to_vec()).expect("pack item")];
-        let key = EncryptionKey::from_random();
+        let key = EncryptionKey::new(rand::random());
         let _dlc_key = crate::DlcKey::generate_random();
         let product = crate::Product::from("test");
         let container = crate::pack_encrypted_pack(&dlc_id, &items, &product, &key, crate::pack_format::DEFAULT_BLOCK_SIZE).expect("pack");
@@ -1181,7 +1181,7 @@ mod tests {
         crate::encrypt_key_registry::clear_all();
         let dlc_id = crate::DlcId::from("badkey_dlc");
         let items = vec![PackItem::new("b.txt", b"world".to_vec()).expect("pack item")];
-        let real_key = EncryptionKey::from_random();
+        let real_key = EncryptionKey::new(rand::random());
         let _dlc_key = crate::DlcKey::generate_random();
         let product = crate::Product::from("test");
         let container =

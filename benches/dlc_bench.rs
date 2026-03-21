@@ -20,7 +20,7 @@ fn bench_pack(c: &mut Criterion) {
     let items = build_items(100, 1024 * 1024 * 1); // 100 files of 1MB each to get a meaningful packing time
     let product = Product::from("bench");
     let dlc_id = DlcId::from("bench");
-    let key = EncryptionKey::from_random();
+    let key = EncryptionKey::new(rand::random());
 
     c.bench_function("pack_100_files_of_1MB", |b| {
         b.iter_with_large_drop(|| {
@@ -36,7 +36,7 @@ fn bench_parse(c: &mut Criterion) {
     let items = build_items(100, 1024 * 1024 * 1); // 100 files of 1MB each to get a meaningful parsing time
     let product = Product::from("bench");
     let dlc_id = DlcId::from("bench");
-    let key = EncryptionKey::from_random();
+    let key = EncryptionKey::new(rand::random());
 
     // pre-generate a pack so parsing can be isolated
     let pack_bytes = pack_encrypted_pack(&dlc_id, &items, &product, &key, bevy_dlc::DEFAULT_BLOCK_SIZE).unwrap();
@@ -53,7 +53,7 @@ fn bench_decrypt_all_entries(c: &mut Criterion) {
     let items = build_items(30, 1024 * 1024); // 30 files of 1MB each to get a meaningful decryption time
     let product = Product::from("bench");
     let dlc_id = DlcId::from("bench");
-    let key = EncryptionKey::from_random();
+    let key = EncryptionKey::new(rand::random());
     let pack_bytes = pack_encrypted_pack(&dlc_id, &items, &product, &key, bevy_dlc::DEFAULT_BLOCK_SIZE).unwrap();
 
     let (prod2, id2, version, entries, _blocks) =

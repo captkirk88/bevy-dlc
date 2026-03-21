@@ -542,10 +542,10 @@ fn derive_encrypt_key(
         {
             enc_key
         } else {
-            EncryptionKey::from_random()
+            EncryptionKey::new(rand::random())
         }
     } else {
-        EncryptionKey::from_random()
+        EncryptionKey::new(rand::random())
     })
 }
 
@@ -1438,7 +1438,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if cli.dry_run {
                 print_warning("dry-run: would generate and print a random 32-character AES key");
             } else {
-                let ek = EncryptionKey::from_random();
+                let ek = EncryptionKey::new(rand::random());
                 ek.with_secret(|kb| {
                     // 64-char printable ASCII set; 256/64=4 so every char has equal probability
                     let cryptor = byte_aes::Aes256Cryptor::new(kb.clone());
