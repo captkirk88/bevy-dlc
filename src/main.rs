@@ -121,9 +121,12 @@ enum Commands {
             value_name = "DLC_ID"
         )]
         dlc_id: String,
-        /// Product identifier to embed in the private key
-        #[arg(value_name = "PRODUCT", help = "Product identifier to embed in the signed private key")]
-        product: String,
+        /// Product identifier to embed in the private key (positional) or via `--product`
+        #[arg(value_name = "PRODUCT", required_unless_present = "product_override")]
+        product: Option<String>,
+        /// Product identifier to embed in the private key (option flag)
+        #[arg(long = "product", value_name = "PRODUCT", required_unless_present = "product")]
+        product_override: Option<String>,
         /// Supply an explicit list of files to include (overrides directory recursion)
         #[arg(value_name = "FILES...", last = true)]
         files: Vec<PathBuf>,
@@ -957,13 +960,18 @@ async fn pack_command(
     files: Vec<PathBuf>,
     list: bool,
     out: Option<PathBuf>,
-    product: String,
+    product: Option<String>,
+    product_override: Option<String>,
     types: Option<Vec<String>>,
     pubkey: Option<String>,
     signed_license: Option<String>,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // extracted from main::Commands::Pack
+    let product = product
+        .or(product_override)
+        .ok_or("product name is required (positional or --product)")?;
+
     let (pubkey, signed_license) = resolve_pubkey_and_license(pubkey, signed_license, &product);
 
     // A signed license is required so the same encryption key is used consistently.
@@ -1166,6 +1174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             list,
             out,
             product,
+            product_override,
             types,
             pubkey,
             signed_license,
@@ -1178,6 +1187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     list,
                     out,
                     product,
+                    product_override,
                     types,
                     pubkey,
                     signed_license,
