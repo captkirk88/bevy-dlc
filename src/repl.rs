@@ -1,5 +1,5 @@
 use bevy_dlc::{DLC_PACK_MAGIC, EncryptionKey, parse_encrypted_pack, prelude::*};
-use secure_gate::ExposeSecret;
+use secure_gate::RevealSecret;
 use clap::{Arg, ArgAction, Command};
 use owo_colors::{AnsiColors, CssColors, OwoColorize};
 use std::io::{ErrorKind, Write, stdin, stdout};
@@ -417,7 +417,7 @@ pub fn run_edit_repl(
                                 } else {
                                     use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
                                     use flate2::read::GzDecoder;
-                                    use secure_gate::ExposeSecret;
+                                    use secure_gate::RevealSecret;
                                     use tar::Archive;
                                     let cipher = ek
                                         .with_secret(|s| Aes256Gcm::new_from_slice(s))
@@ -684,7 +684,7 @@ fn save_pack_optimized(
     use tar::Archive;
     use std::io::{Read, Seek, SeekFrom};
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
-    use secure_gate::ExposeSecret;
+    use secure_gate::RevealSecret;
 
     // determine whether entries were removed
     let (old_entries, blocks) = {
@@ -881,7 +881,7 @@ fn merge_pack_into(
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
     use flate2::read::GzDecoder;
-    use secure_gate::ExposeSecret;
+    use secure_gate::RevealSecret;
     use tar::Archive;
 
     let ek = encrypt_key.ok_or("encryption key required to merge")?;
@@ -1011,7 +1011,7 @@ mod tests {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use bevy_dlc::{DlcId, DlcKey, EncryptionKey, PackItem, Product, pack_encrypted_pack};
     use predicates::prelude::*;
-    use secure_gate::ExposeSecret;
+    use secure_gate::RevealSecret;
     use tempfile::tempdir;
 
     #[test]
@@ -1098,7 +1098,7 @@ mod tests {
         ) -> Vec<u8> {
             use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
             use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-            use secure_gate::ExposeSecret;
+            use secure_gate::RevealSecret;
             use tar::Archive;
             use std::io::{Read, Seek, SeekFrom};
 
@@ -1284,7 +1284,7 @@ mod tests {
         {
             use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
             use flate2::read::GzDecoder;
-            use secure_gate::ExposeSecret;
+            use secure_gate::RevealSecret;
             use tar::Archive;
             use std::io::{Read, Seek, SeekFrom};
 
@@ -1358,7 +1358,7 @@ mod tests {
         // decrypt resulting pack and confirm only a.txt remains
         use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
         use flate2::read::GzDecoder;
-        use secure_gate::ExposeSecret;
+        use secure_gate::RevealSecret;
         use tar::Archive;
         use std::io::{Read, Seek, SeekFrom};
 

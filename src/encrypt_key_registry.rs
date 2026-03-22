@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 use crate::EncryptionKey;
 use dashmap::DashMap;
 
-use secure_gate::ExposeSecret;
+use secure_gate::RevealSecret;
 
 #[derive(Default)]
 struct DlcRegistration {

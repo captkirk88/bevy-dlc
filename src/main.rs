@@ -77,7 +77,7 @@ use bevy_dlc::{
     parse_encrypted_pack, prelude::*,
 };
 use owo_colors::{AnsiColors, OwoColorize};
-use secure_gate::ExposeSecret;
+use secure_gate::RevealSecret;
 
 mod repl;
 
@@ -814,7 +814,7 @@ fn test_decrypt_archive_with_key_from_reader<R: std::io::Read>(
     // pack_format module being public.
     use aes_gcm::aead::AeadInPlace;
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-    use secure_gate::ExposeSecret;
+    use secure_gate::RevealSecret;
 
     let mut buf = archive_ciphertext.clone();
     let _ = ek.with_secret(|key_bytes| {

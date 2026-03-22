@@ -4,7 +4,7 @@ use bevy::{
     app::{Plugins, ScheduleRunnerPlugin},
     prelude::*,
 };
-use secure_gate::ExposeSecret;
+use secure_gate::RevealSecret;
 use tempfile::TempDir;
 
 use bevy_dlc::{EncryptionKey, pack_encrypted_pack, prelude::*};
