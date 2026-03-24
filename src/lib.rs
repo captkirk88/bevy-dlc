@@ -3,7 +3,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bevy::prelude::*;
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 
-use secure_gate::{ExposeSecret, dynamic_alias, fixed_alias};
+#[allow(unused_imports)]
+use secure_gate::{RevealSecret,CloneableSecret, dynamic_alias, fixed_alias};
 
 mod asset_loader;
 pub mod encrypt_key_registry;

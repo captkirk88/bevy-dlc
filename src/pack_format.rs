@@ -405,7 +405,7 @@ impl PackHeader {
 /// higher-level API.
 
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::AeadInPlace};
-use secure_gate::ExposeSecret;
+use secure_gate::RevealSecret;
 
 use crate::{DlcError, DlcId, EncryptionKey, PackItem, Product};
 

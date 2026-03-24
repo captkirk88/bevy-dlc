@@ -1074,7 +1074,8 @@ impl From<std::io::Error> for DlcLoaderError {
 mod tests {
     use super::*;
     use crate::{EncryptionKey, PackItem};
-    use secure_gate::ExposeSecret;
+    #[allow(unused_imports)]
+    use secure_gate::{RevealSecret, CloneableSecret};
     use serial_test::serial;
 
     #[test]
