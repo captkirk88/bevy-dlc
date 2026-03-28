@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use bevy::winit::WinitPlugin;
 // Windows exposes a hidden-file flag that we skip; on Unix/macOS the
 // conventional “hidden” file is simply one whose name begins with a dot.
 // Guard the import so the code still builds on non-Windows platforms.
@@ -1128,6 +1129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 primary_window: None,
                 ..default()
             })
+            .disable::<WinitPlugin>()
             .set(LogPlugin {
                 level: bevy::log::Level::ERROR,
                 ..Default::default()
