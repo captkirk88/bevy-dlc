@@ -1,6 +1,6 @@
 [package]
 name = "bevy-dlc"
-version = "1.18.22"
+version = "1.18.23"
 edition = "2024"
 rust-version = "1.93"
 authors = ["Kirk <github.com/captkirk88>"]
@@ -30,7 +30,7 @@ tar = "0.4"
 dashmap = "6.1"
 zeroize = "1.8"
 ring = "0.17"
-secure-gate = { version = "0.9.0-rc.2", features = ["rand", "cloneable"] }
+secure-gate = { version = "0.9.0-rc.3", features = ["rand", "cloneable"] }
 byte-aes = "0.2"
 owo-colors = "4.3"
 infer = "0.19"
@@ -48,7 +48,7 @@ libc = "0.2"
 assert_cmd = "2.1"
 predicates = "3.1"
 serial_test = "3.4"
-bevy_common_assets = { version = "0.15.0", features = ["json"] }
+bevy_common_assets = { version = "0.16.0", features = ["json"] }
 bevy_cursor_kit = { version = "0.8.0", features = ["serde"] }
 tempfile = "3.26"
 criterion = { version = "0.8", features = ["html_reports"] }

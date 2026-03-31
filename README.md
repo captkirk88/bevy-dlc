@@ -123,6 +123,12 @@ cargo criterion
 
 See the generated reports in `reports/criterion` for results.
 
+## Compatibility
+
+| bevy | bevy-dlc |
+|------|----------|
+| 0.18 | 1.18     |
+
 ## License
 
 MIT
