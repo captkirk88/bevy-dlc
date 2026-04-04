@@ -1,7 +1,7 @@
 //! Example of loading DLC packs with `bevy-dlc`.
 //! This example assumes you have already generated a signed license and DLC pack using the CLI tool:
 //! ```bash
-//! bevy-dlc generate --product example -o keys/
+//! bevy-dlc generate example -o keys/
 //! ```
 //! You will see warnings in the console about missing asset loaders for the DLC pack entries until you register them with their AssetLoader and `app.register_dlc_type::<T>()` (see `startup` system below). This is expected and intentional to demonstrate how the plugin handles unsupported asset types in DLC packs, and to show how you can add support for them.
 
@@ -11,8 +11,8 @@ use bevy_dlc::prelude::*;
 
 #[path = "../mod.rs"]
 mod examples;
-use examples::*;
 use bevy_cursor_kit::prelude::*;
+use examples::*;
 
 fn main() -> AppExit {
     // DO NOT USE ABCD... as your choice of secure key. This is just a placeholder for the example.
@@ -83,7 +83,7 @@ fn insert_cursor(
     let Some(c) = static_cursors.get(&cursors.0.clone()) else {
         return;
     };
-    
+
     commands
         .entity(*window)
         .insert(bevy::window::CursorIcon::Custom(

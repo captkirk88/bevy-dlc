@@ -57,8 +57,12 @@ fn on_dlc_pack_loaded(
     mut commands: Commands,
 ) {
     // This system demonstrates how to access the loaded pack and its entries when a DLC pack is loaded. You can use this approach to trigger any custom logic you want when a pack is loaded, such as spawning entities based on the contents of the pack, or performing additional asset loading/processing.
-    let img = event.pack().load(&asset_server, "dlc.png");
-    commands.spawn(Sprite::from_image(img));
+    if let Some(entry) = event.pack().find_entry("dlc.png") {
+        let img: Handle<Image> = asset_server.load(entry.path());
+        commands.spawn(Sprite::from_image(img));
+    } else {
+        warn!("Optional entry 'dlc.png' not found in pack '{}'", event.pack().id());
+    }
 
     for entry in event.pack().find_by_type::<TextAsset>() {
         let text_asset: Handle<TextAsset> = asset_server.load(entry.path());

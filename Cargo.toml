@@ -1,6 +1,6 @@
 [package]
 name = "bevy-dlc"
-version = "1.18.23"
+version = "1.18.24"
 edition = "2024"
 rust-version = "1.93"
 authors = ["Kirk <github.com/captkirk88>"]
@@ -30,7 +30,7 @@ tar = "0.4"
 dashmap = "6.1"
 zeroize = "1.8"
 ring = "0.17"
-secure-gate = { version = "0.9.0-rc.3", features = ["rand", "cloneable"] }
+secure-gate = { version = "0.9.0-rc.5", features = ["rand", "cloneable"] }
 byte-aes = "0.2"
 owo-colors = "4.3"
 infer = "0.19"

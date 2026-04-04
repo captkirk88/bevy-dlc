@@ -1,7 +1,7 @@
 use bevy_dlc::{DLC_PACK_MAGIC, EncryptionKey, parse_encrypted_pack, prelude::*};
-use secure_gate::RevealSecret;
 use clap::{Arg, ArgAction, Command};
 use owo_colors::{AnsiColors, CssColors, OwoColorize};
+use secure_gate::RevealSecret;
 use std::io::{ErrorKind, Write, stdin, stdout};
 use std::path::{Path, PathBuf};
 
@@ -36,6 +36,68 @@ macro_rules! safe_print {
     }};
 }
 
+fn encrypt_metadata_section(
+    metadata: &bevy_dlc::PackMetadata,
+    key: &EncryptionKey,
+) -> Result<([u8; 12], Vec<u8>), Box<dyn std::error::Error>> {
+    if metadata.is_empty() {
+        return Ok(([0u8; 12], Vec::new()));
+    }
+
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+
+    let plaintext = serde_json::to_vec(metadata)?;
+    let nonce: [u8; 12] = rand::random();
+    let ciphertext = key.with_secret(|key_bytes| {
+        let cipher = Aes256Gcm::new_from_slice(key_bytes)
+            .map_err(|e| bevy_dlc::DlcError::CryptoError(e.to_string()))?;
+        cipher
+            .encrypt(Nonce::from_slice(&nonce), plaintext.as_slice())
+            .map_err(|_| bevy_dlc::DlcError::EncryptionFailed("metadata encryption failed".into()))
+    })?;
+
+    Ok((nonce, ciphertext))
+}
+
+fn read_raw_metadata_section(
+    path: &Path,
+) -> Result<([u8; 12], Vec<u8>), Box<dyn std::error::Error>> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic)?;
+    if magic != *DLC_PACK_MAGIC {
+        return Err("invalid dlcpack magic".into());
+    }
+
+    let mut version = [0u8; 1];
+    file.read_exact(&mut version)?;
+
+    let mut product_len = [0u8; 2];
+    file.read_exact(&mut product_len)?;
+    let product_len = u16::from_be_bytes(product_len) as usize;
+    let mut discard = vec![0u8; product_len];
+    file.read_exact(&mut discard)?;
+
+    let mut dlc_len = [0u8; 2];
+    file.read_exact(&mut dlc_len)?;
+    let dlc_len = u16::from_be_bytes(dlc_len) as usize;
+    discard.resize(dlc_len, 0);
+    file.read_exact(&mut discard)?;
+
+    let mut nonce = [0u8; 12];
+    file.read_exact(&mut nonce)?;
+
+    let mut metadata_len = [0u8; 4];
+    file.read_exact(&mut metadata_len)?;
+    let metadata_len = u32::from_be_bytes(metadata_len) as usize;
+    let mut ciphertext = vec![0u8; metadata_len];
+    file.read_exact(&mut ciphertext)?;
+
+    Ok((nonce, ciphertext))
+}
+
 pub fn run_edit_repl(
     path: PathBuf,
     mut encrypt_key: Option<EncryptionKey>,
@@ -44,8 +106,15 @@ pub fn run_edit_repl(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::fs::File::open(&path)?;
     let mut reader = std::io::BufReader::new(file);
-    let (product, mut dlc_id, version, mut entries, block_metadatas) =
-        parse_encrypted_pack(&mut reader)?;
+    let parsed_pack = bevy_dlc::parse_encrypted_pack_info(&mut reader, encrypt_key.as_ref())?;
+    let product = parsed_pack.product;
+    let mut dlc_id = parsed_pack.dlc_id;
+    let version = parsed_pack.version;
+    let mut entries = parsed_pack.entries;
+    let block_metadatas = parsed_pack.block_metadatas;
+    let mut pack_metadata = parsed_pack.metadata;
+    let metadata_locked = parsed_pack.metadata_locked;
+    let mut metadata_dirty = false;
 
     safe_println!(
         "{} {} (v{}, {}: {}, dlc: {})",
@@ -60,7 +129,10 @@ pub fn run_edit_repl(
     let adding_enabled = if encrypt_key.is_some() {
         format!("{}", "Adding new files enabled.".green())
     } else {
-        format!("{}", "Adding new files disabled, no signed license.".yellow())
+        format!(
+            "{}",
+            "Adding new files disabled, no signed license.".yellow()
+        )
     };
 
     safe_println!("{}", adding_enabled);
@@ -149,6 +221,33 @@ pub fn run_edit_repl(
                     .about("Clear the console")
                     .visible_alias("clear"),
             )
+            .subcommand(
+                Command::new("metadata")
+                    .about("Manage pack metadata")
+                    .visible_alias("meta")
+                    .subcommand(
+                        Command::new("list")
+                            .visible_aliases(&["ls"])
+                            .about("List pack metadata entries"),
+                    )
+                    .subcommand(
+                        Command::new("add")
+                            .about("Add or replace a pack metadata entry")
+                            .arg(Arg::new("key").help("Metadata key").required(true))
+                            .arg(
+                                Arg::new("value")
+                                    .help("Metadata value as JSON or plain string")
+                                    .required(true)
+                                    .num_args(1..),
+                            ),
+                    )
+                    .subcommand(
+                        Command::new("remove")
+                            .about("Remove a pack metadata entry")
+                            .visible_aliases(&["rm", "del"])
+                            .arg(Arg::new("key").help("Metadata key").required(true)),
+                    ),
+            )
             .subcommand(Command::new("save").about("Write changes back to disk"))
             .subcommand(
                 Command::new("merge")
@@ -205,14 +304,32 @@ pub fn run_edit_repl(
                             " Version: {}",
                             version.to_string().color(AnsiColors::Yellow)
                         );
+                        safe_println!(
+                            " Metadata: {}",
+                            if metadata_locked {
+                                "encrypted (key required to inspect)"
+                                    .color(AnsiColors::Yellow)
+                                    .to_string()
+                            } else {
+                                format!("{} keys", pack_metadata.len())
+                                    .color(AnsiColors::Yellow)
+                                    .to_string()
+                            }
+                        );
                         // report both the encrypted archive blob length and the
                         // actual file size on disk.  if the user saved without a key
                         // (manifest-only change) then only the manifest shrinks and the
                         // archive bytes stay the same.
                         let archive_size: u64 = if version >= 4 {
-                            block_metadatas.iter().map(|b| b.encrypted_size as u64).sum()
+                            block_metadatas
+                                .iter()
+                                .map(|b| b.encrypted_size as u64)
+                                .sum()
                         } else if version >= 2 {
-                            entries.get(0).map(|(_, e)| e.ciphertext.len() as u64).unwrap_or(0)
+                            entries
+                                .get(0)
+                                .map(|(_, e)| e.ciphertext.len() as u64)
+                                .unwrap_or(0)
                         } else {
                             entries.iter().map(|(_, e)| e.ciphertext.len() as u64).sum()
                         };
@@ -479,6 +596,88 @@ pub fn run_edit_repl(
                         }
                         return Ok(false);
                     }
+                    Some(("metadata", sub)) => {
+                        match sub.subcommand() {
+                            Some(("list", _)) | None => {
+                                if metadata_locked {
+                                    safe_println!(
+                                        "Pack metadata is encrypted. Provide a signed license to inspect it."
+                                    );
+                                } else if pack_metadata.is_empty() {
+                                    safe_println!("No pack metadata entries.");
+                                } else {
+                                    safe_println!("Pack metadata:");
+                                    for (key, value) in &pack_metadata {
+                                        let rendered =
+                                            serde_json::to_string(value).unwrap_or_else(|_| {
+                                                "<unprintable metadata>".to_string()
+                                            });
+                                        safe_println!(
+                                            " - {} = {}",
+                                            key.color(AnsiColors::Green),
+                                            rendered.color(AnsiColors::Yellow),
+                                        );
+                                    }
+                                }
+                            }
+                            Some(("add", metadata_add)) => {
+                                if encrypt_key.is_none() {
+                                    safe_println!(
+                                        "{} Editing encrypted metadata requires a signed license. Provide --signed-license (and optionally --pubkey) when launching the editor, or use \"generate\" command.",
+                                        "error".red().bold(),
+                                    );
+                                    return Ok(false);
+                                }
+
+                                let key = metadata_add
+                                    .get_one::<String>("key")
+                                    .expect("metadata key is required");
+                                let value_parts = metadata_add
+                                    .get_many::<String>("value")
+                                    .expect("metadata value is required");
+                                let raw_value = value_parts
+                                    .map(String::as_str)
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                let parsed_value = crate::parse_metadata_value(&raw_value);
+                                let rendered = serde_json::to_string(&parsed_value)
+                                    .unwrap_or_else(|_| "<unprintable metadata>".to_string());
+                                pack_metadata.insert(key.clone(), parsed_value);
+                                safe_println!(
+                                    "Updated metadata {} = {}",
+                                    key.color(AnsiColors::Green),
+                                    rendered.color(AnsiColors::Yellow),
+                                );
+                                dirty = true;
+                                metadata_dirty = true;
+                            }
+                            Some(("remove", metadata_remove)) => {
+                                if encrypt_key.is_none() {
+                                    safe_println!(
+                                        "{} Editing encrypted metadata requires a signed license. Provide --signed-license (and optionally --pubkey) when launching the editor, or use \"generate\" command.",
+                                        "error".red().bold(),
+                                    );
+                                    return Ok(false);
+                                }
+
+                                let key = metadata_remove
+                                    .get_one::<String>("key")
+                                    .expect("metadata key is required");
+                                if pack_metadata.remove(key).is_some() {
+                                    safe_println!(
+                                        "Removed metadata entry {}",
+                                        key.color(AnsiColors::Green),
+                                    );
+                                    dirty = true;
+                                    metadata_dirty = true;
+                                } else {
+                                    safe_println!("Metadata entry not found: {}", key);
+                                }
+                            }
+                            _ => {}
+                        }
+                        return Ok(false);
+                    }
                     Some(("save", _)) => {
                         if !dirty {
                             safe_println!("No changes to save.");
@@ -493,6 +692,8 @@ pub fn run_edit_repl(
                                 version,
                                 &product,
                                 &dlc_id,
+                                &pack_metadata,
+                                metadata_dirty,
                                 &entries,
                                 &added_files,
                                 encrypt_key.as_ref(),
@@ -502,6 +703,7 @@ pub fn run_edit_repl(
                                 path.display().to_string().color(AnsiColors::Cyan),
                             );
                             dirty = false;
+                            metadata_dirty = false;
                             added_files.clear();
                         }
                         return Ok(false);
@@ -535,13 +737,15 @@ pub fn run_edit_repl(
                                     );
                                     if encrypt_key.is_none() {
                                         if let Some(lic) = resolved_license.as_ref() {
-                        if let Some(enc_key) = bevy_dlc::extract_encrypt_key_from_license(lic) {
-                            let key_bytes: Vec<u8> = enc_key.with_secret(|kb| kb.to_vec());
-                            encrypt_key = Some(EncryptionKey::new(
-                                key_bytes.try_into().map_err(|_| "encryption key must be 32 bytes")?,
-                            ));
-                        }
-                    }
+                                            if let Some(enc_key) =
+                                                bevy_dlc::extract_encrypt_key_from_license(lic)
+                                            {
+                                                encrypt_key = Some(
+                                                    enc_key
+                                                        .with_secret(|kb| EncryptionKey::new(*kb)),
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -589,6 +793,8 @@ pub fn run_edit_repl(
                                         version,
                                         &product,
                                         &dlc_id,
+                                        &pack_metadata,
+                                        metadata_dirty,
                                         &entries,
                                         &added_files,
                                         encrypt_key.as_ref(),
@@ -598,6 +804,7 @@ pub fn run_edit_repl(
                                         path.display().to_string().color(AnsiColors::Cyan),
                                     );
                                     added_files.clear();
+                                    metadata_dirty = false;
                                     return Ok(true);
                                 } else {
                                     return Err(e.into());
@@ -611,6 +818,8 @@ pub fn run_edit_repl(
                                     version,
                                     &product,
                                     &dlc_id,
+                                    &pack_metadata,
+                                    metadata_dirty,
                                     &entries,
                                     &added_files,
                                     encrypt_key.as_ref(),
@@ -620,6 +829,7 @@ pub fn run_edit_repl(
                                     path.display().to_string().color(AnsiColors::Cyan),
                                 );
                                 added_files.clear();
+                                metadata_dirty = false;
                             }
                         }
                         return Ok(true);
@@ -676,15 +886,17 @@ fn save_pack_optimized(
     _version: usize,
     product: &Product,
     dlc_id: &DlcId,
+    metadata: &bevy_dlc::PackMetadata,
+    metadata_changed: bool,
     entries: &[(String, EncryptedAsset)],
     added_files: &std::collections::HashMap<String, Vec<u8>>,
     encrypt_key: Option<&EncryptionKey>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use flate2::read::GzDecoder;
-    use tar::Archive;
-    use std::io::{Read, Seek, SeekFrom};
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+    use flate2::read::GzDecoder;
     use secure_gate::RevealSecret;
+    use std::io::{Read, Seek, SeekFrom};
+    use tar::Archive;
 
     // determine whether entries were removed
     let (old_entries, blocks) = {
@@ -697,11 +909,21 @@ fn save_pack_optimized(
 
     // Fast path: no structural changes — just rewrite the manifest headers.
     if added_files.is_empty() && !removed {
-        return update_manifest(path, bevy_dlc::DLC_PACK_VERSION_LATEST as usize, product, dlc_id, entries);
+        return update_manifest(
+            path,
+            bevy_dlc::DLC_PACK_VERSION_LATEST as usize,
+            product,
+            dlc_id,
+            metadata,
+            metadata_changed,
+            entries,
+            encrypt_key,
+        );
     }
 
-    let ek = encrypt_key
-        .ok_or("Re-packing (adding or removing files) requires a signed license (--signed-license)")?;
+    let ek = encrypt_key.ok_or(
+        "Re-packing (adding or removing files) requires a signed license (--signed-license)",
+    )?;
 
     let mut items = Vec::new();
     let cipher = ek
@@ -712,7 +934,7 @@ fn save_pack_optimized(
     {
         let mut file = std::fs::File::open(path)?;
         let block_data = if !blocks.is_empty() {
-            // v4
+            // v5
             let mut configs = Vec::new();
             for b in blocks {
                 file.seek(SeekFrom::Start(b.file_offset))?;
@@ -766,8 +988,15 @@ fn save_pack_optimized(
     }
 
     // 3. Re-pack using latest format
-    let bytes = bevy_dlc::pack_encrypted_pack(dlc_id, &items, product, ek, bevy_dlc::DEFAULT_BLOCK_SIZE)
-        .map_err(|e: bevy_dlc::DlcError| e.to_string())?;
+    let bytes = bevy_dlc::pack_encrypted_pack_with_metadata(
+        dlc_id,
+        &items,
+        product,
+        metadata,
+        ek,
+        bevy_dlc::DEFAULT_BLOCK_SIZE,
+    )
+    .map_err(|e: bevy_dlc::DlcError| e.to_string())?;
     std::fs::write(path, bytes)?;
 
     Ok(())
@@ -779,14 +1008,17 @@ fn update_manifest(
     version: usize,
     product: &Product,
     dlc_id: &DlcId,
+    metadata: &bevy_dlc::PackMetadata,
+    metadata_changed: bool,
     entries: &[(String, EncryptedAsset)],
+    encrypt_key: Option<&EncryptionKey>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut out = Vec::new();
     out.extend_from_slice(DLC_PACK_MAGIC);
     out.push(version as u8);
 
-    if version == 4 {
-        // v4 header
+    if version == bevy_dlc::DLC_PACK_VERSION_LATEST as usize {
+        // v5 header
         let prod_bytes = product.as_str().as_bytes();
         out.extend_from_slice(&(prod_bytes.len() as u16).to_be_bytes());
         out.extend_from_slice(prod_bytes);
@@ -794,6 +1026,18 @@ fn update_manifest(
         let dlc_bytes = dlc_id.as_str().as_bytes();
         out.extend_from_slice(&(dlc_bytes.len() as u16).to_be_bytes());
         out.extend_from_slice(dlc_bytes);
+
+        let (metadata_nonce, metadata_ciphertext) = if metadata_changed {
+            let key = encrypt_key.ok_or(
+                "Updating encrypted metadata requires a signed license (--signed-license)",
+            )?;
+            encrypt_metadata_section(metadata, key)?
+        } else {
+            read_raw_metadata_section(path)?
+        };
+        out.extend_from_slice(&metadata_nonce);
+        out.extend_from_slice(&(metadata_ciphertext.len() as u32).to_be_bytes());
+        out.extend_from_slice(&metadata_ciphertext);
 
         // Manifest
         out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
@@ -823,43 +1067,42 @@ fn update_manifest(
         let mut file = std::fs::File::open(path)?;
         let mut reader = std::io::BufReader::new(&mut file);
         let (_p, _id, _v, _e, blocks) = parse_encrypted_pack(&mut reader)?;
-        
+
         out.extend_from_slice(&(blocks.len() as u32).to_be_bytes());
-        
+
         let mut block_data_to_copy = Vec::new();
         for b in blocks {
             // Write metadata (File offset will need update!)
             out.extend_from_slice(&b.block_id.to_be_bytes());
-            
+
             // We'll update the offset later
             let offset_pos = out.len();
             out.extend_from_slice(&0u64.to_be_bytes());
-            
+
             out.extend_from_slice(&b.encrypted_size.to_be_bytes());
             out.extend_from_slice(&b.uncompressed_size.to_be_bytes());
             out.extend_from_slice(&b.nonce);
             out.extend_from_slice(&b.crc32.to_be_bytes());
-            
+
             // Read block ciphertext
-            use std::io::{Seek, SeekFrom, Read};
+            use std::io::{Read, Seek, SeekFrom};
             file.seek(SeekFrom::Start(b.file_offset))?;
             let mut ct = vec![0u8; b.encrypted_size as usize];
             file.read_exact(&mut ct)?;
             block_data_to_copy.push((offset_pos, ct));
         }
-        
+
         // Append blocks and update offsets
         for (offset_pos, ct) in block_data_to_copy {
             let current_pos = out.len() as u64;
-            out[offset_pos..offset_pos+8].copy_from_slice(&current_pos.to_be_bytes());
+            out[offset_pos..offset_pos + 8].copy_from_slice(&current_pos.to_be_bytes());
             out.extend_from_slice(&ct);
         }
-
     } else {
         // legacy formats are no longer supported; this branch should never be
-        // taken because all packs are assumed to be v4.  If we do hit it we
+        // taken because all packs are assumed to be v5. If we do hit it we
         // bail out early so the caller can handle the error.
-        return Err("pack format <4 is unsupported".into());
+        return Err(format!("pack format v{} is unsupported", version).into());
     }
 
     std::fs::write(path, &out)?;
@@ -901,7 +1144,7 @@ fn merge_pack_into(
         return Ok(Vec::new());
     }
 
-    // decrypt blobs from the other pack (v4 or legacy)
+    // decrypt blobs from the other pack (v5 only)
     let cipher = ek
         .with_secret(|s| Aes256Gcm::new_from_slice(s))
         .map_err(|_| "cipher init")?;
@@ -910,9 +1153,9 @@ fn merge_pack_into(
 
     if blocks.is_empty() {
         // unsupported legacy format
-        return Err("cannot merge from pre-v4 pack".into());
+        return Err("cannot merge from pre-v5 pack".into());
     } else {
-        // v4 multi-block
+        // v5 multi-block
         use std::io::{Read, Seek, SeekFrom};
         for block in blocks {
             file.seek(SeekFrom::Start(block.file_offset))?;
@@ -1014,6 +1257,10 @@ mod tests {
     use secure_gate::RevealSecret;
     use tempfile::tempdir;
 
+    fn test_bin() -> Command {
+        Command::cargo_bin(pkg_name!()).expect("build current bevy-dlc binary")
+    }
+
     #[test]
     fn human_bytes_macro_formats_expected() {
         assert_eq!(bevy_dlc::human_bytes!(0), "0 B");
@@ -1035,7 +1282,7 @@ mod tests {
             &[item1],
             &product,
             &enc_key,
-            bevy_dlc::DEFAULT_BLOCK_SIZE
+            bevy_dlc::DEFAULT_BLOCK_SIZE,
         )
         .unwrap();
 
@@ -1045,7 +1292,7 @@ mod tests {
             &[item2],
             &product,
             &enc_key,
-            bevy_dlc::DEFAULT_BLOCK_SIZE
+            bevy_dlc::DEFAULT_BLOCK_SIZE,
         )
         .unwrap();
 
@@ -1099,8 +1346,8 @@ mod tests {
             use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
             use flate2::{Compression, read::GzDecoder, write::GzEncoder};
             use secure_gate::RevealSecret;
-            use tar::Archive;
             use std::io::{Read, Seek, SeekFrom};
+            use tar::Archive;
 
             // parse header from the existing pack so we can rebuild
             let mut reader = std::io::Cursor::new(original);
@@ -1117,10 +1364,12 @@ mod tests {
                 let first = &entries[0].1;
                 (first.nonce, first.ciphertext.clone())
             } else {
-                // v4
+                // v5
                 let first_block = &blocks[0];
                 let mut data = vec![0u8; first_block.encrypted_size as usize];
-                reader.seek(SeekFrom::Start(first_block.file_offset)).unwrap();
+                reader
+                    .seek(SeekFrom::Start(first_block.file_offset))
+                    .unwrap();
                 reader.read_exact(&mut data).unwrap();
                 (first_block.nonce, std::sync::Arc::from(data))
             };
@@ -1161,47 +1410,54 @@ mod tests {
             gz.write_all(&new_tar).unwrap();
             let compressed = gz.finish().unwrap();
 
-            // rebuild using the actual packer to ensure v4 format is correct
+            // rebuild using the actual packer to ensure the v5 format is correct
             // but we want to KEEP the original manifest (to test stray detection)
-            let _items: Vec<PackItem> = existing.into_iter().map(|(p, d)| {
-                PackItem::new(p, d).unwrap()
-            }).collect();
-            
+            let _items: Vec<PackItem> = existing
+                .into_iter()
+                .map(|(p, d)| PackItem::new(p, d).unwrap())
+                .collect();
+
             // If we use the standard packer it will update the manifest.
-            // So we manually build the v4 pack but use the OLD manifest entries.
-            
+            // So we manually build the v5 pack but use the old manifest entries.
+
             let _encrypted_size = compressed.len() as u32;
             let new_nonce: [u8; 12] = rand::random();
             let cipher2 = encrypt_key
                 .with_secret(|s| Aes256Gcm::new_from_slice(s))
                 .expect("cipher init");
-            let new_ciphertext = cipher2.encrypt(Nonce::from_slice(&new_nonce), compressed.as_ref()).unwrap();
-            
-            // Reconstruct a minimalist v4 pack
+            let new_ciphertext = cipher2
+                .encrypt(Nonce::from_slice(&new_nonce), compressed.as_ref())
+                .unwrap();
+
+            // Reconstruct a minimalist v5 pack
             let mut out = Vec::new();
             out.extend_from_slice(DLC_PACK_MAGIC);
-            out.push(4); // version
-            
+            out.push(bevy_dlc::DLC_PACK_VERSION_LATEST); // version
+
             let p_bytes = product.as_str().as_bytes();
             out.extend_from_slice(&(p_bytes.len() as u16).to_be_bytes());
             out.extend_from_slice(p_bytes);
-            
+
             let d_bytes = did.as_str().as_bytes();
             out.extend_from_slice(&(d_bytes.len() as u16).to_be_bytes());
             out.extend_from_slice(d_bytes);
-            
+
+            // Empty pack metadata section: nonce + ciphertext length.
+            out.extend_from_slice(&[0u8; 12]);
+            out.extend_from_slice(&0u32.to_be_bytes());
+
             // Manifest count (use original entries)
             out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
             for (path, enc) in entries {
-                // write binary entry (V4 format)
+                // write binary entry (v5 format)
                 let p_bytes = path.as_bytes();
                 out.extend_from_slice(&(p_bytes.len() as u32).to_be_bytes());
                 out.extend_from_slice(p_bytes);
-                
+
                 let ext_bytes = enc.original_extension.as_bytes();
                 out.push(ext_bytes.len() as u8);
                 out.extend_from_slice(ext_bytes);
-                
+
                 if let Some(tp) = enc.type_path {
                     let tp_bytes = tp.as_bytes();
                     out.extend_from_slice(&(tp_bytes.len() as u16).to_be_bytes());
@@ -1209,29 +1465,29 @@ mod tests {
                 } else {
                     out.extend_from_slice(&0u16.to_be_bytes());
                 }
-                
+
                 out.extend_from_slice(&0u32.to_be_bytes()); // block_id
                 out.extend_from_slice(&0u32.to_be_bytes()); // block_offset (not perfect but OK for test)
                 out.extend_from_slice(&0u32.to_be_bytes()); // size
             }
-            
+
             // Block count (1)
             out.extend_from_slice(&1u32.to_be_bytes());
             out.extend_from_slice(&0u32.to_be_bytes()); // block_id
-            
+
             let _header_size = out.len() as u64 + 8 + 4 + 4 + 12 + 4; // approximate
             out.extend_from_slice(&0u64.to_be_bytes()); // temp offset
             let offset_pos = out.len() - 8;
-            
+
             out.extend_from_slice(&(new_ciphertext.len() as u32).to_be_bytes());
             out.extend_from_slice(&0u32.to_be_bytes()); // uncompressed
             out.extend_from_slice(&new_nonce);
             out.extend_from_slice(&0u32.to_be_bytes()); // crc
-            
+
             let final_offset = out.len() as u64;
             let offset_bytes = final_offset.to_be_bytes();
-            out[offset_pos..offset_pos+8].copy_from_slice(&offset_bytes);
-            
+            out[offset_pos..offset_pos + 8].copy_from_slice(&offset_bytes);
+
             out.extend_from_slice(&new_ciphertext);
             out
         }
@@ -1246,7 +1502,7 @@ mod tests {
             &[item],
             &product,
             &enc_key,
-            bevy_dlc::DEFAULT_BLOCK_SIZE
+            bevy_dlc::DEFAULT_BLOCK_SIZE,
         )
         .unwrap();
 
@@ -1285,14 +1541,14 @@ mod tests {
             use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
             use flate2::read::GzDecoder;
             use secure_gate::RevealSecret;
-            use tar::Archive;
             use std::io::{Read, Seek, SeekFrom};
+            use tar::Archive;
 
             let cipher = enc_key
                 .with_secret(|s| Aes256Gcm::new_from_slice(s))
                 .unwrap();
             let (_, _, _, disk_entries, blocks) = parse_encrypted_pack(&mut file).unwrap();
-            
+
             let block_data = if blocks.is_empty() {
                 let first = &disk_entries[0].1;
                 (first.nonce, first.ciphertext.clone())
@@ -1332,8 +1588,14 @@ mod tests {
         let id = DlcId::from("removal".to_string());
         let item1 = PackItem::new("a.txt", b"one".to_vec()).unwrap();
         let item2 = PackItem::new("b.txt", b"two".to_vec()).unwrap();
-        let bytes =
-            pack_encrypted_pack(&id, &[item1, item2], &product, &enc_key, bevy_dlc::DEFAULT_BLOCK_SIZE).unwrap();
+        let bytes = pack_encrypted_pack(
+            &id,
+            &[item1, item2],
+            &product,
+            &enc_key,
+            bevy_dlc::DEFAULT_BLOCK_SIZE,
+        )
+        .unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("pack.dlcpack");
         std::fs::write(&path, &bytes).unwrap();
@@ -1349,6 +1611,8 @@ mod tests {
             ver,
             &product,
             &id,
+            &bevy_dlc::PackMetadata::new(),
+            false,
             &entries,
             &added_files,
             Some(&enc_key),
@@ -1359,8 +1623,8 @@ mod tests {
         use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
         use flate2::read::GzDecoder;
         use secure_gate::RevealSecret;
-        use tar::Archive;
         use std::io::{Read, Seek, SeekFrom};
+        use tar::Archive;
 
         let cipher = enc_key
             .with_secret(|s| Aes256Gcm::new_from_slice(s))
@@ -1412,7 +1676,7 @@ mod tests {
             &[item],
             &product,
             &enc_key,
-            bevy_dlc::DEFAULT_BLOCK_SIZE
+            bevy_dlc::DEFAULT_BLOCK_SIZE,
         )
         .unwrap();
 
@@ -1420,16 +1684,172 @@ mod tests {
         let pack_path = tmp.path().join("p.dlcpack");
         std::fs::write(&pack_path, &bytes).unwrap();
 
-        let mut cmd = Command::new(pkg_name!());
+        let mut cmd = test_bin();
         cmd.current_dir(tmp.path());
         cmd.arg("edit").arg("p.dlcpack").arg("--").arg("ls");
         cmd.assert()
             .success()
             // color codes may surround the DLC ID so just look for the prefix
             .stdout(
-                predicates::str::contains("Entries in ")
-                    .and(predicates::str::contains("foo.txt"))
+                predicates::str::contains("Entries in ").and(predicates::str::contains("foo.txt")),
             );
+    }
+
+    #[test]
+    fn edit_one_shot_info() {
+        let _dlc_key = DlcKey::generate_random();
+        let enc_key = EncryptionKey::new(rand::random());
+        let product = Product::from("example");
+        let item = PackItem::new("foo.txt", b"hello".to_vec()).unwrap();
+        let bytes = pack_encrypted_pack(
+            &DlcId::from("p".to_string()),
+            &[item],
+            &product,
+            &enc_key,
+            bevy_dlc::DEFAULT_BLOCK_SIZE,
+        )
+        .unwrap();
+
+        let tmp = tempdir().unwrap();
+        let pack_path = tmp.path().join("p.dlcpack");
+        std::fs::write(&pack_path, &bytes).unwrap();
+
+        let mut cmd = test_bin();
+        cmd.current_dir(tmp.path());
+        cmd.arg("edit").arg("p.dlcpack").arg("--").arg("info");
+        cmd.assert()
+            .success()
+            .stdout(predicate::str::contains("Pack info:"))
+            .stdout(predicate::str::contains("Product:"))
+            .stdout(predicate::str::contains("DLC ID:"));
+    }
+
+    #[test]
+    fn edit_type_command_updates_manifest() {
+        let tmp = tempdir().unwrap();
+        let pack_path = tmp.path().join("p.dlcpack");
+        let _dlc_key = DlcKey::generate_random();
+        let enc_key = EncryptionKey::new(rand::random());
+        let product = Product::from("prod");
+        let item = PackItem::new("foo.txt", b"hello".to_vec()).unwrap();
+        let bytes = pack_encrypted_pack(
+            &DlcId::from("p".to_string()),
+            &[item],
+            &product,
+            &enc_key,
+            bevy_dlc::DEFAULT_BLOCK_SIZE,
+        )
+        .unwrap();
+        std::fs::write(&pack_path, &bytes).unwrap();
+
+        let mut cmd = test_bin();
+        cmd.current_dir(tmp.path());
+        cmd.arg("edit").arg("p.dlcpack");
+        cmd.write_stdin("type foo.txt my::Type\nsave\nexit\n");
+        cmd.assert().success();
+
+        let file = std::fs::File::open(&pack_path).unwrap();
+        let (_prod, _did, _version, entries, _blocks) = parse_encrypted_pack(file).unwrap();
+        let entry = entries.iter().find(|(path, _)| path == "foo.txt").expect("entry exists");
+        assert_eq!(entry.1.type_path.as_deref(), Some("my::Type"));
+    }
+
+    #[test]
+    fn edit_id_command_updates_pack_id() {
+        let tmp = tempdir().unwrap();
+        let pack_path = tmp.path().join("p.dlcpack");
+        let _dlc_key = DlcKey::generate_random();
+        let enc_key = EncryptionKey::new(rand::random());
+        let product = Product::from("prod");
+        let item = PackItem::new("foo.txt", b"hello".to_vec()).unwrap();
+        let bytes = pack_encrypted_pack(
+            &DlcId::from("p".to_string()),
+            &[item],
+            &product,
+            &enc_key,
+            bevy_dlc::DEFAULT_BLOCK_SIZE,
+        )
+        .unwrap();
+        std::fs::write(&pack_path, &bytes).unwrap();
+
+        let mut cmd = test_bin();
+        cmd.current_dir(tmp.path());
+        cmd.arg("edit").arg("p.dlcpack");
+        cmd.write_stdin("id renamed\nsave\nexit\n");
+        cmd.assert().success();
+
+        let file = std::fs::File::open(&pack_path).unwrap();
+        let (_prod, did, _version, _entries, _blocks) = parse_encrypted_pack(file).unwrap();
+        assert_eq!(did.as_str(), "renamed");
+    }
+
+    #[test]
+    fn edit_add_and_export_commands_work_with_signed_license() {
+        let tmp = tempdir().unwrap();
+        let pack_path = tmp.path().join("p.dlcpack");
+        let dlc_key = DlcKey::generate_random();
+        let product = Product::from("prod");
+        let signed = dlc_key
+            .create_signed_license(&["p"], product.clone())
+            .unwrap();
+        let signed_str = signed.expose_secret().to_string();
+        std::fs::write(tmp.path().join("prod.slicense"), &signed_str).unwrap();
+        let enc_key = bevy_dlc::extract_encrypt_key_from_license(&signed).unwrap();
+
+        let item = PackItem::new("foo.txt", b"hello".to_vec()).unwrap();
+        let bytes = pack_encrypted_pack(
+            &DlcId::from("p".to_string()),
+            &[item],
+            &product,
+            &enc_key,
+            bevy_dlc::DEFAULT_BLOCK_SIZE,
+        )
+        .unwrap();
+        std::fs::write(&pack_path, &bytes).unwrap();
+        std::fs::write(tmp.path().join("bar.txt"), b"bar data").unwrap();
+
+        let mut cmd = test_bin();
+        cmd.current_dir(tmp.path());
+        cmd.arg("edit").arg("p.dlcpack");
+        cmd.write_stdin(
+            "add bar.txt --path nested/bar.txt --type my::Bar\nexport nested/bar.txt exported.txt\nsave\nexit\n",
+        );
+        cmd.assert().success();
+
+        let exported = std::fs::read(tmp.path().join("exported.txt")).unwrap();
+        assert_eq!(exported, b"bar data");
+
+        let file = std::fs::File::open(&pack_path).unwrap();
+        let (_prod, _did, _version, entries, _blocks) = parse_encrypted_pack(file).unwrap();
+        let entry = entries.iter().find(|(path, _)| path == "nested/bar.txt").expect("added entry exists");
+        assert_eq!(entry.1.type_path.as_deref(), Some("my::Bar"));
+    }
+
+    #[test]
+    fn edit_one_shot_cls_succeeds() {
+        let _dlc_key = DlcKey::generate_random();
+        let enc_key = EncryptionKey::new(rand::random());
+        let product = Product::from("example");
+        let item = PackItem::new("foo.txt", b"hello".to_vec()).unwrap();
+        let bytes = pack_encrypted_pack(
+            &DlcId::from("p".to_string()),
+            &[item],
+            &product,
+            &enc_key,
+            bevy_dlc::DEFAULT_BLOCK_SIZE,
+        )
+        .unwrap();
+
+        let tmp = tempdir().unwrap();
+        let pack_path = tmp.path().join("p.dlcpack");
+        std::fs::write(&pack_path, &bytes).unwrap();
+
+        let mut cmd = test_bin();
+        cmd.current_dir(tmp.path());
+        cmd.arg("edit").arg("p.dlcpack").arg("--").arg("cls");
+        cmd.assert()
+            .success()
+            .stdout(predicate::str::contains("\u{1b}[2J\u{1b}[1;1H"));
     }
 
     #[test]
@@ -1445,12 +1865,12 @@ mod tests {
             &[item],
             &product,
             &enc_key,
-            bevy_dlc::DEFAULT_BLOCK_SIZE
+            bevy_dlc::DEFAULT_BLOCK_SIZE,
         )
         .unwrap();
         std::fs::write(&pack_path, &bytes).unwrap();
 
-        let mut cmd = Command::new(pkg_name!());
+        let mut cmd = test_bin();
         cmd.current_dir(tmp.path());
         cmd.arg("--dry-run").arg("edit").arg("p.dlcpack");
         cmd.write_stdin("rm foo.txt\nsave\nexit\n");
@@ -1459,6 +1879,59 @@ mod tests {
         let file = std::fs::File::open(&pack_path).unwrap();
         let (_p, _id, _v, entries, _) = parse_encrypted_pack(file).unwrap();
         assert!(entries.iter().any(|(p, _)| p == "foo.txt"));
+    }
+
+    #[test]
+    fn edit_metadata_commands_persist_metadata_changes() {
+        let tmp = tempdir().expect("tempdir");
+        let pack_path = tmp.path().join("p.dlcpack");
+        let product = Product::from("prod");
+        let dlc_key = DlcKey::generate_random();
+        let signed_license = dlc_key
+            .create_signed_license(&[DlcId::from("p".to_string())], product.clone())
+            .expect("create signed license");
+        let enc_key = bevy_dlc::extract_encrypt_key_from_license(&signed_license)
+            .expect("extract encrypt key from signed license");
+        let item = PackItem::new("foo.txt", b"hello".to_vec()).expect("pack item");
+        let bytes = pack_encrypted_pack(
+            &DlcId::from("p".to_string()),
+            &[item],
+            &product,
+            &enc_key,
+            bevy_dlc::DEFAULT_BLOCK_SIZE,
+        )
+        .expect("pack encrypted pack");
+        std::fs::write(&pack_path, &bytes).expect("write pack");
+        let mut signed_license_text = String::new();
+        signed_license.with_secret(|text| {
+            signed_license_text = text.to_string();
+        });
+        std::fs::write(tmp.path().join("prod.slicense"), signed_license_text)
+            .expect("write signed license");
+
+        let mut cmd = test_bin();
+        cmd.current_dir(tmp.path());
+        cmd.arg("edit").arg("p.dlcpack");
+        cmd.write_stdin(
+            "metadata add chapter intro\nmetadata add flags {\"boss\":true,\"stage\":2}\nmetadata list\nmetadata remove chapter\nsave\nexit\n",
+        );
+        cmd.assert()
+            .success()
+            .stdout(predicate::str::contains("flags"));
+
+        let file = std::fs::File::open(&pack_path).expect("open modified pack");
+        let parsed = bevy_dlc::parse_encrypted_pack_info(file, Some(&enc_key))
+            .expect("parse modified pack");
+
+        assert!(!parsed.metadata.contains_key("chapter"));
+        assert_eq!(
+            parsed.metadata["flags"]["boss"],
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(
+            parsed.metadata["flags"]["stage"],
+            serde_json::Value::from(2)
+        );
     }
 
     #[test]
@@ -1481,7 +1954,7 @@ mod tests {
             &[item_a],
             &product,
             &enc_key,
-            bevy_dlc::DEFAULT_BLOCK_SIZE
+            bevy_dlc::DEFAULT_BLOCK_SIZE,
         )
         .unwrap();
         let item_b = PackItem::new("b.txt", b"bar".to_vec()).unwrap();
@@ -1490,7 +1963,7 @@ mod tests {
             &[item_b],
             &product,
             &enc_key,
-            bevy_dlc::DEFAULT_BLOCK_SIZE
+            bevy_dlc::DEFAULT_BLOCK_SIZE,
         )
         .unwrap();
 
@@ -1507,7 +1980,7 @@ mod tests {
         let pub_b64 = URL_SAFE_NO_PAD.encode(dlc_key.get_public_key().0);
 
         // normal merge with delete
-        let mut cmd = Command::new(pkg_name!());
+        let mut cmd = test_bin();
         cmd.current_dir(tmp.path());
         cmd.arg("edit")
             .arg("a.dlcpack")
@@ -1518,14 +1991,13 @@ mod tests {
             .arg(&lic_str)
             .arg(format!("--pubkey={}", pub_b64))
             .arg("-d");
-        cmd.assert().success();
-        let output = cmd.output().expect("failed to read output");
-        eprintln!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+        let output = cmd.assert().success().get_output().stdout.clone();
+        eprintln!("stdout: {}", String::from_utf8_lossy(&output));
         assert!(!path_b.exists());
 
         // recreate b and perform dry-run merge+delete
         std::fs::write(&path_b, &bytes_b).unwrap();
-        let mut cmd2 = Command::new(pkg_name!());
+        let mut cmd2 = test_bin();
         cmd2.current_dir(tmp.path());
         cmd2.arg("--dry-run")
             .arg("edit")
@@ -1560,13 +2032,12 @@ mod tests {
         std::fs::write(tmp.path().join("prod.pubkey"), &pub_b64).unwrap();
 
         // pack dry-run (should succeed, but should not create output files)
-        let mut cmd = Command::new(pkg_name!());
+        let mut cmd = test_bin();
         cmd.current_dir(tmp.path());
         cmd.arg("--dry-run")
             .arg("pack")
-            .arg("mypack")
-            .arg("--product")
             .arg("prod")
+            .arg("mypack")
             .arg("--signed-license")
             .arg("prod.slicense")
             .arg("--pubkey")
@@ -1586,7 +2057,7 @@ mod tests {
         let original_slicense = std::fs::read_to_string(&slicense_path).unwrap();
         let original_pubkey = std::fs::read_to_string(&pubkey_path).unwrap();
 
-        let mut cmd2 = Command::new(pkg_name!());
+        let mut cmd2 = test_bin();
         cmd2.current_dir(tmp.path());
         cmd2.arg("--dry-run")
             .arg("generate")
@@ -1597,8 +2068,14 @@ mod tests {
 
         assert!(slicense_path.exists());
         assert!(pubkey_path.exists());
-        assert_eq!(std::fs::read_to_string(&slicense_path).unwrap(), original_slicense);
-        assert_eq!(std::fs::read_to_string(&pubkey_path).unwrap(), original_pubkey);
+        assert_eq!(
+            std::fs::read_to_string(&slicense_path).unwrap(),
+            original_slicense
+        );
+        assert_eq!(
+            std::fs::read_to_string(&pubkey_path).unwrap(),
+            original_pubkey
+        );
     }
 
     #[test]
@@ -1611,14 +2088,13 @@ mod tests {
         std::fs::write(&sl, "not-a-license").unwrap();
         std::fs::write(&pk, "not-a-pubkey").unwrap();
 
-        let mut cmd = Command::new(pkg_name!());
+        let mut cmd = test_bin();
         cmd.current_dir(tmp.path());
         cmd.arg("generate").arg(prod).arg("dlcA");
-        cmd.assert()
-            .failure();
+        cmd.assert().failure();
 
         // force should override even though contents are invalid
-        let mut cmd2 = Command::new(pkg_name!());
+        let mut cmd2 = test_bin();
         cmd2.current_dir(tmp.path());
         cmd2.arg("generate").arg("--force").arg(prod).arg("dlcA");
         cmd2.assert().success();
@@ -1630,17 +2106,16 @@ mod tests {
         let prod = "prod";
 
         // produce a sane pair first
-        let mut cmd_gen = Command::new(pkg_name!());
+        let mut cmd_gen = test_bin();
         cmd_gen.current_dir(tmp.path());
         cmd_gen.arg("generate").arg(prod).arg("dlcA");
         cmd_gen.assert().success();
 
         // running again without force should emit the generic exists message
-        let mut cmd = Command::new(pkg_name!());
+        let mut cmd = test_bin();
         cmd.current_dir(tmp.path());
         cmd.arg("generate").arg(prod).arg("dlcA");
-        cmd.assert()
-            .failure();
+        cmd.assert().failure();
     }
 
     #[test]
@@ -1649,9 +2124,13 @@ mod tests {
         let out_dir = tmp.path().join("output/");
         let prod = "prod";
 
-        let mut cmd = Command::new(pkg_name!());
+        let mut cmd = test_bin();
         cmd.current_dir(tmp.path());
-        cmd.arg("generate").arg(prod).arg("dlcA").arg("-o").arg(&out_dir);
+        cmd.arg("generate")
+            .arg(prod)
+            .arg("dlcA")
+            .arg("-o")
+            .arg(&out_dir);
         cmd.assert().success();
 
         assert!(out_dir.join("prod.slicense").exists());
@@ -1673,10 +2152,10 @@ mod tests {
         // Forbidden-extension files that sit alongside the asset — these must
         // be skipped without causing an AssetLoader error.
         std::fs::write(assets_dir.join("bundle.dlcpack"), b"dlc bytes").unwrap();
-        std::fs::write(assets_dir.join("game.slicense"),  b"license").unwrap();
-        std::fs::write(assets_dir.join("game.pubkey"),    b"pubkey").unwrap();
-        std::fs::write(assets_dir.join("win.exe"),        b"MZ").unwrap();
-        std::fs::write(assets_dir.join("lib.dll"),        b"MZ").unwrap();
+        std::fs::write(assets_dir.join("game.slicense"), b"license").unwrap();
+        std::fs::write(assets_dir.join("game.pubkey"), b"pubkey").unwrap();
+        std::fs::write(assets_dir.join("win.exe"), b"MZ").unwrap();
+        std::fs::write(assets_dir.join("lib.dll"), b"MZ").unwrap();
 
         // Create a real signed license so pack does not error on the missing license check.
         let dlc_key = DlcKey::generate_random();
@@ -1690,15 +2169,14 @@ mod tests {
         signed_license.with_secret(|s| lic_str = s.to_string());
         let pub_b64 = URL_SAFE_NO_PAD.encode(dlc_key.get_public_key().0);
         std::fs::write(tmp.path().join("prod.slicense"), &lic_str).unwrap();
-        std::fs::write(tmp.path().join("prod.pubkey"),   &pub_b64).unwrap();
+        std::fs::write(tmp.path().join("prod.pubkey"), &pub_b64).unwrap();
 
-        let mut cmd = Command::new(pkg_name!());
+        let mut cmd = test_bin();
         cmd.current_dir(tmp.path());
         cmd.arg("--dry-run")
             .arg("pack")
-            .arg("testpack")
-            .arg("--product")
             .arg("prod")
+            .arg("testpack")
             .arg("--signed-license")
             .arg("prod.slicense")
             .arg("--pubkey")
@@ -1730,12 +2208,12 @@ mod tests {
             &[item],
             &product,
             &enc_key,
-            bevy_dlc::DEFAULT_BLOCK_SIZE
+            bevy_dlc::DEFAULT_BLOCK_SIZE,
         )
         .unwrap();
         std::fs::write(&pack_path, &bytes).unwrap();
 
-        let mut cmd = Command::new(pkg_name!());
+        let mut cmd = test_bin();
         cmd.current_dir(tmp.path());
         cmd.arg("edit")
             .arg("p.dlcpack")

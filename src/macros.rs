@@ -6,14 +6,17 @@
 //! `bevy_dlc::pack_items!()`, `bevy_dlc::dlc_register_types!()`, etc.
 
 #[doc(hidden)]
-pub fn __decode_embedded_signed_license_aes(encrypted_b64: &str, key: &str) -> crate::SignedLicense {
+pub fn __decode_embedded_signed_license_aes(
+    encrypted_b64: &str,
+    key: &str,
+) -> crate::SignedLicense {
     use base64::Engine as _;
 
     let value = base64::prelude::BASE64_STANDARD
         .decode(encrypted_b64.as_bytes())
         .expect("invalid embedded base64 in signed license");
-    let cryptor = byte_aes::Aes256Cryptor::try_from(key)
-        .expect("invalid AES key for signed license");
+    let cryptor =
+        byte_aes::Aes256Cryptor::try_from(key).expect("invalid AES key for signed license");
     let decoded_data = cryptor
         .decrypt(value)
         .expect("failed to decrypt embedded signed license");
@@ -22,8 +25,7 @@ pub fn __decode_embedded_signed_license_aes(encrypted_b64: &str, key: &str) -> c
     // allocation, now owned by SignedLicense, which zeroes it on drop
     // via dynamic_alias!.
     crate::SignedLicense::from(
-        String::from_utf8(decoded_data)
-            .expect("embedded signed license is not valid UTF-8"),
+        String::from_utf8(decoded_data).expect("embedded signed license is not valid UTF-8"),
     )
 }
 
@@ -205,11 +207,11 @@ macro_rules! dlc_simple_asset {
 /// Includes a secure license token and a public key from files.
 ///
 /// Returns a `(DlcKey, SignedLicense)` tuple.
-/// 
+///
 /// Example:
 /// ```rust,ignore
 /// use bevy_dlc::prelude::*;
-/// 
+///
 /// let (dlc_key, signed_license) = include_dlc_key_and_license_aes!(
 ///     "examples/example_keys/example.pubkey",
 ///     "examples/example_keys/example.slicense",
@@ -220,9 +222,8 @@ macro_rules! dlc_simple_asset {
 macro_rules! include_dlc_key_and_license_aes {
     ($pubkey_path:expr, $license_path:expr, $license_key:expr $(,)?) => {{
         let signed_license = $crate::include_signed_license_aes!($license_path, $license_key);
-        let dlc_key = $crate::DlcKey::public(include_str!($pubkey_path))
-            .expect("invalid dlc pubkey");
+        let dlc_key =
+            $crate::DlcKey::public(include_str!($pubkey_path)).expect("invalid dlc pubkey");
         (dlc_key, signed_license)
     }};
 }
-

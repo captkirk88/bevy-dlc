@@ -1,8 +1,8 @@
+use bevy::winit::WinitPlugin;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use bevy::winit::WinitPlugin;
 // Windows exposes a hidden-file flag that we skip; on Unix/macOS the
 // conventional “hidden” file is simply one whose name begins with a dot.
 // Guard the import so the code still builds on non-Windows platforms.
@@ -12,26 +12,25 @@ use winapi::um::fileapi::GetFileAttributesA;
 use winapi::um::winnt::FILE_ATTRIBUTE_HIDDEN;
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
-use libc::{stat, UF_HIDDEN};
+use libc::{UF_HIDDEN, stat};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
 /// Checks if the specified file is hidden.
 fn is_hidden(path: &PathBuf) -> bool {
-    let file_name = path
-        .file_name().and_then(|s| s.to_str());
+    let file_name = path.file_name().and_then(|s| s.to_str());
     if file_name.map_or(false, |s| s.starts_with('.')) {
         return true;
     }
 
-            let path_str = match path.to_str() {
-            Some(s) => s,
-            None => return true, // treat non-UTF-8 paths as hidden to avoid packing them
-        };
-        let path_c = match std::ffi::CString::new(path_str) {
-            Ok(c) => c,
-            Err(_) => return true, // treat paths with null bytes as hidden to avoid packing them
-        };
+    let path_str = match path.to_str() {
+        Some(s) => s,
+        None => return true, // treat non-UTF-8 paths as hidden to avoid packing them
+    };
+    let path_c = match std::ffi::CString::new(path_str) {
+        Ok(c) => c,
+        Err(_) => return true, // treat paths with null bytes as hidden to avoid packing them
+    };
 
     #[cfg(target_os = "windows")]
     {
@@ -61,7 +60,6 @@ fn is_hidden(path: &PathBuf) -> bool {
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
         return false; // treat unsupported OS as not hidden
-
     }
 }
 
@@ -74,8 +72,9 @@ use clap::{Parser, Subcommand};
 
 use bevy_dlc::{
     DLC_PACK_VERSION_LATEST, EncryptionKey, PackItem, extract_dlc_ids_from_license,
-    extract_encrypt_key_from_license, extract_product_from_license, pack_encrypted_pack,
-    parse_encrypted_pack, prelude::*,
+    extract_encrypt_key_from_license, extract_product_from_license,
+    pack_encrypted_pack_with_metadata, parse_encrypted_pack, parse_encrypted_pack_info,
+    prelude::*,
 };
 use owo_colors::{AnsiColors, OwoColorize};
 use secure_gate::RevealSecret;
@@ -116,18 +115,15 @@ enum Commands {
         alias = "p"
     )]
     Pack {
+        /// Product identifier to embed in the private key.
+        #[arg(value_name = "PRODUCT")]
+        product: String,
         /// DLC identifier to embed in the container/private key
         #[arg(
             help = "Identifier embedded into the container and private key (e.g. expansion_1)",
             value_name = "DLC_ID"
         )]
         dlc_id: String,
-        /// Product identifier to embed in the private key (positional) or via `--product`
-        #[arg(value_name = "PRODUCT", required_unless_present = "product_override")]
-        product: Option<String>,
-        /// Product identifier to embed in the private key (option flag)
-        #[arg(long = "product", value_name = "PRODUCT", required_unless_present = "product")]
-        product_override: Option<String>,
         /// Supply an explicit list of files to include (overrides directory recursion)
         #[arg(value_name = "FILES...", last = true)]
         files: Vec<PathBuf>,
@@ -156,6 +152,15 @@ enum Commands {
             num_args = 1..
         )]
         types: Option<Vec<String>>,
+
+        /// Pack-level metadata entries in the form key=value. Values are parsed as JSON when possible and fall back to strings.
+        #[arg(
+            long = "metadata",
+            help = "Pack metadata entry as key=value. Values are parsed as JSON when possible.",
+            value_name = "KEY=VALUE",
+            num_args = 1..
+        )]
+        metadata: Option<Vec<String>>,
 
         /// Optional public key to use for verifying/printing an externally-supplied license
         #[arg(
@@ -276,6 +281,56 @@ enum Commands {
     },
 }
 
+pub(crate) fn parse_metadata_value(raw: &str) -> serde_json::Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
+}
+
+pub(crate) fn parse_metadata_assignments(
+    assignments: &[String],
+) -> Result<bevy_dlc::PackMetadata, Box<dyn std::error::Error>> {
+    let mut metadata = bevy_dlc::PackMetadata::new();
+    for assignment in assignments {
+        let (key, raw_value) = assignment.split_once('=').ok_or_else(|| {
+            format!(
+                "invalid metadata entry '{}'; expected key=value",
+                assignment
+            )
+        })?;
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(format!(
+                "invalid metadata entry '{}'; key cannot be empty",
+                assignment
+            )
+            .into());
+        }
+        metadata.insert(key.to_string(), parse_metadata_value(raw_value.trim()));
+    }
+    Ok(metadata)
+}
+
+fn print_pack_metadata(metadata: &bevy_dlc::PackMetadata, metadata_locked: bool) {
+    if metadata_locked {
+        println!(
+            "{} encrypted (DLC key required to inspect)",
+            "metadata:".blue()
+        );
+        return;
+    }
+
+    if metadata.is_empty() {
+        println!("{} none", "metadata:".blue());
+        return;
+    }
+
+    println!("{}", "metadata:".blue());
+    for (key, value) in metadata {
+        let rendered =
+            serde_json::to_string(value).unwrap_or_else(|_| "<unprintable metadata>".to_string());
+        println!(" - {} = {}", key, rendered);
+    }
+}
+
 /// Recursively collect files under `dir`. If `ext_filter` is Some(ext), only
 /// files matching that extension are returned.
 fn collect_files_recursive(
@@ -320,9 +375,8 @@ fn collect_files_recursive(
                     // Asset-collection mode: skip non-asset / binary artifacts so they
                     // are never accidentally packed.
                     const EXCLUDED_EXTENSIONS: &[&str] = &[
-                        "dlcpack", "slicense", "pubkey",
-                        "exe", "dll", "so", "dylib",
-                        "pdb", "ilk", "exp", "lib", "a", "o", "rlib",
+                        "dlcpack", "slicense", "pubkey", "exe", "dll", "so", "dylib", "pdb", "ilk",
+                        "exp", "lib", "a", "o", "rlib",
                     ];
                     if !EXCLUDED_EXTENSIONS.contains(&file_ext.as_str()) {
                         out.push(path);
@@ -572,7 +626,7 @@ fn handle_license_output(
             let final_license = SignedLicense::from(sup_license.to_string());
             let verified_product = extract_product_from_license(&final_license).unwrap_or_default();
             if verified_product != product {
-                return Err("supplied signed-license product does not match --product".into());
+                return Err("supplied signed-license product does not match pack product".into());
             }
 
             // If the dlc_id is not in the license, try to extend it (requires private key).
@@ -776,22 +830,23 @@ fn is_executable(path: &std::path::Path) -> bool {
 fn test_decrypt_archive_with_key_from_reader<R: std::io::Read>(
     dlc_pack_file: &str,
     mut reader: R,
-    key_bytes: &[u8],
+    encrypt_key: &EncryptionKey,
     signature_verified: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // parse once so we know the version and block metadata; we'll reopen the
-    // file later if we need to read raw ciphertext for v4 packs.
+    // file later to read the raw ciphertext blocks for v5 packs.
     let (_prod, _did, version, entries, blocks) = parse_encrypted_pack(&mut reader)?;
     if entries.is_empty() {
         println!("container has no entries");
         return Ok(());
     }
 
-    // determine nonce/ciphertext depending on pack version
-    let (archive_nonce, archive_ciphertext) = if version == 4 && !blocks.is_empty() {
-        // v4 packs don't store per-entry ciphertext; use the first block
-        // metadata to load the actual encrypted bytes.
-        let b = &blocks[0];
+    // v5 packs do not store per-entry ciphertext in the manifest. Use the
+    // first block metadata entry to locate and decrypt the archive bytes.
+    let (archive_nonce, archive_ciphertext) = if version == DLC_PACK_VERSION_LATEST as usize {
+        let b = blocks
+            .first()
+            .ok_or("v5 pack missing block metadata for archive decrypt")?;
         let mut f = std::fs::File::open(dlc_pack_file)?;
         use std::io::Seek;
         f.seek(std::io::SeekFrom::Start(b.file_offset))?;
@@ -799,18 +854,9 @@ fn test_decrypt_archive_with_key_from_reader<R: std::io::Read>(
         f.read_exact(&mut buf)?;
         (b.nonce, buf)
     } else {
-        // earlier versions (v1, v2, v3) use the entry's nonce/ciphertext
-        (
-            entries[0].1.nonce,
-            entries[0].1.ciphertext.as_ref().to_vec(),
-        )
+        return Err(format!("unsupported pack version: {}", version).into());
     };
 
-    let ek = bevy_dlc::EncryptionKey::new(
-        key_bytes
-            .try_into()
-            .map_err(|_| "encryption key must be 32 bytes")?,
-    );
     // replicate the current in-place decrypt logic so we don't rely on the
     // pack_format module being public.
     use aes_gcm::aead::AeadInPlace;
@@ -818,7 +864,7 @@ fn test_decrypt_archive_with_key_from_reader<R: std::io::Read>(
     use secure_gate::RevealSecret;
 
     let mut buf = archive_ciphertext.clone();
-    let _ = ek.with_secret(|key_bytes| {
+    let _ = encrypt_key.with_secret(|key_bytes| {
         let cipher = Aes256Gcm::new_from_slice(key_bytes).map_err(|e| e.to_string())?;
         let nonce = Nonce::from_slice(&archive_nonce);
         cipher
@@ -895,12 +941,11 @@ fn validate_dlc_file(
     // extract the encrypt key from the license's payload and attempt to decrypt the first archive entry to verify correctness. Note that this does not verify the signature, so we print a warning if no pubkey was supplied.
     // use library helper now that we have a SignedLicense value
     if let Some(enc_key) = extract_encrypt_key_from_license(&supplied_license) {
-        let key_bytes = enc_key.with_secret(|kb| kb.to_vec());
         reader.seek(std::io::SeekFrom::Start(0))?;
         test_decrypt_archive_with_key_from_reader(
             path.to_str().unwrap(),
             &mut reader,
-            &key_bytes,
+            &enc_key,
             supplied_pubkey.is_some(),
         )?;
     } else if supplied_pubkey.is_some() {
@@ -961,18 +1006,13 @@ async fn pack_command(
     files: Vec<PathBuf>,
     list: bool,
     out: Option<PathBuf>,
-    product: Option<String>,
-    product_override: Option<String>,
+    product: String,
     types: Option<Vec<String>>,
+    metadata: Option<Vec<String>>,
     pubkey: Option<String>,
     signed_license: Option<String>,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // extracted from main::Commands::Pack
-    let product = product
-        .or(product_override)
-        .ok_or("product name is required (positional or --product)")?;
-
     let (pubkey, signed_license) = resolve_pubkey_and_license(pubkey, signed_license, &product);
 
     // A signed license is required so the same encryption key is used consistently.
@@ -1008,6 +1048,11 @@ async fn pack_command(
     let type_path_map = bevy::tasks::block_on(async {
         resolve_type_paths_from_bevy(app, &selected_files, &type_overrides).await
     })?;
+    let pack_metadata = metadata
+        .as_ref()
+        .map(|values| parse_metadata_assignments(values))
+        .transpose()?
+        .unwrap_or_default();
 
     let mut items: Vec<PackItem> = Vec::new();
     for file in &selected_files {
@@ -1063,10 +1108,11 @@ async fn pack_command(
     };
     let encrypt_key = derive_encrypt_key(signed_license.as_deref())?;
 
-    let container = pack_encrypted_pack(
+    let container = pack_encrypted_pack_with_metadata(
         &dlc_id,
         &items,
         &Product::from(product.clone()),
+        &pack_metadata,
         &encrypt_key,
         bevy_dlc::DEFAULT_BLOCK_SIZE,
     )?;
@@ -1081,8 +1127,12 @@ async fn pack_command(
     )?;
 
     if list {
-        let (_prod, did, version, ents, _blocks) = parse_encrypted_pack(&container[..])?;
+        let parsed = parse_encrypted_pack_info(&container[..], Some(&encrypt_key))?;
+        let did = parsed.dlc_id;
+        let version = parsed.version;
+        let ents = parsed.entries;
         println!("{} {} entries: {}", "dlc_id".blue(), did, ents.len());
+        print_pack_metadata(&parsed.metadata, parsed.metadata_locked);
         print_pack_entries(version, &ents);
     }
 
@@ -1176,8 +1226,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             list,
             out,
             product,
-            product_override,
             types,
+            metadata,
             pubkey,
             signed_license,
         } => {
@@ -1189,8 +1239,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     list,
                     out,
                     product,
-                    product_override,
                     types,
+                    metadata,
                     pubkey,
                     signed_license,
                     cli.dry_run,
@@ -1209,7 +1259,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for file in &files {
                     let f = std::fs::File::open(file)?;
                     let mut reader = std::io::BufReader::new(f);
-                    let (_prod, did, version, ents, _blocks) = parse_encrypted_pack(&mut reader)?;
+                    let parsed = parse_encrypted_pack_info(&mut reader, None)?;
+                    let did = parsed.dlc_id;
+                    let version = parsed.version;
+                    let ents = parsed.entries;
                     println!(
                         "{} -> {} {} (v{}) entries: {}",
                         "dlcpack:".color(AnsiColors::Blue),
@@ -1218,6 +1271,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         version,
                         ents.len()
                     );
+                    print_pack_metadata(&parsed.metadata, parsed.metadata_locked);
                     print_pack_entries(version, &ents);
                 }
                 return Ok(());
@@ -1226,7 +1280,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // single-file mode
             let file = std::fs::File::open(&dlc)?;
             let mut reader = std::io::BufReader::new(file);
-            let (_prod, did, version, ents, _blocks) = parse_encrypted_pack(&mut reader)?;
+            let parsed = parse_encrypted_pack_info(&mut reader, None)?;
+            let did = parsed.dlc_id;
+            let version = parsed.version;
+            let ents = parsed.entries;
             println!(
                 "{} {} (v{}) entries: {}",
                 "dlcpack".color(AnsiColors::Blue),
@@ -1234,6 +1291,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 version,
                 ents.len()
             );
+            print_pack_metadata(&parsed.metadata, parsed.metadata_locked);
             print_pack_entries(version, &ents);
             return Ok(());
         }
@@ -1414,17 +1472,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // extract the encryption key from the license if present
             let encrypt_key = if let Some(lic) = sup_lic.as_ref() {
-                extract_encrypt_key_from_license(lic).map(|ek| ek.with_secret(|kb| kb.to_vec()))
+                extract_encrypt_key_from_license(lic)
+                    .map(|ek| ek.with_secret(|kb| EncryptionKey::new(*kb)))
             } else {
                 None
-            }
-            .map(|k| {
-                let k = match k.try_into() {
-                    Ok(arr) => arr,
-                    Err(_) => panic!("encryption key must be 32 bytes"),
-                };
-                EncryptionKey::new(k)
-            });
+            };
 
             // pass along any trailing arguments as a one-shot command
             let initial = if command.is_empty() {
@@ -1450,20 +1502,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if cli.dry_run {
                 print_warning("dry-run: would generate and print a random 32-character AES key");
             } else {
-                let ek = EncryptionKey::new(rand::random());
-                ek.with_secret(|kb| {
-                    // 64-char printable ASCII set; 256/64=4 so every char has equal probability
-                    let cryptor = byte_aes::Aes256Cryptor::new(kb.clone());
-                    let key = cryptor.key();
-                    let key: String = String::from_utf8_lossy(key).into_owned();
-                    println!(
-                        "{} {}",
-                        "AES KEY:".color(AnsiColors::Cyan).bold(),
-                        key
-                    );
-                });
+                // The macro consumer expects a 32-character printable ASCII key.
+                // Encoding 24 random bytes as base64url without padding yields exactly 32 characters.
+                let key = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 24]>());
+                println!("{} {}", "AES KEY:".color(AnsiColors::Cyan).bold(), key);
             }
-        },
+        }
     }
 
     Ok(())
@@ -1482,12 +1526,12 @@ mod tests {
         let tmp = tempdir().unwrap();
 
         // Create asset files that SHOULD be collected.
-        let txt  = tmp.path().join("sprite.txt");
+        let txt = tmp.path().join("sprite.txt");
         let json = tmp.path().join("level.json");
-        let png  = tmp.path().join("icon.png");
-        std::fs::write(&txt,  b"hello").unwrap();
+        let png = tmp.path().join("icon.png");
+        std::fs::write(&txt, b"hello").unwrap();
         std::fs::write(&json, b"{}").unwrap();
-        std::fs::write(&png,  b"\x89PNG").unwrap();
+        std::fs::write(&png, b"\x89PNG").unwrap();
 
         // Create files whose extensions must be silently excluded.
         let forbidden_cases = [
@@ -1514,8 +1558,8 @@ mod tests {
 
         // Every collected path must NOT have a forbidden extension.
         const FORBIDDEN: &[&str] = &[
-            "dlcpack", "slicense", "pubkey", "exe", "dll", "so", "dylib", "pdb",
-            "ilk", "exp", "lib", "a", "o", "rlib",
+            "dlcpack", "slicense", "pubkey", "exe", "dll", "so", "dylib", "pdb", "ilk", "exp",
+            "lib", "a", "o", "rlib",
         ];
         for path in &collected {
             let ext = path
@@ -1536,12 +1580,23 @@ mod tests {
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        assert!(names.contains(&"sprite.txt".to_string()),  "sprite.txt missing");
-        assert!(names.contains(&"level.json".to_string()),  "level.json missing");
-        assert!(names.contains(&"icon.png".to_string()),    "icon.png missing");
+        assert!(
+            names.contains(&"sprite.txt".to_string()),
+            "sprite.txt missing"
+        );
+        assert!(
+            names.contains(&"level.json".to_string()),
+            "level.json missing"
+        );
+        assert!(names.contains(&"icon.png".to_string()), "icon.png missing");
 
         // Total count: exactly the three asset files (none of the forbidden ones).
-        assert_eq!(collected.len(), 3, "unexpected files collected: {:?}", names);
+        assert_eq!(
+            collected.len(),
+            3,
+            "unexpected files collected: {:?}",
+            names
+        );
     }
 
     /// When an ext_filter IS specified, the targeted search works correctly: only
@@ -1560,22 +1615,36 @@ mod tests {
 
         // .dlcpack files must be found when explicitly requested via ext_filter.
         assert_eq!(
-            collected.len(), 2,
-            "expected 2 .dlcpack files, got: {:?}", collected
+            collected.len(),
+            2,
+            "expected 2 .dlcpack files, got: {:?}",
+            collected
         );
-        assert!(collected.iter().any(|p| p.file_name().unwrap() == "bundle.dlcpack"));
-        assert!(collected.iter().any(|p| p.file_name().unwrap() == "other.dlcpack"));
+        assert!(
+            collected
+                .iter()
+                .any(|p| p.file_name().unwrap() == "bundle.dlcpack")
+        );
+        assert!(
+            collected
+                .iter()
+                .any(|p| p.file_name().unwrap() == "other.dlcpack")
+        );
 
         // .txt must not appear since it doesn't match the filter.
-        assert!(!collected.iter().any(|p| p.extension().and_then(|e| e.to_str()) == Some("txt")));
+        assert!(
+            !collected
+                .iter()
+                .any(|p| p.extension().and_then(|e| e.to_str()) == Some("txt"))
+        );
     }
 
     /// Hidden files (names starting with `.`) must never be collected.
     #[test]
     fn collect_files_skips_hidden_files() {
         let tmp = tempdir().unwrap();
-        std::fs::write(tmp.path().join(".hidden"),     b"secret").unwrap();
-        std::fs::write(tmp.path().join("visible.txt"), b"data"  ).unwrap();
+        std::fs::write(tmp.path().join(".hidden"), b"secret").unwrap();
+        std::fs::write(tmp.path().join("visible.txt"), b"data").unwrap();
 
         let mut collected = Vec::new();
         collect_files_recursive(tmp.path(), &mut collected, None, 5).unwrap();
@@ -1584,7 +1653,10 @@ mod tests {
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        assert!(!names.iter().any(|n| n.starts_with('.')), "hidden file collected");
+        assert!(
+            !names.iter().any(|n| n.starts_with('.')),
+            "hidden file collected"
+        );
         assert!(names.contains(&"visible.txt".to_string()));
     }
 
@@ -1593,15 +1665,15 @@ mod tests {
     fn collect_files_skips_build_dirs() {
         let tmp = tempdir().unwrap();
         let target_dir = tmp.path().join("target");
-        let nm_dir     = tmp.path().join("node_modules");
+        let nm_dir = tmp.path().join("node_modules");
         let hidden_dir = tmp.path().join(".git");
         std::fs::create_dir_all(&target_dir).unwrap();
-        std::fs::create_dir_all(&nm_dir    ).unwrap();
+        std::fs::create_dir_all(&nm_dir).unwrap();
         std::fs::create_dir_all(&hidden_dir).unwrap();
         std::fs::write(target_dir.join("artifact.txt"), b"build").unwrap();
-        std::fs::write(nm_dir    .join("dep.txt"),      b"dep"  ).unwrap();
-        std::fs::write(hidden_dir.join("config"),       b"cfg"  ).unwrap();
-        std::fs::write(tmp.path().join("asset.txt"),    b"asset").unwrap();
+        std::fs::write(nm_dir.join("dep.txt"), b"dep").unwrap();
+        std::fs::write(hidden_dir.join("config"), b"cfg").unwrap();
+        std::fs::write(tmp.path().join("asset.txt"), b"asset").unwrap();
 
         let mut collected = Vec::new();
         collect_files_recursive(tmp.path(), &mut collected, None, 5).unwrap();
@@ -1610,8 +1682,14 @@ mod tests {
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        assert!(!names.contains(&"artifact.txt".to_string()), "target/ was traversed");
-        assert!(!names.contains(&"dep.txt".to_string()),      "node_modules/ was traversed");
+        assert!(
+            !names.contains(&"artifact.txt".to_string()),
+            "target/ was traversed"
+        );
+        assert!(
+            !names.contains(&"dep.txt".to_string()),
+            "node_modules/ was traversed"
+        );
         assert!(names.contains(&"asset.txt".to_string()));
     }
 }

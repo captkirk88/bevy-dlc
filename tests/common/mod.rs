@@ -91,7 +91,6 @@ impl CliTestCtx {
 
         let mut cmd = self.base_cmd();
         cmd.arg("pack")
-            .arg("--product")
             .arg(product)
             .arg(dlc_id)
             .arg("-o")

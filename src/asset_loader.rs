@@ -84,7 +84,7 @@ fn decompress_archive(
     Ok(map)
 }
 
-/// Internal helper to decrypt a specific entry from a v4 pack by reading only
+/// Internal helper to decrypt a specific entry from a v5 pack by reading only
 /// the required data block from the file.
 pub(crate) fn decrypt_pack_entry_block_bytes<R: std::io::Read + std::io::Seek>(
     reader: &mut R,
@@ -281,7 +281,7 @@ pub struct EncryptedAsset {
     pub type_path: Option<String>,
     pub nonce: [u8; 12],
     pub ciphertext: std::sync::Arc<[u8]>,
-    // --- v4 format extensions ---
+    // --- v5 format extensions ---
     pub block_id: u32,
     pub block_offset: u32,
     pub size: u32,
@@ -454,7 +454,7 @@ impl DlcPackEntry {
             .ok_or_else(|| DlcLoaderError::DlcLocked(self.encrypted.dlc_id.clone()))?;
         let encrypt_key = entry_ek.key;
 
-        // v4 block‑based decryption only; older formats are no longer supported.
+        // v5 block-based decryption only; older formats are no longer supported.
         let path = entry_ek.path.ok_or_else(|| {
             DlcLoaderError::DecryptionFailed(format!(
                 "no file path registered for DLC '{}', cannot decrypt",
@@ -513,6 +513,8 @@ pub struct DlcPack {
     dlc_id: DlcId,
     product: Product,
     version: u8,
+    metadata: crate::PackMetadata,
+    metadata_locked: bool,
     entries: Vec<DlcPackEntry>,
 
     /// The file path from which this pack was loaded (for registry purposes)
@@ -521,10 +523,33 @@ pub struct DlcPack {
 
 impl DlcPack {
     pub fn new(id: DlcId, product: Product, version: u8, entries: Vec<DlcPackEntry>) -> Self {
+        Self::new_with_metadata(id, product, version, crate::PackMetadata::new(), entries)
+    }
+
+    pub fn new_with_metadata(
+        id: DlcId,
+        product: Product,
+        version: u8,
+        metadata: crate::PackMetadata,
+        entries: Vec<DlcPackEntry>,
+    ) -> Self {
+        Self::new_with_metadata_state(id, product, version, metadata, false, entries)
+    }
+
+    pub(crate) fn new_with_metadata_state(
+        id: DlcId,
+        product: Product,
+        version: u8,
+        metadata: crate::PackMetadata,
+        metadata_locked: bool,
+        entries: Vec<DlcPackEntry>,
+    ) -> Self {
         DlcPack {
             dlc_id: id,
             product,
             version,
+            metadata,
+            metadata_locked,
             entries,
             pack_path: String::new(),
         }
@@ -548,6 +573,54 @@ impl DlcPack {
     /// Return the pack format version.
     pub fn version(&self) -> u8 {
         self.version
+    }
+
+    /// Return true when the pack metadata is encrypted and the current pack instance
+    /// does not have access to the DLC encryption key needed to decrypt it.
+    pub fn metadata_locked(&self) -> bool {
+        self.metadata_locked
+    }
+
+    /// Return an iterator over metadata keys stored in this pack.
+    pub fn metadata_keys(&self) -> impl Iterator<Item = &str> + '_ {
+        self.metadata.keys().map(String::as_str)
+    }
+
+    /// Return true when the pack contains metadata for the provided key.
+    pub fn has_metadata(&self, key: &str) -> bool {
+        self.metadata.contains_key(key)
+    }
+
+    /// Deserialize the metadata value stored at `key` into `T`.
+    pub fn get_metadata<T>(&self, key: &str) -> Result<Option<T>, crate::DlcPackMetadataError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        if self.metadata_locked {
+            return Err(crate::DlcPackMetadataError::Locked);
+        }
+
+        match self.metadata.get(key) {
+            Some(value) => serde_json::from_value(value.clone())
+                .map(Some)
+                .map_err(|source| crate::DlcPackMetadataError::Deserialize {
+                    key: key.to_string(),
+                    source,
+                }),
+            None => Ok(None),
+        }
+    }
+
+    /// Return the raw JSON metadata value for `key`.
+    pub fn get_metadata_raw(
+        &self,
+        key: &str,
+    ) -> Result<Option<&serde_json::Value>, crate::DlcPackMetadataError> {
+        if self.metadata_locked {
+            return Err(crate::DlcPackMetadataError::Locked);
+        }
+
+        Ok(self.metadata.get(key))
     }
 
     /// Return a slice of contained entries.
@@ -593,11 +666,27 @@ impl DlcPack {
         asset_server: &bevy::prelude::AssetServer,
         entry_path: &str,
     ) -> Handle<A> {
-        let entry = match self.find_entry(entry_path) {
-            Some(e) => e,
-            None => panic!("entry not found: {}", entry_path),
+        if let Some(entry) = self.find_entry(entry_path) {
+            return asset_server.load::<A>(entry.path());
+        }
+
+        let normalized = entry_path.replace('\\', "/");
+        let requested_path = if !self.pack_path.is_empty() {
+            format!("{}#{}", self.pack_path, normalized)
+        } else if let Some((pack_path, _)) = self.entries.first().and_then(|entry| entry.path.split_once('#')) {
+            format!("{}#{}", pack_path, normalized)
+        } else {
+            normalized.clone()
         };
-        asset_server.load::<A>(entry.path())
+
+        warn!(
+            "DLC entry '{}' not found in pack '{}'; requesting '{}' so the asset server reports a normal load failure instead of panicking",
+            entry_path,
+            self.dlc_id,
+            requested_path,
+        );
+
+        asset_server.load::<A>(requested_path)
     }
 
     fn with_path(&self, path_string: String) -> DlcPack {
@@ -605,6 +694,8 @@ impl DlcPack {
             dlc_id: self.dlc_id.clone(),
             product: self.product.clone(),
             version: self.version,
+            metadata: self.metadata.clone(),
+            metadata_locked: self.metadata_locked,
             entries: self.entries.clone(),
             pack_path: path_string,
         }
@@ -767,9 +858,33 @@ impl AssetLoader for DlcPackLoader {
         // decryption.
         let mut sync_reader = SyncReader::new(reader);
 
-        let (product, dlc_id, version, manifest_entries, _block_metadatas) =
-            crate::parse_encrypted_pack(&mut sync_reader)
+        let mut parsed_pack = crate::parse_encrypted_pack_info(&mut sync_reader, None)
+            .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
+
+        if let Some(encrypt_key) = crate::encrypt_key_registry::get(parsed_pack.dlc_id.as_ref()) {
+            sync_reader.seek(SeekFrom::Start(0)).map_err(|_| {
+                DlcLoaderError::Io(io::Error::new(
+                    io::ErrorKind::NotSeekable,
+                    format!(
+                        "reader not seekable, cannot decrypt metadata for pack '{}'",
+                        path_string
+                    ),
+                ))
+            })?;
+
+            parsed_pack = crate::parse_encrypted_pack_info(&mut sync_reader, Some(&encrypt_key))
                 .map_err(|e| DlcLoaderError::InvalidFormat(e.to_string()))?;
+        }
+
+        let crate::ParsedDlcPack {
+            product,
+            dlc_id,
+            version,
+            metadata,
+            metadata_locked,
+            entries: manifest_entries,
+            block_metadatas,
+        } = parsed_pack;
 
         // rewind the reader back to the start so decryption routines can re‑parse the file as needed.  If the reader is not seekable, error.
         sync_reader.seek(SeekFrom::Start(0)).map_err(|_| {
@@ -795,7 +910,7 @@ impl AssetLoader for DlcPackLoader {
         // is missing we still populate the manifest so callers can inspect
         // entries; a reload after unlock will add the typed sub-assets.
         let decrypted_items = {
-            match decrypt_pack_entries(&dlc_id, &manifest_entries, &_block_metadatas, sync_reader) {
+            match decrypt_pack_entries(&dlc_id, &manifest_entries, &block_metadatas, sync_reader) {
                 Ok(items) => Some(items),
                 Err(DlcLoaderError::DlcLocked(_)) => None,
                 Err(e) => return Err(e),
@@ -958,10 +1073,15 @@ impl AssetLoader for DlcPackLoader {
             );
         }
 
-        Ok(
-            DlcPack::new(dlc_id.clone(), product, version as u8, out_entries)
-                .with_path(path_string),
+        Ok(DlcPack::new_with_metadata_state(
+            dlc_id.clone(),
+            product,
+            version as u8,
+            metadata,
+            metadata_locked,
+            out_entries,
         )
+        .with_path(path_string))
     }
 }
 
@@ -1075,7 +1195,7 @@ mod tests {
     use super::*;
     use crate::{EncryptionKey, PackItem};
     #[allow(unused_imports)]
-    use secure_gate::{RevealSecret, CloneableSecret};
+    use secure_gate::{CloneableSecret, RevealSecret};
     use serial_test::serial;
 
     #[test]
@@ -1157,19 +1277,21 @@ mod tests {
         let key = EncryptionKey::new(rand::random());
         let _dlc_key = crate::DlcKey::generate_random();
         let product = crate::Product::from("test");
-        let container = crate::pack_encrypted_pack(&dlc_id, &items, &product, &key, crate::pack_format::DEFAULT_BLOCK_SIZE).expect("pack");
+        let container = crate::pack_encrypted_pack(
+            &dlc_id,
+            &items,
+            &product,
+            &key,
+            crate::pack_format::DEFAULT_BLOCK_SIZE,
+        )
+        .expect("pack");
 
         let mut cursor = std::io::Cursor::new(container);
         let (_product, parsed_dlc_id, _version, parsed_entries, block_metadatas) =
             crate::parse_encrypted_pack(&mut cursor).expect("parse");
 
-        let err = decrypt_pack_entries(
-            &parsed_dlc_id,
-            &parsed_entries,
-            &block_metadatas,
-            cursor,
-        )
-        .expect_err("should be locked");
+        let err = decrypt_pack_entries(&parsed_dlc_id, &parsed_entries, &block_metadatas, cursor)
+            .expect_err("should be locked");
         match err {
             DlcLoaderError::DlcLocked(id) => assert_eq!(id, "locked_dlc"),
             _ => panic!("expected DlcLocked error, got {:?}", err),
@@ -1185,8 +1307,14 @@ mod tests {
         let real_key = EncryptionKey::new(rand::random());
         let _dlc_key = crate::DlcKey::generate_random();
         let product = crate::Product::from("test");
-        let container =
-            crate::pack_encrypted_pack(&dlc_id, &items, &product, &real_key, crate::pack_format::DEFAULT_BLOCK_SIZE).expect("pack");
+        let container = crate::pack_encrypted_pack(
+            &dlc_id,
+            &items,
+            &product,
+            &real_key,
+            crate::pack_format::DEFAULT_BLOCK_SIZE,
+        )
+        .expect("pack");
 
         // insert an incorrect key for this DLC
         let wrong_key: [u8; 32] = rand::random();
@@ -1199,13 +1327,8 @@ mod tests {
         let (_product, parsed_dlc_id, _version, parsed_entries, block_metadatas) =
             crate::parse_encrypted_pack(&mut cursor).expect("parse");
 
-        let err = decrypt_pack_entries(
-            &parsed_dlc_id,
-            &parsed_entries,
-            &block_metadatas,
-            cursor,
-        )
-        .expect_err("should fail decryption");
+        let err = decrypt_pack_entries(&parsed_dlc_id, &parsed_entries, &block_metadatas, cursor)
+            .expect_err("should fail decryption");
         match err {
             DlcLoaderError::DecryptionFailed(msg) => {
                 assert!(msg.contains("dlc='badkey_dlc'"));
@@ -1282,6 +1405,57 @@ mod tests {
             }
             _ => panic!("expected DlcIdConflict"),
         }
+    }
+
+    #[test]
+    #[serial]
+    fn dlcpack_load_missing_entry_returns_handle_without_panicking() {
+        use bevy::asset::LoadState;
+
+        crate::encrypt_key_registry::clear_all();
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_asset::<crate::asset_loader::DlcPack>();
+
+        let asset_server = app.world().resource::<AssetServer>().clone();
+
+        let pack = DlcPack::new(
+            DlcId::from("missing_entry_dlc"),
+            Product::from("test"),
+            crate::DLC_PACK_VERSION_LATEST,
+            vec![DlcPackEntry {
+                path: "missing_entry.dlcpack#present.txt".to_string(),
+                encrypted: EncryptedAsset {
+                    dlc_id: "missing_entry_dlc".to_string(),
+                    original_extension: "txt".to_string(),
+                    type_path: Some("examples::TextAsset".to_string()),
+                    nonce: [0u8; 12],
+                    ciphertext: Arc::new([]),
+                    block_id: 0,
+                    block_offset: 0,
+                    size: 0,
+                },
+            }],
+        )
+        .with_path("missing_entry.dlcpack".to_string());
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pack.load::<LoadedUntypedAsset>(&asset_server, "absent.txt")
+        }));
+
+        let handle = result.expect("missing entry load should not panic");
+        for _ in 0..10 {
+            app.update();
+        }
+
+        let state = asset_server.get_load_state(handle.id()).into();
+        assert!(
+            matches!(state, Some(LoadState::Loading) | Some(LoadState::Failed(_)) | None),
+            "unexpected load state: {:?}",
+            state
+        );
     }
 }
 

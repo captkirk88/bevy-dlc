@@ -16,8 +16,10 @@ Works with Bevy's asset pipeline.
 
 - AES-256-GCM encryption of DLC packs
 - Efficient random-access decryption of specific assets without reading full packs
+- Arbitrary pack-level metadata with typed access through `DlcPack`
 - Product binding — prevent token reuse across games
 - Security checks to prevent common mistakes like packing executables or other packs
+- V5 pack format only; older `.dlcpack` files must be repacked with the current CLI
 
 ## Recommended Approach
 
@@ -64,16 +66,17 @@ This will generate two files in `keys/`:
 ### Create a pack
 
 ```bash
-bevy-dlc pack --product my-game dlcA -o dlc -- assets/dlcA
+bevy-dlc pack my-game dlcA -o assets/ -- assets/dlcA
 ```
 
-- `--product` — binds the pack to a product name
+- `my-game` — product name bound into the pack and used for default `.slicense` / `.pubkey` lookup
 - `assets/dlcA` — directory or file(s) to pack
 - `dlcA` — DLC ID (used in licenses to unlock this pack)
 - `-o dlc` — output path for the generated `.dlcpack`
 - `--types` — optional list of asset type paths to include in the pack index (e.g. `bevy::prelude::Image`), otherwise all assets will be indexed with their full type paths.  This can be used to normalize type paths across different versions of Bevy or your game.  The types you specify are fuzzy matched against the actual asset types in the pack, so you can just specify `assets::MyAsset` and it will match `my_game::assets::MyAsset` in the pack if that's the actual type.
+- `--metadata key=value` — optional pack-level metadata entry. Values are parsed as JSON when possible and otherwise stored as strings.
 
-This creates `dlcA.dlcpack` and prints a signed license token.
+This creates a v5 `dlcA.dlcpack` and prints a signed license token.
 
 Alternatively you can use `bevy-dlc generate --help` to review how to generate a signed license without packing, or `bevy-dlc check --help` to verify it.
 
@@ -89,6 +92,8 @@ bevy-dlc edit <my_dlc>.dlcpack
 
 This opens an interactive REPL where you can add/remove files, list contents, or even merge entries from another `.dlcpack`.  When merging or adding content you must supply an **Signed License** — just run `bevy-dlc edit --signed-license <token> [--pubkey <key>]` or keep `.slicense`/`.pubkey` files next to the pack (created using `bevy-dlc generate`).  Changes are saved back to the `.dlcpack` when you `save` and if you forget and exit, REPL will ask you.  REPL is not a AI.
 
+Use `metadata add <key> <value>`, `metadata remove <key>`, and `metadata list` to manage pack-level metadata from the REPL. Metadata values are parsed as JSON when possible and otherwise stored as strings.
+
 You can also use `bevy-dlc edit <mydlc>.dlcpack -- <commands>` to run REPL commands non-interactively (e.g. from a script or Makefile).
 
 Use `help` within the REPL for available commands.
@@ -99,7 +104,8 @@ Review the [examples](examples/) for a complete example (run with `cargo run --r
 
 ### API Overview
 
-* `DlcPack` is a custom Bevy `Asset` that represents a loaded DLC pack. In V4, it uses a binary manifest and block metadata to support efficient random-access decryption of assets from the `.dlcpack` file on disk. You can load it directly with `AssetServer::load("my_pack.dlcpack")`.
+* `DlcPack` is a custom Bevy `Asset` that represents a loaded DLC pack. In v5, it uses a binary manifest, encrypted pack-level metadata, and block metadata to support efficient random-access decryption of assets from the `.dlcpack` file on disk. You can load it directly with `AssetServer::load("my_pack.dlcpack")`.
+* Pack-level metadata is encrypted with the same DLC encryption key as the archive blocks. It can be authored programmatically with `pack_encrypted_pack_with_metadata(...)`, inspected from raw containers with `parse_encrypted_pack_info(reader, Some(&key))`, and read back from loaded packs through `DlcPack::get_metadata::<T>(...)` or `DlcPack::get_metadata_raw(...)` when you explicitly need the underlying JSON value.
 * `DlcPackEntry` represents a single asset within a pack. Loading via `AssetServer::load("my_pack.dlcpack#path/to/asset.png")` only decrypts the specific asset.
 * `DlcLoader` is the internal low-level loader that handles granular decryption and forwards resulting bytes to the appropriate concrete loader.
 * Events are emitted when packs are loaded:
@@ -111,7 +117,7 @@ Review the [examples](examples/) for a complete example (run with `cargo run --r
 Contributions are very welcome!  Please open an issue or submit a pull request with any improvements, bug fixes, or new features.
 
 > [!NOTE]
-> If your PR affects the pack format or encryption logic, it will be reviewed with extra scrutiny to ensure it doesn't introduce any security issues.  Please include tests and consider backward compatibility.
+> If your PR affects the pack format or encryption logic, it will be reviewed with extra scrutiny to ensure it doesn't introduce any security issues. Please include tests. The current format is v5-only.
 
 ### Benchmarks
 Benchmarks are included in `benches/dlc_bench.rs` and can be run with:

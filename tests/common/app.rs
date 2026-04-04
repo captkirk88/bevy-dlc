@@ -367,7 +367,7 @@ impl TestApp {
             &[item],
             &self.product,
             &enc_key,
-            bevy_dlc::DEFAULT_BLOCK_SIZE
+            bevy_dlc::DEFAULT_BLOCK_SIZE,
         )
         .expect("pack_encrypted_pack");
 
@@ -390,7 +390,7 @@ impl TestApp {
             items,
             &self.product,
             &enc_key,
-            bevy_dlc::DEFAULT_BLOCK_SIZE
+            bevy_dlc::DEFAULT_BLOCK_SIZE,
         )
         .expect("pack_encrypted_pack");
 

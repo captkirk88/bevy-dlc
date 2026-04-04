@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 
 #[allow(unused_imports)]
-use secure_gate::{RevealSecret,CloneableSecret, dynamic_alias, fixed_alias};
+use secure_gate::{CloneableSecret, RevealSecret, dynamic_alias, fixed_alias};
 
 mod asset_loader;
 pub mod encrypt_key_registry;
@@ -21,8 +21,9 @@ pub use asset_loader::{
 
 pub use pack_format::{
     BlockMetadata, CompressionLevel, DEFAULT_BLOCK_SIZE, DLC_PACK_MAGIC, DLC_PACK_VERSION_LATEST,
-    ManifestEntry, V4ManifestEntry, is_data_executable,
-    pack_encrypted_pack, parse_encrypted_pack,
+    ManifestEntry, PackMetadata, ParsedDlcPack, V4ManifestEntry, V5ManifestEntry,
+    is_data_executable, pack_encrypted_pack, pack_encrypted_pack_with_metadata,
+    parse_encrypted_pack, parse_encrypted_pack_info,
 };
 
 use serde::{Deserialize, Serialize};
@@ -31,10 +32,10 @@ use thiserror::Error;
 
 use crate::asset_loader::DlcPackLoaded;
 
-#[allow(unused_imports)]
-pub use bevy_dlc_macro::include_signed_license_aes;
 #[doc(hidden)]
 pub use crate::macros::__decode_embedded_signed_license_aes;
+#[allow(unused_imports)]
+pub use bevy_dlc_macro::include_signed_license_aes;
 
 pub use crate::ext::AppExt;
 
@@ -50,14 +51,14 @@ pub fn register_encryption_key(dlc_id: &str, key: EncryptionKey) {
 
 pub mod prelude {
     pub use crate::ext::*;
+    pub use crate::include_dlc_key_and_license_aes;
     pub use crate::{
         DlcError, DlcId, DlcKey, DlcLoader, DlcPack, DlcPackLoader, DlcPackLoaderSettings,
-        DlcPlugin, EncryptedAsset, PackItem, Product, SignedLicense,
-        asset_loader::DlcPackEntry, asset_loader::DlcPackLoaded, is_dlc_entry_loaded,
-        is_dlc_loaded,
+        DlcPackMetadataError, DlcPlugin, EncryptedAsset, PackItem, PackMetadata, Product,
+        SignedLicense, asset_loader::DlcPackEntry, asset_loader::DlcPackLoaded,
+        is_dlc_entry_loaded, is_dlc_loaded,
     };
     pub use bevy_dlc_macro::include_signed_license_aes;
-    pub use crate::include_dlc_key_and_license_aes;
 }
 
 pub struct DlcPlugin {
@@ -72,7 +73,10 @@ impl DlcPlugin {
     /// The plugin will extract the encryption key from the signed license
     /// during `build` and register it in the global key registry.
     pub fn new(dlc_key: DlcKey, signed_license: SignedLicense) -> Self {
-        Self { dlc_key, signed_license }
+        Self {
+            dlc_key,
+            signed_license,
+        }
     }
 }
 
@@ -128,7 +132,6 @@ impl Plugin for DlcPlugin {
         app.add_systems(Update, trigger_dlc_events);
     }
 }
-
 
 /// System that monitors `AssetEvent<DlcPack>` and triggers observer-friendly events.
 fn trigger_dlc_events(
@@ -806,6 +809,19 @@ pub enum DlcError {
 
     #[error("{0}")]
     Other(String),
+}
+
+#[derive(Error, Debug)]
+pub enum DlcPackMetadataError {
+    #[error("pack metadata is encrypted and unavailable without the DLC encryption key")]
+    Locked,
+
+    #[error("failed to deserialize metadata key '{key}': {source}")]
+    Deserialize {
+        key: String,
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 // convenience conversions to reduce boilerplate

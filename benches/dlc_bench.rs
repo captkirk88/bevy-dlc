@@ -27,7 +27,14 @@ fn bench_pack(c: &mut Criterion) {
             // each iteration re-packs the same data; the overhead of preparing
             // the items has already been paid above so the benchmark focuses on
             // the pack_encrypted_pack path.
-            pack_encrypted_pack(&dlc_id, &items, &product, &key, bevy_dlc::DEFAULT_BLOCK_SIZE).unwrap()
+            pack_encrypted_pack(
+                &dlc_id,
+                &items,
+                &product,
+                &key,
+                bevy_dlc::DEFAULT_BLOCK_SIZE,
+            )
+            .unwrap()
         });
     });
 }
@@ -39,12 +46,17 @@ fn bench_parse(c: &mut Criterion) {
     let key = EncryptionKey::new(rand::random());
 
     // pre-generate a pack so parsing can be isolated
-    let pack_bytes = pack_encrypted_pack(&dlc_id, &items, &product, &key, bevy_dlc::DEFAULT_BLOCK_SIZE).unwrap();
+    let pack_bytes = pack_encrypted_pack(
+        &dlc_id,
+        &items,
+        &product,
+        &key,
+        bevy_dlc::DEFAULT_BLOCK_SIZE,
+    )
+    .unwrap();
 
     c.bench_function("parse_100_files_of_1MB", |b| {
-        b.iter_with_large_drop(|| {
-            parse_encrypted_pack(&mut &pack_bytes[..]).unwrap()
-        });
+        b.iter_with_large_drop(|| parse_encrypted_pack(&mut &pack_bytes[..]).unwrap());
     });
 }
 
@@ -54,7 +66,14 @@ fn bench_decrypt_all_entries(c: &mut Criterion) {
     let product = Product::from("bench");
     let dlc_id = DlcId::from("bench");
     let key = EncryptionKey::new(rand::random());
-    let pack_bytes = pack_encrypted_pack(&dlc_id, &items, &product, &key, bevy_dlc::DEFAULT_BLOCK_SIZE).unwrap();
+    let pack_bytes = pack_encrypted_pack(
+        &dlc_id,
+        &items,
+        &product,
+        &key,
+        bevy_dlc::DEFAULT_BLOCK_SIZE,
+    )
+    .unwrap();
 
     let (prod2, id2, version, entries, _blocks) =
         parse_encrypted_pack(&mut &pack_bytes[..]).expect("parse");
