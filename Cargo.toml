@@ -1,6 +1,6 @@
 [package]
 name = "bevy-dlc"
-version = "1.18.24"
+version = "1.18.25"
 edition = "2024"
 rust-version = "1.93"
 authors = ["Kirk <github.com/captkirk88>"]
@@ -37,6 +37,8 @@ infer = "0.19"
 crc32fast = "1.5"
 futures-lite = "2.6"
 bevy_dlc_macro = { version = "1.0.2" }
+notify = "8"
+ctrlc = "3.5"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["fileapi", "winbase"] }
@@ -64,6 +66,16 @@ panic = 'abort'
 opt-level = 3
 strip = "symbols"
 codegen-units = 1
+
+[package.metadata.docs.rs]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "i686-unknown-linux-gnu",
+    "i686-pc-windows-msvc"
+]
+
 
 [[bench]]
 name = "dlc_bench"

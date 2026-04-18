@@ -98,6 +98,20 @@ You can also use `bevy-dlc edit <mydlc>.dlcpack -- <commands>` to run REPL comma
 
 Use `help` within the REPL for available commands.
 
+### Watch source files
+
+You can also ask the CLI to scan for `.dlcpack` files and watch their matching source files:
+
+```bash
+bevy-dlc watch
+```
+
+`watch` takes no arguments right now. It recursively scans the current directory for `.dlcpack` files, resolves each archived entry path against a real file on disk, and then watches only those resolved source paths. When a tracked file changes, `bevy-dlc` reloads just the metadata it needs and re-packs the changed entry back into the originating `.dlcpack` file. The command does not keep decrypted pack contents resident in memory between changes.
+
+Press `Ctrl+C` to stop the watcher cleanly.
+
+If a pack's product does not have a matching `.slicense` file available, or an archived path cannot be matched to a real file, that pack entry is skipped and reported at startup.
+
 ### Usage
 
 Review the [examples](examples/) for a complete example (run with `cargo run --release --example <example>`).

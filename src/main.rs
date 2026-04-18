@@ -80,6 +80,7 @@ use owo_colors::{AnsiColors, OwoColorize};
 use secure_gate::RevealSecret;
 
 mod repl;
+mod watch;
 
 #[derive(Parser)]
 #[command(
@@ -279,6 +280,11 @@ enum Commands {
         #[arg(short = 'd', long, default_value_t = 5)]
         max_depth: usize,
     },
+    #[command(
+        about = "Watch real source files and repack changed entries back into their .dlcpack files",
+        long_about = "Scans the current directory recursively for .dlcpack files, resolves their archived entry paths against real files on disk, and watches those real files for changes. When a tracked source file changes, the matching entry is re-packed into the originating .dlcpack."
+    )]
+    Watch,
 }
 
 pub(crate) fn parse_metadata_value(raw: &str) -> serde_json::Value {
@@ -553,39 +559,26 @@ fn resolve_pubkey_and_license(
     signed_license: Option<String>,
     product: &str,
 ) -> (Option<String>, Option<String>) {
-    // Priority: explicit CLI args (including file paths) → product files in CWD → product files anywhere under CWD (recursive)
+    resolve_pubkey_and_license_with_search_roots(
+        pubkey,
+        signed_license,
+        product,
+        &[PathBuf::from(".")],
+    )
+}
 
-    // Normalize explicit args: if the user passed a file path, read its contents.
+fn resolve_pubkey_and_license_with_search_roots(
+    pubkey: Option<String>,
+    signed_license: Option<String>,
+    product: &str,
+    search_roots: &[PathBuf],
+) -> (Option<String>, Option<String>) {
     let pubkey = pubkey.map(resolve_file_or_value);
     let signed_license = signed_license.map(resolve_file_or_value);
 
-    // Helper to search recursively for a product file with given extension
-    fn find_file_recursive(product: &str, ext: &str) -> Option<String> {
-        let file_name = format!("{}.{}", product, ext);
-        // check CWD first
-        if std::path::Path::new(&file_name).exists() {
-            return std::fs::read_to_string(&file_name)
-                .ok()
-                .map(|s| s.trim().to_string());
-        }
-        // recurse and look for matching filename
-        let mut matches = Vec::new();
-        if collect_files_recursive(std::path::Path::new("."), &mut matches, Some(ext), 3).is_ok() {
-            for p in matches {
-                if let Some(fname) = p.file_name().and_then(|s| s.to_str()) {
-                    if fname.eq_ignore_ascii_case(&file_name) {
-                        return std::fs::read_to_string(&p)
-                            .ok()
-                            .map(|s| s.trim().to_string());
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    let resolved_pubkey = pubkey.or_else(|| find_file_recursive(product, "pubkey"));
-    let resolved_license = signed_license.or_else(|| find_file_recursive(product, "slicense"));
+    let resolved_pubkey = pubkey.or_else(|| find_product_file_in_search_roots(product, "pubkey", search_roots));
+    let resolved_license =
+        signed_license.or_else(|| find_product_file_in_search_roots(product, "slicense", search_roots));
 
     (resolved_pubkey, resolved_license)
 }
@@ -740,52 +733,39 @@ fn resolve_keys(
     product: Option<Product>,
     embedded_product: Option<Product>,
 ) -> (Option<crate::DlcKey>, Option<crate::SignedLicense>) {
-    // Normalize explicit args: accept either raw token/base64url **or** a file path.
-    let pubkey = pubkey.map(resolve_file_or_value);
-    let signed_license = signed_license.map(resolve_file_or_value);
+    resolve_keys_with_search_roots(
+        pubkey,
+        signed_license,
+        product,
+        embedded_product,
+        &[PathBuf::from(".")],
+    )
+}
 
-    // Priority: explicit args → product/embedded_product files in CWD → recursive search for product files
+pub(crate) fn resolve_keys_with_search_roots(
+    pubkey: Option<String>,
+    signed_license: Option<String>,
+    product: Option<Product>,
+    embedded_product: Option<Product>,
+    search_roots: &[PathBuf],
+) -> (Option<crate::DlcKey>, Option<crate::SignedLicense>) {
+    let product_name = product
+        .as_ref()
+        .or_else(|| embedded_product.as_ref())
+        .map(|value| value.as_ref().to_string());
 
-    fn find_file_recursive_opt(name: &str, ext: &str) -> Option<String> {
-        let file_name = format!("{}.{}", name, ext);
-        if std::path::Path::new(&file_name).exists() {
-            return std::fs::read_to_string(&file_name)
-                .ok()
-                .map(|s| s.trim().to_string());
-        }
-        let mut matches = Vec::new();
-        if collect_files_recursive(std::path::Path::new("."), &mut matches, Some(ext), 3).is_ok() {
-            for p in matches {
-                if let Some(fname) = p.file_name().and_then(|s| s.to_str()) {
-                    if fname.eq_ignore_ascii_case(&file_name) {
-                        return std::fs::read_to_string(&p)
-                            .ok()
-                            .map(|s| s.trim().to_string());
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    let resolved_pubkey_str = pubkey.or_else(|| {
-        // try product / embedded_product first
-        if let Some(prod) = product.as_ref().or_else(|| embedded_product.as_ref()) {
-            if let Some(found) = find_file_recursive_opt(prod.as_ref(), "pubkey") {
-                return Some(found);
-            }
-        }
-        None
-    });
-
-    let resolved_license_str = signed_license.or_else(|| {
-        if let Some(prod) = product.as_ref().or_else(|| embedded_product.as_ref()) {
-            if let Some(found) = find_file_recursive_opt(prod.as_ref(), "slicense") {
-                return Some(found);
-            }
-        }
-        None
-    });
+    let (resolved_pubkey_str, resolved_license_str) = match product_name.as_deref() {
+        Some(name) => resolve_pubkey_and_license_with_search_roots(
+            pubkey,
+            signed_license,
+            name,
+            search_roots,
+        ),
+        None => (
+            pubkey.map(resolve_file_or_value),
+            signed_license.map(resolve_file_or_value),
+        ),
+    };
 
     let resolved_pubkey = resolved_pubkey_str.and_then(|s| match crate::DlcKey::public(&s) {
         Ok(k) => Some(k),
@@ -795,6 +775,38 @@ fn resolve_keys(
     let resolved_license = resolved_license_str.map(crate::SignedLicense::from);
 
     (resolved_pubkey, resolved_license)
+}
+
+fn find_product_file_in_search_roots(
+    product: &str,
+    ext: &str,
+    search_roots: &[PathBuf],
+) -> Option<String> {
+    let file_name = format!("{}.{}", product, ext);
+
+    for root in search_roots {
+        let direct_path = root.join(&file_name);
+        if direct_path.is_file() {
+            return std::fs::read_to_string(&direct_path)
+                .ok()
+                .map(|s| s.trim().to_string());
+        }
+
+        let mut matches = Vec::new();
+        if collect_files_recursive(root, &mut matches, Some(ext), 3).is_ok() {
+            for path in matches {
+                if let Some(found_name) = path.file_name().and_then(|s| s.to_str()) {
+                    if found_name.eq_ignore_ascii_case(&file_name) {
+                        return std::fs::read_to_string(&path)
+                            .ok()
+                            .map(|s| s.trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 fn print_error(message: &str) {
@@ -1170,8 +1182,7 @@ async fn pack_command(
     Ok(())
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create headless Bevy app to set up asset loaders
+fn build_pack_app() -> App {
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -1188,9 +1199,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     app.finish();
     app.cleanup();
-
     app.update();
+    app
+}
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -1231,6 +1244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pubkey,
             signed_license,
         } => {
+            let mut app = build_pack_app();
             bevy::tasks::block_on(async {
                 pack_command(
                     &mut app,
@@ -1507,6 +1521,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let key = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 24]>());
                 println!("{} {}", "AES KEY:".color(AnsiColors::Cyan).bold(), key);
             }
+        }
+        Commands::Watch => {
+            watch::run_watch_command(cli.dry_run)?;
         }
     }
 

@@ -10,5 +10,9 @@
     "Charlie": {
         "age": 35,
         "city": "Chicago"
+    },
+    "Billy": {
+        "age": 99,
+        "city": "Mephisto"
     }
 }

@@ -892,6 +892,32 @@ fn save_pack_optimized(
     added_files: &std::collections::HashMap<String, Vec<u8>>,
     encrypt_key: Option<&EncryptionKey>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    save_pack_with_replacements(
+        path,
+        _version,
+        product,
+        dlc_id,
+        metadata,
+        metadata_changed,
+        entries,
+        added_files,
+        &std::collections::HashMap::new(),
+        encrypt_key,
+    )
+}
+
+pub(crate) fn save_pack_with_replacements(
+    path: &Path,
+    _version: usize,
+    product: &Product,
+    dlc_id: &DlcId,
+    metadata: &bevy_dlc::PackMetadata,
+    metadata_changed: bool,
+    entries: &[(String, EncryptedAsset)],
+    added_files: &std::collections::HashMap<String, Vec<u8>>,
+    replacement_files: &std::collections::HashMap<String, Vec<u8>>,
+    encrypt_key: Option<&EncryptionKey>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
     use flate2::read::GzDecoder;
     use secure_gate::RevealSecret;
@@ -908,7 +934,7 @@ fn save_pack_optimized(
     let removed = old_entries.len() > entries.len();
 
     // Fast path: no structural changes — just rewrite the manifest headers.
-    if added_files.is_empty() && !removed {
+    if added_files.is_empty() && replacement_files.is_empty() && !removed {
         return update_manifest(
             path,
             bevy_dlc::DLC_PACK_VERSION_LATEST as usize,
@@ -929,6 +955,12 @@ fn save_pack_optimized(
     let cipher = ek
         .with_secret(|s| Aes256Gcm::new_from_slice(s))
         .map_err(|_| "cipher init")?;
+
+    for replacement_path in replacement_files.keys() {
+        if !entries.iter().any(|(entry_path, _)| entry_path == replacement_path) {
+            return Err(format!("replacement entry '{}' is not present in the pack manifest", replacement_path).into());
+        }
+    }
 
     // 1. Recover existing files from old pack
     {
@@ -959,7 +991,9 @@ fn save_pack_optimized(
             for entry in archive.entries()? {
                 let mut entry = entry?;
                 let path_str = entry.path()?.to_string_lossy().to_string();
-                if entries.iter().any(|(p, _)| p == &path_str) {
+                if entries.iter().any(|(p, _)| p == &path_str)
+                    && !replacement_files.contains_key(&path_str)
+                {
                     let mut data = Vec::new();
                     std::io::copy(&mut entry, &mut data)?;
                     let mut item = PackItem::new(path_str.clone(), data)?;
@@ -975,16 +1009,25 @@ fn save_pack_optimized(
         }
     }
 
-    // 2. Add newly staged files
-    for (p, data) in added_files {
-        let mut item = PackItem::new(p.clone(), data.clone())?;
-        // try to find type_path in current manifest (if it was set by user)
-        if let Some((_, e)) = entries.iter().find(|(path, _)| path == p) {
-            if let Some(tp) = &e.type_path {
-                item = item.with_type_path(tp);
+    let mut push_staged_item = |entry_path: &String,
+                                bytes: &Vec<u8>|
+     -> Result<(), Box<dyn std::error::Error>> {
+        let mut item = PackItem::new(entry_path.clone(), bytes.clone())?;
+        if let Some((_, entry)) = entries.iter().find(|(path, _)| path == entry_path) {
+            if let Some(type_path) = &entry.type_path {
+                item = item.with_type_path(type_path);
             }
         }
         items.push(item);
+        Ok(())
+    };
+
+    // 2. Add newly staged or replaced files
+    for (entry_path, bytes) in replacement_files {
+        push_staged_item(entry_path, bytes)?;
+    }
+    for (entry_path, bytes) in added_files {
+        push_staged_item(entry_path, bytes)?;
     }
 
     // 3. Re-pack using latest format

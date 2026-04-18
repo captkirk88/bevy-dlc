@@ -8,9 +8,14 @@ pub mod app;
 use assert_cmd::{Command, pkg_name};
 use bevy::prelude::*;
 use std::path::{Path, PathBuf};
+use std::process::Output;
+use std::time::Duration;
 use tempfile::TempDir;
 
-use bevy_dlc::{EncryptedAsset, PackItem, parse_encrypted_pack};
+use bevy_dlc::{
+    EncryptedAsset, EncryptionKey, PackItem, SignedLicense, extract_encrypt_key_from_license,
+    parse_encrypted_pack,
+};
 
 #[allow(unused)]
 pub mod prelude {
@@ -76,6 +81,23 @@ impl CliTestCtx {
         for a in args {
             cmd.arg(a.as_ref());
         }
+        cmd.output().expect("command output")
+    }
+
+    pub fn run_and_capture_with_env<S: AsRef<str>>(
+        &self,
+        args: &[S],
+        envs: &[(&str, String)],
+        timeout: Duration,
+    ) -> Output {
+        let mut cmd = self.base_cmd();
+        for a in args {
+            cmd.arg(a.as_ref());
+        }
+        for (key, value) in envs {
+            cmd.env(key, value);
+        }
+        cmd.timeout(timeout);
         cmd.output().expect("command output")
     }
 
@@ -204,6 +226,61 @@ impl CliTestCtx {
             "entry not found: {}",
             entry_path
         );
+    }
+
+    pub fn read_encrypt_key(&self, product: &str) -> EncryptionKey {
+        let signed_license = std::fs::read_to_string(self.td.path().join(format!("{}.slicense", product)))
+            .expect("read signed license");
+        extract_encrypt_key_from_license(&SignedLicense::from(signed_license))
+            .expect("extract encrypt key from signed license")
+    }
+
+    pub fn read_pack_entry_bytes<P: AsRef<Path>>(
+        &self,
+        pack: P,
+        encrypt_key: &EncryptionKey,
+        entry_path: &str,
+    ) -> Vec<u8> {
+        use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+        use flate2::read::GzDecoder;
+        use secure_gate::RevealSecret;
+        use std::io::{Read, Seek, SeekFrom};
+        use tar::Archive;
+
+        let mut file = std::fs::File::open(pack).expect("open packed fixture");
+        let (_product, _dlc_id, _version, _entries, blocks) =
+            parse_encrypted_pack(&mut file).expect("parse packed fixture");
+
+        let cipher = encrypt_key
+            .with_secret(|key_bytes| Aes256Gcm::new_from_slice(key_bytes))
+            .expect("create test cipher");
+
+        for block in blocks {
+            file.seek(SeekFrom::Start(block.file_offset))
+                .expect("seek encrypted block");
+            let mut ciphertext = vec![0u8; block.encrypted_size as usize];
+            file.read_exact(&mut ciphertext)
+                .expect("read encrypted block");
+            let plaintext = cipher
+                .decrypt(Nonce::from_slice(&block.nonce), ciphertext.as_slice())
+                .expect("decrypt block");
+            let mut archive = Archive::new(GzDecoder::new(&plaintext[..]));
+            for entry in archive.entries().expect("read archive entries") {
+                let mut entry = entry.expect("read tar entry");
+                if entry
+                    .path()
+                    .expect("read tar path")
+                    .to_string_lossy()
+                    == entry_path
+                {
+                    let mut bytes = Vec::new();
+                    std::io::copy(&mut entry, &mut bytes).expect("read tar bytes");
+                    return bytes;
+                }
+            }
+        }
+
+        panic!("entry not found in repacked fixture: {}", entry_path);
     }
 }
 
