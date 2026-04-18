@@ -284,7 +284,11 @@ enum Commands {
         about = "Watch real source files and repack changed entries back into their .dlcpack files",
         long_about = "Scans the current directory recursively for .dlcpack files, resolves their archived entry paths against real files on disk, and watches those real files for changes. When a tracked source file changes, the matching entry is re-packed into the originating .dlcpack."
     )]
-    Watch,
+    Watch {
+        /// Only watch the .dlcpack whose embedded DLC id matches this value.
+        #[arg(long = "dlc-id", value_name = "DLC_ID")]
+        dlc_id: Option<String>,
+    },
 }
 
 pub(crate) fn parse_metadata_value(raw: &str) -> serde_json::Value {
@@ -1522,8 +1526,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{} {}", "AES KEY:".color(AnsiColors::Cyan).bold(), key);
             }
         }
-        Commands::Watch => {
-            watch::run_watch_command(cli.dry_run)?;
+        Commands::Watch { dlc_id } => {
+            watch::run_watch_command(cli.dry_run, dlc_id.as_deref())?;
         }
     }
 

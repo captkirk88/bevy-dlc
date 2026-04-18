@@ -57,6 +57,7 @@ fn setup_watch_pack(
 fn run_watch_until_first_event(
     ctx: &CliTestCtx,
     dry_run: bool,
+    extra_args: &[&str],
     modify: impl FnOnce() + Send + 'static,
 ) -> std::process::Output {
     let ready_path = ctx.path().join("watch.ready");
@@ -78,6 +79,7 @@ fn run_watch_until_first_event(
         args.push("--dry-run");
     }
     args.push("watch");
+    args.extend(extra_args.iter().copied());
 
     let output = ctx.run_and_capture_with_env(
         &args,
@@ -106,7 +108,7 @@ fn watch_cli_repacks_changed_file() {
     setup_watch_pack(&ctx, product, dlc_id, "assets/foo.txt", "assets/bundle.dlcpack");
 
     let source_path = ctx.path().join("assets/foo.txt");
-    let output = run_watch_until_first_event(&ctx, false, move || {
+    let output = run_watch_until_first_event(&ctx, false, &[], move || {
         std::fs::write(&source_path, b"updated").expect("update watched source file");
     });
 
@@ -134,7 +136,7 @@ fn watch_cli_dry_run_reports_change_without_repacking() {
     setup_watch_pack(&ctx, product, dlc_id, "assets/foo.txt", "assets/bundle.dlcpack");
 
     let source_path = ctx.path().join("assets/foo.txt");
-    let output = run_watch_until_first_event(&ctx, true, move || {
+    let output = run_watch_until_first_event(&ctx, true, &[], move || {
         std::fs::write(&source_path, b"updated").expect("update watched source file");
     });
 
@@ -172,7 +174,7 @@ fn watch_cli_prefers_source_nearest_to_pack() {
     let other_path = ctx.path().join("other/foo.txt");
     let preferred_path = ctx.path().join("assets/source/foo.txt");
 
-    let output = run_watch_until_first_event(&ctx, true, move || {
+    let output = run_watch_until_first_event(&ctx, true, &[], move || {
         std::fs::write(&other_path, b"other changed").expect("update unrelated source file");
         thread::sleep(Duration::from_millis(400));
         std::fs::write(&preferred_path, b"preferred changed").expect("update preferred source file");
@@ -183,4 +185,47 @@ fn watch_cli_prefers_source_nearest_to_pack() {
     assert!(stdout.contains("assets\\source\\foo.txt"), "expected preferred source path in output: {stdout}");
     assert!(!stdout.contains("other\\foo.txt"), "did not expect unrelated source path in output: {stdout}");
     println!("watch output:\n{stdout}");
+}
+
+#[test]
+#[serial_test::serial]
+fn watch_cli_dlc_id_filters_to_matching_pack() {
+    let ctx = CliTestCtx::new();
+
+    ctx.write_file("assets/foo.txt", b"old foo");
+    ctx.write_file("assets/bar.txt", b"old bar");
+
+    setup_watch_pack(
+        &ctx,
+        "watch_prod_a",
+        "watch_pack_a",
+        "assets/foo.txt",
+        "assets/bundle_a.dlcpack",
+    );
+    setup_watch_pack(
+        &ctx,
+        "watch_prod_b",
+        "watch_pack_b",
+        "assets/bar.txt",
+        "assets/bundle_b.dlcpack",
+    );
+
+    let foo_path = ctx.path().join("assets/foo.txt");
+    let bar_path = ctx.path().join("assets/bar.txt");
+    let output = run_watch_until_first_event(
+        &ctx,
+        true,
+        &["--dlc-id", "watch_pack_b"],
+        move || {
+            std::fs::write(&foo_path, b"foo changed").expect("update non-target source file");
+            thread::sleep(Duration::from_millis(400));
+            std::fs::write(&bar_path, b"bar changed").expect("update filtered source file");
+        },
+    );
+
+    assert!(output.status.success(), "watch command should succeed");
+    let stdout = strip_ansi(&String::from_utf8(output.stdout).expect("utf8 stdout from watch"));
+    assert!(stdout.contains("assets\\bar.txt -> assets\\bundle_b.dlcpack#bar.txt"), "expected filtered pack output: {stdout}");
+    assert!(!stdout.contains("bundle_a.dlcpack"), "did not expect non-matching pack output: {stdout}");
+    assert!(!stdout.contains("assets\\foo.txt"), "did not expect non-matching source output: {stdout}");
 }

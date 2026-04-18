@@ -34,6 +34,7 @@ struct WatchIndex {
     fingerprints: HashMap<PathBuf, FileFingerprint>,
     watched_dirs: BTreeSet<PathBuf>,
     scanned_packs: usize,
+    matched_packs: usize,
     skipped_packs: usize,
     unresolved_entries: usize,
 }
@@ -41,16 +42,32 @@ struct WatchIndex {
 const WATCH_EXIT_AFTER_FIRST_EVENT_ENV: &str = "BEVY_DLC_WATCH_EXIT_AFTER_FIRST_EVENT";
 const WATCH_READY_FILE_ENV: &str = "BEVY_DLC_WATCH_READY_FILE";
 
-pub(crate) fn run_watch_command(dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn run_watch_command(
+    dry_run: bool,
+    dlc_id_filter: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let current_dir = std::env::current_dir()?;
     let root = canonicalize_existing_path(&current_dir);
-    let mut index = scan_watch_index(&root)?;
+    let mut index = scan_watch_index(&root, dlc_id_filter)?;
     let watched_pack_count = unique_pack_count(&index);
 
     if index.by_source.is_empty() {
+        if let Some(dlc_id_filter) = dlc_id_filter {
+            if index.matched_packs == 0 {
+                return Err(
+                    format!("no .dlcpack files found with dlc_id '{}'", dlc_id_filter).into(),
+                );
+            }
+        }
+
+        let pack_count = if dlc_id_filter.is_some() {
+            index.matched_packs
+        } else {
+            index.scanned_packs
+        };
         return Err(format!(
             "found {} .dlcpack file(s), but no watchable source files were resolved",
-            index.scanned_packs
+            pack_count
         )
         .into());
     }
@@ -296,7 +313,10 @@ fn load_pack_for_repack(
     ))
 }
 
-fn scan_watch_index(root: &Path) -> Result<WatchIndex, Box<dyn std::error::Error>> {
+fn scan_watch_index(
+    root: &Path,
+    dlc_id_filter: Option<&str>,
+) -> Result<WatchIndex, Box<dyn std::error::Error>> {
     let mut pack_paths = Vec::new();
     collect_files_recursive(root, &mut pack_paths, Some("dlcpack"), 12)?;
 
@@ -333,6 +353,11 @@ fn scan_watch_index(root: &Path) -> Result<WatchIndex, Box<dyn std::error::Error
                 continue;
             }
         };
+
+        if dlc_id_filter.is_some_and(|expected| parsed.dlc_id.as_ref() != expected) {
+            continue;
+        }
+        index.matched_packs += 1;
 
         let search_roots = build_key_search_roots(&pack_path, Some(root));
         let (_, signed_license) = resolve_keys_with_search_roots(
