@@ -56,6 +56,19 @@ fn on_dlc_pack_loaded(
 ) {
     let pack = event.pack();
 
+    for key in pack.metadata_keys() {
+        match pack.get_metadata_raw(key) {
+            Ok(value) => {
+                if let Some(value) = value {
+                    info!("DLC Pack metadata: {} = {}", key, value);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to get metadata for key {}: {}", key, e);
+            }
+        }
+    }
+
     for entry in pack.entries() {
         info!(
             "DLC Pack contains asset: {} of type {}",
@@ -88,7 +101,7 @@ fn display_loaded_text(
                 commands.entity(entity).remove::<LoadedJson>().insert((
                     Text::from(format!("JSON: {} people found", count)),
                     TextFont {
-                        font_size: 12.0,
+                        font_size: FontSize::Px(12.0),
                         ..default()
                     },
                     TextColor(Color::LinearRgba(LinearRgba::GREEN)),

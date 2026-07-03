@@ -51,9 +51,11 @@ fn encrypt_metadata_section(
     let ciphertext = key.with_secret(|key_bytes| {
         let cipher = Aes256Gcm::new_from_slice(key_bytes)
             .map_err(|e| bevy_dlc::DlcError::CryptoError(e.to_string()))?;
+        let nonce = Nonce::try_from(nonce)
+            .map_err(|_| DlcError::InvalidNonce("invalid nonce length".into()))?;
         cipher
-            .encrypt(Nonce::from_slice(&nonce), plaintext.as_slice())
-            .map_err(|_| bevy_dlc::DlcError::EncryptionFailed("metadata encryption failed".into()))
+            .encrypt(&nonce, plaintext.as_slice())
+            .map_err(|_| DlcError::EncryptionFailed("metadata encryption failed".into()))
     })?;
 
     Ok((nonce, ciphertext))
@@ -541,9 +543,10 @@ pub fn run_edit_repl(
                                         .map_err(|_| "Invalid key")?;
                                     let mut found = false;
                                     if let Some((_, first)) = entries.first() {
-                                        let nonce = Nonce::from_slice(&first.nonce);
+                                        let nonce = Nonce::try_from(first.nonce)
+                                            .map_err(|_| "invalid nonce length")?;
                                         let pt = cipher
-                                            .decrypt(nonce, first.ciphertext.as_ref())
+                                            .decrypt(&nonce, first.ciphertext.as_ref())
                                             .map_err(|_| "Decryption failed")?;
                                         let decoder = GzDecoder::new(&pt[..]);
                                         let mut archive = Archive::new(decoder);
@@ -957,8 +960,15 @@ pub(crate) fn save_pack_with_replacements(
         .map_err(|_| "cipher init")?;
 
     for replacement_path in replacement_files.keys() {
-        if !entries.iter().any(|(entry_path, _)| entry_path == replacement_path) {
-            return Err(format!("replacement entry '{}' is not present in the pack manifest", replacement_path).into());
+        if !entries
+            .iter()
+            .any(|(entry_path, _)| entry_path == replacement_path)
+        {
+            return Err(format!(
+                "replacement entry '{}' is not present in the pack manifest",
+                replacement_path
+            )
+            .into());
         }
     }
 
@@ -983,9 +993,9 @@ pub(crate) fn save_pack_with_replacements(
         };
 
         for (nonce_bytes, ct) in block_data {
-            let nonce = Nonce::from_slice(&nonce_bytes);
+            let nonce = Nonce::try_from(nonce_bytes).map_err(|_| "invalid nonce length")?;
             let pt = cipher
-                .decrypt(nonce, ct.as_slice())
+                .decrypt(&nonce, ct.as_slice())
                 .map_err(|_| "Decryption failed (key may be incorrect for this pack)")?;
             let mut archive = Archive::new(GzDecoder::new(&pt[..]));
             for entry in archive.entries()? {
@@ -1009,18 +1019,17 @@ pub(crate) fn save_pack_with_replacements(
         }
     }
 
-    let mut push_staged_item = |entry_path: &String,
-                                bytes: &Vec<u8>|
-     -> Result<(), Box<dyn std::error::Error>> {
-        let mut item = PackItem::new(entry_path.clone(), bytes.clone())?;
-        if let Some((_, entry)) = entries.iter().find(|(path, _)| path == entry_path) {
-            if let Some(type_path) = &entry.type_path {
-                item = item.with_type_path(type_path);
+    let mut push_staged_item =
+        |entry_path: &String, bytes: &Vec<u8>| -> Result<(), Box<dyn std::error::Error>> {
+            let mut item = PackItem::new(entry_path.clone(), bytes.clone())?;
+            if let Some((_, entry)) = entries.iter().find(|(path, _)| path == entry_path) {
+                if let Some(type_path) = &entry.type_path {
+                    item = item.with_type_path(type_path);
+                }
             }
-        }
-        items.push(item);
-        Ok(())
-    };
+            items.push(item);
+            Ok(())
+        };
 
     // 2. Add newly staged or replaced files
     for (entry_path, bytes) in replacement_files {
@@ -1205,9 +1214,9 @@ fn merge_pack_into(
             let mut ciphertext = vec![0u8; block.encrypted_size as usize];
             file.read_exact(&mut ciphertext)?;
 
-            let nonce = Nonce::from_slice(&block.nonce);
+            let nonce = Nonce::try_from(block.nonce).map_err(|_| "invalid nonce length")?;
             let pt = cipher
-                .decrypt(nonce, ciphertext.as_slice())
+                .decrypt(&nonce, ciphertext.as_slice())
                 .map_err(|_| "decryption failed (key mismatch?)")?;
             let decoder = GzDecoder::new(&pt[..]);
             let mut archive = Archive::new(decoder);
@@ -1301,7 +1310,26 @@ mod tests {
     use tempfile::tempdir;
 
     fn test_bin() -> Command {
-        Command::cargo_bin(pkg_name!()).expect("build current bevy-dlc binary")
+        if let Some(bin) = option_env!("CARGO_BIN_EXE_bevy-dlc") {
+            return Command::new(bin);
+        }
+
+        if let Ok(bin) = std::env::var("CARGO_BIN_EXE_bevy-dlc") {
+            return Command::new(bin);
+        }
+
+        // Unit tests do not get `CARGO_BIN_EXE_*` injected, so fall back to
+        // running the binary through cargo.
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let mut cmd = Command::new(cargo);
+        cmd.arg("run")
+            .arg("--manifest-path")
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+            .arg("--quiet")
+            .arg("--bin")
+            .arg(pkg_name!())
+            .arg("--");
+        cmd
     }
 
     #[test]
@@ -1417,9 +1445,11 @@ mod tests {
                 (first_block.nonce, std::sync::Arc::from(data))
             };
 
-            let nonce = Nonce::from_slice(&nonce_bytes);
+            let nonce = Nonce::try_from(nonce_bytes)
+                .map_err(|_| "invalid nonce length")
+                .expect("nonce length");
             let pt = cipher
-                .decrypt(nonce, ciphertext.as_ref())
+                .decrypt(&nonce, ciphertext.as_ref())
                 .expect("decrypt tar");
             let decoder = GzDecoder::new(&pt[..]);
             let mut archive = Archive::new(decoder);
@@ -1468,9 +1498,10 @@ mod tests {
             let cipher2 = encrypt_key
                 .with_secret(|s| Aes256Gcm::new_from_slice(s))
                 .expect("cipher init");
-            let new_ciphertext = cipher2
-                .encrypt(Nonce::from_slice(&new_nonce), compressed.as_ref())
-                .unwrap();
+            let nonce = Nonce::try_from(new_nonce)
+                .map_err(|_| "invalid nonce length")
+                .expect("nonce length");
+            let new_ciphertext = cipher2.encrypt(&nonce, compressed.as_ref()).unwrap();
 
             // Reconstruct a minimalist v5 pack
             let mut out = Vec::new();
@@ -1603,8 +1634,10 @@ mod tests {
                 (b.nonce, std::sync::Arc::from(data))
             };
 
-            let nonce = Nonce::from_slice(&block_data.0);
-            let pt = cipher.decrypt(nonce, block_data.1.as_ref()).unwrap();
+            let nonce = Nonce::try_from(block_data.0)
+                .map_err(|_| "invalid nonce length")
+                .unwrap();
+            let pt = cipher.decrypt(&nonce, block_data.1.as_ref()).unwrap();
             let decoder = GzDecoder::new(&pt[..]);
             let mut archive = Archive::new(decoder);
             for entry_res in archive.entries().unwrap() {
@@ -1689,8 +1722,10 @@ mod tests {
                     (b.nonce, std::sync::Arc::from(data))
                 };
 
-                let nonce = Nonce::from_slice(&block_data.0);
-                let pt = cipher.decrypt(nonce, block_data.1.as_ref()).unwrap();
+                let nonce = Nonce::try_from(block_data.0)
+                    .map_err(|_| "invalid nonce length")
+                    .unwrap();
+                let pt = cipher.decrypt(&nonce, block_data.1.as_ref()).unwrap();
                 let decoder = GzDecoder::new(&pt[..]);
                 let mut archive = Archive::new(decoder);
                 let paths: Vec<_> = archive
@@ -1793,7 +1828,10 @@ mod tests {
 
         let file = std::fs::File::open(&pack_path).unwrap();
         let (_prod, _did, _version, entries, _blocks) = parse_encrypted_pack(file).unwrap();
-        let entry = entries.iter().find(|(path, _)| path == "foo.txt").expect("entry exists");
+        let entry = entries
+            .iter()
+            .find(|(path, _)| path == "foo.txt")
+            .expect("entry exists");
         assert_eq!(entry.1.type_path.as_deref(), Some("my::Type"));
     }
 
@@ -1864,7 +1902,10 @@ mod tests {
 
         let file = std::fs::File::open(&pack_path).unwrap();
         let (_prod, _did, _version, entries, _blocks) = parse_encrypted_pack(file).unwrap();
-        let entry = entries.iter().find(|(path, _)| path == "nested/bar.txt").expect("added entry exists");
+        let entry = entries
+            .iter()
+            .find(|(path, _)| path == "nested/bar.txt")
+            .expect("added entry exists");
         assert_eq!(entry.1.type_path.as_deref(), Some("my::Bar"));
     }
 
@@ -1963,8 +2004,8 @@ mod tests {
             .stdout(predicate::str::contains("flags"));
 
         let file = std::fs::File::open(&pack_path).expect("open modified pack");
-        let parsed = bevy_dlc::parse_encrypted_pack_info(file, Some(&enc_key))
-            .expect("parse modified pack");
+        let parsed =
+            bevy_dlc::parse_encrypted_pack_info(file, Some(&enc_key)).expect("parse modified pack");
 
         assert!(!parsed.metadata.contains_key("chapter"));
         assert_eq!(

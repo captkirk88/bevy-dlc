@@ -58,7 +58,7 @@ fn setup_fps_display(mut commands: Commands, anchor: Res<FpsAnchor>) {
         Text(String::from("FPS: ...")),
         // match the styling pattern from other examples
         TextFont {
-            font_size: 20.0,
+            font_size: FontSize::Px(20.0),
             ..default()
         },
         TextColor(Color::WHITE),

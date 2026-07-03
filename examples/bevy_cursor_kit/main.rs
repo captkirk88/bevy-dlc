@@ -58,6 +58,19 @@ fn on_dlc_pack_loaded(
 ) {
     let pack = event.pack();
 
+    for key in pack.metadata_keys() {
+        match pack.get_metadata_raw(key) {
+            Ok(value) => {
+                if let Some(value) = value {
+                    info!("DLC Pack metadata: {} = {}", key, value);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to get metadata for key {}: {}", key, e);
+            }
+        }
+    }
+
     for entry in pack.find_by_type::<Image>() {
         let img: Handle<Image> = asset_server.load(entry.path());
         commands.spawn(Sprite::from_image(img));

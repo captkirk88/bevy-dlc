@@ -229,8 +229,9 @@ impl CliTestCtx {
     }
 
     pub fn read_encrypt_key(&self, product: &str) -> EncryptionKey {
-        let signed_license = std::fs::read_to_string(self.td.path().join(format!("{}.slicense", product)))
-            .expect("read signed license");
+        let signed_license =
+            std::fs::read_to_string(self.td.path().join(format!("{}.slicense", product)))
+                .expect("read signed license");
         extract_encrypt_key_from_license(&SignedLicense::from(signed_license))
             .expect("extract encrypt key from signed license")
     }
@@ -262,17 +263,15 @@ impl CliTestCtx {
             file.read_exact(&mut ciphertext)
                 .expect("read encrypted block");
             let plaintext = cipher
-                .decrypt(Nonce::from_slice(&block.nonce), ciphertext.as_slice())
+                .decrypt(
+                    &Nonce::try_from(block.nonce).expect("invalid nonce"),
+                    ciphertext.as_slice(),
+                )
                 .expect("decrypt block");
             let mut archive = Archive::new(GzDecoder::new(&plaintext[..]));
             for entry in archive.entries().expect("read archive entries") {
                 let mut entry = entry.expect("read tar entry");
-                if entry
-                    .path()
-                    .expect("read tar path")
-                    .to_string_lossy()
-                    == entry_path
-                {
+                if entry.path().expect("read tar path").to_string_lossy() == entry_path {
                     let mut bytes = Vec::new();
                     std::io::copy(&mut entry, &mut bytes).expect("read tar bytes");
                     return bytes;

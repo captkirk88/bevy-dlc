@@ -1,6 +1,9 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use bevy::prelude::*;
+use bevy::{
+    prelude::*,
+    scene::{SceneListPatch, ScenePatch},
+};
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 
 #[allow(unused_imports)]
@@ -104,7 +107,6 @@ impl Plugin for DlcPlugin {
 
         app.insert_resource(self.dlc_key.clone())
             .init_asset_loader::<asset_loader::DlcLoader<Image>>()
-            .init_asset_loader::<asset_loader::DlcLoader<Scene>>()
             .init_asset_loader::<asset_loader::DlcLoader<Mesh>>()
             .init_asset_loader::<asset_loader::DlcLoader<Font>>()
             .init_asset_loader::<asset_loader::DlcLoader<AudioSource>>()
@@ -113,17 +115,17 @@ impl Plugin for DlcPlugin {
             .init_asset_loader::<asset_loader::DlcLoader<Gltf>>()
             .init_asset_loader::<asset_loader::DlcLoader<bevy::gltf::GltfMesh>>()
             .init_asset_loader::<asset_loader::DlcLoader<Shader>>()
-            .init_asset_loader::<asset_loader::DlcLoader<DynamicScene>>()
+            .init_asset_loader::<asset_loader::DlcLoader<ScenePatch>>()
+            .init_asset_loader::<asset_loader::DlcLoader<SceneListPatch>>()
             .init_asset_loader::<asset_loader::DlcLoader<AnimationClip>>()
             .init_asset_loader::<asset_loader::DlcLoader<AnimationGraph>>();
 
         let factories = app
             .world()
-            .get_resource::<asset_loader::DlcPackRegistrarFactories>()
-            .cloned();
+            .get_resource::<asset_loader::DlcPackRegistrarFactories>();
         let pack_loader = asset_loader::DlcPackLoader {
-            registrars: asset_loader::collect_pack_registrars(factories.as_ref()),
-            factories,
+            registrars: asset_loader::collect_pack_registrars(factories),
+            factories: factories.cloned(),
         };
 
         app.register_asset_loader(pack_loader);
@@ -135,11 +137,11 @@ impl Plugin for DlcPlugin {
 
 /// System that monitors `AssetEvent<DlcPack>` and triggers observer-friendly events.
 fn trigger_dlc_events(
-    mut events: MessageReader<AssetEvent<DlcPack>>,
+    mut asset_event_messages: MessageReader<AssetEvent<DlcPack>>,
     packs: Res<Assets<DlcPack>>,
     mut commands: Commands,
 ) {
-    for event in events.read() {
+    for event in asset_event_messages.read() {
         match event {
             AssetEvent::Added { id } => {
                 if let Some(pack) = packs.get(*id) {
@@ -183,7 +185,7 @@ pub fn is_dlc_entry_loaded(
     let id_string = dlc_id.into().0;
     let entry_name = entry.into();
     move |dlc_packs: Res<Assets<DlcPack>>| {
-        if !encrypt_key_registry::asset_path_for(&id_string).is_none() {
+        if encrypt_key_registry::asset_path_for(&id_string).is_some() {
             dlc_packs
                 .iter()
                 .filter(|p| p.1.id() == &DlcId::from(id_string.clone()))

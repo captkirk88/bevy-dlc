@@ -229,6 +229,8 @@ pub const FORBIDDEN_EXTENSIONS: &[&str] = &[
     "vdx",
     "vhd",
     "vhdx",
+    "vsdm",
+    "vsdx",
     "vsmacros",
     "vss",
     "vssm",
@@ -565,8 +567,10 @@ impl<W: std::io::Write> PackWriter<W> {
         let cipher = key.with_secret(|kb| {
             Aes256Gcm::new_from_slice(kb).map_err(|e| DlcError::CryptoError(e.to_string()))
         })?;
+        let nonce = Nonce::try_from(nonce)
+            .map_err(|e| DlcError::InvalidNonce(format!("invalid nonce: {}", e)))?;
         let ct = cipher
-            .encrypt(Nonce::from_slice(nonce), plaintext)
+            .encrypt(&nonce, plaintext)
             .map_err(|_| DlcError::EncryptionFailed("block encryption failed".into()))?;
         self.write_bytes(&ct)
             .map_err(|e| DlcError::Other(e.to_string()))
@@ -653,7 +657,7 @@ impl PackHeader {
 /// used to live in `lib.rs`; moving it here allows crates that only depend on
 /// the pack format helpers to perform decryption without pulling in the
 /// higher-level API.
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::AeadInPlace};
+use aes_gcm::{AeadInOut, Aes256Gcm, KeyInit, Nonce};
 use secure_gate::RevealSecret;
 
 use crate::{DlcError, DlcId, EncryptionKey, PackItem, Product};
@@ -670,16 +674,17 @@ fn encrypt_pack_metadata_bytes(
 
     let plaintext = serde_json::to_vec(metadata)
         .map_err(|e| DlcError::Other(format!("failed to serialize pack metadata: {}", e)))?;
-    let nonce: [u8; 12] = rand::random();
+    let nonce_arr: [u8; 12] = rand::random();
+    let nonce = Nonce::try_from(nonce_arr).map_err(|e| DlcError::InvalidNonce(format!("{}", e)))?;
     let ciphertext = key.with_secret(|key_bytes| {
         let cipher = Aes256Gcm::new_from_slice(key_bytes)
             .map_err(|e| DlcError::CryptoError(e.to_string()))?;
         cipher
-            .encrypt(Nonce::from_slice(&nonce), plaintext.as_slice())
+            .encrypt(&nonce, plaintext.as_slice())
             .map_err(|_| DlcError::EncryptionFailed("metadata encryption failed".into()))
     })?;
 
-    Ok((nonce, ciphertext))
+    Ok((nonce_arr, ciphertext))
 }
 
 fn decrypt_pack_metadata_bytes(
@@ -718,9 +723,9 @@ pub(crate) fn decrypt_with_key<R: std::io::Read>(
         }
         let cipher = Aes256Gcm::new_from_slice(key_bytes)
             .map_err(|e| DlcError::CryptoError(e.to_string()))?;
-        let nonce = Nonce::from_slice(nonce);
+        let nonce = Nonce::try_from(nonce).map_err(|e| DlcError::InvalidNonce(format!("{}", e)))?;
         // decrypt in-place; `buf` will be overwritten with plaintext
-        cipher.decrypt_in_place(nonce, &[], &mut buf).map_err(|_| {
+        cipher.decrypt_in_place(&nonce, &[], &mut buf).map_err(|_| {
             DlcError::DecryptionFailed(
                 "authentication failed (incorrect key or corrupted ciphertext)".to_string(),
             )
@@ -731,6 +736,7 @@ pub(crate) fn decrypt_with_key<R: std::io::Read>(
 
 /// Compression level for packing. Controls the trade-off between pack size and packing time.
 /// Higher levels produce smaller files but take longer to create.
+/// TODO: v6 format will allow a pack to contain multiple blocks with different compression levels, because some file types compress better than others.
 #[derive(Debug, Clone, Copy)]
 pub enum CompressionLevel {
     /// Fast compression (level 1), suitable for rapid iterations
@@ -847,9 +853,10 @@ pub fn pack_encrypted_pack_with_metadata(
 
         // Encrypt block
         let nonce_bytes: [u8; 12] = rand::random();
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce =
+            Nonce::try_from(nonce_bytes).map_err(|e| DlcError::InvalidNonce(format!("{}", e)))?;
         let ciphertext = cipher
-            .encrypt(nonce, tar_gz.as_slice())
+            .encrypt(&nonce, tar_gz.as_slice())
             .map_err(|_| DlcError::EncryptionFailed("block encryption failed".into()))?;
 
         let crc32 = crc32fast::hash(&ciphertext);
@@ -1079,13 +1086,13 @@ mod tests {
                 .any(|window| window == b"intro")
         );
 
-        let parsed_without_key = parse_encrypted_pack_info(&bytes[..], None)
-            .expect("parse v5 pack without key");
+        let parsed_without_key =
+            parse_encrypted_pack_info(&bytes[..], None).expect("parse v5 pack without key");
         assert!(parsed_without_key.metadata_locked);
         assert!(parsed_without_key.metadata.is_empty());
 
-        let parsed = parse_encrypted_pack_info(&bytes[..], Some(&key))
-            .expect("parse v5 pack with key");
+        let parsed =
+            parse_encrypted_pack_info(&bytes[..], Some(&key)).expect("parse v5 pack with key");
 
         assert_eq!(parsed.version, DLC_PACK_VERSION_LATEST as usize);
         assert!(!parsed.metadata_locked);
@@ -1096,8 +1103,7 @@ mod tests {
     #[test]
     fn parse_rejects_older_versions() {
         let bytes = [DLC_PACK_MAGIC.as_slice(), &[4u8]].concat();
-        let err = parse_encrypted_pack_info(&bytes[..], None)
-            .expect_err("older versions rejected");
+        let err = parse_encrypted_pack_info(&bytes[..], None).expect_err("older versions rejected");
         assert!(err.to_string().contains("unsupported pack version: 4"));
     }
 }

@@ -1,10 +1,9 @@
 use bevy::asset::io::Reader;
-use bevy::asset::{
-    Asset, AssetLoader, AssetPath, ErasedLoadedAsset, Handle, LoadContext, LoadedUntypedAsset,
-};
+use bevy::asset::{Asset, AssetLoader, AssetPath, ErasedLoadedAsset, Handle, LoadContext};
 use bevy::ecs::reflect::AppTypeRegistry;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
+use bevy::scene::{SceneListPatch, ScenePatch};
 use futures_lite::{AsyncReadExt, AsyncSeekExt};
 use std::io;
 use std::sync::Arc;
@@ -255,11 +254,8 @@ impl<A: Asset> ErasedSubAssetRegistrar for TypedSubAssetRegistrar<A> {
     {
         Box::pin(async move {
             match load_context
-                .loader()
-                .with_static_type()
-                .immediate()
-                .with_reader(reader)
-                .load::<A>(fake_path)
+                .load_builder()
+                .load_value_from_reader::<A>(fake_path, reader)
                 .await
             {
                 Ok(loaded) => {
@@ -430,15 +426,7 @@ impl DlcPackEntry {
         DlcPackEntry { path, encrypted }
     }
 
-    /// Convenience: load this entry's registered path via `AssetServer::load`.
-    pub fn load_untyped(
-        &self,
-        asset_server: &bevy::prelude::AssetServer,
-    ) -> Handle<LoadedUntypedAsset> {
-        asset_server.load_untyped(&self.path)
-    }
-
-    /// Check if this entry is declared as type `A` (via the optional `type_path` in the container, which is independent of file extension). This is not used by the loader itself (which relies on extension-based dispatch) but can be used by user code to inspect entries or implement custom loading behavior.
+    /// Check if this entry is declared as type `A` (via the optional `type_path` in the container, which is independent of file extension).
     pub fn is_type<A: Asset>(&self) -> bool {
         match self.encrypted.type_path.as_ref() {
             Some(tp) => fuzzy_type_path_match(tp, A::type_path()),
@@ -474,6 +462,7 @@ impl DlcPackEntry {
         )
     }
 
+    /// Return the entry path as an `AssetPath`, which can be used to load the asset via Bevy's asset system.
     pub fn path(&self) -> AssetPath<'_> {
         bevy::asset::AssetPath::parse(&self.path)
     }
@@ -673,7 +662,11 @@ impl DlcPack {
         let normalized = entry_path.replace('\\', "/");
         let requested_path = if !self.pack_path.is_empty() {
             format!("{}#{}", self.pack_path, normalized)
-        } else if let Some((pack_path, _)) = self.entries.first().and_then(|entry| entry.path.split_once('#')) {
+        } else if let Some((pack_path, _)) = self
+            .entries
+            .first()
+            .and_then(|entry| entry.path.split_once('#'))
+        {
             format!("{}#{}", pack_path, normalized)
         } else {
             normalized.clone()
@@ -681,9 +674,7 @@ impl DlcPack {
 
         warn!(
             "DLC entry '{}' not found in pack '{}'; requesting '{}' so the asset server reports a normal load failure instead of panicking",
-            entry_path,
-            self.dlc_id,
-            requested_path,
+            entry_path, self.dlc_id, requested_path,
         );
 
         asset_server.load::<A>(requested_path)
@@ -792,7 +783,6 @@ impl Default for DlcPackRegistrarFactories {
 pub(crate) fn default_pack_registrar_factories() -> Vec<Box<dyn DlcPackRegistrarFactory>> {
     vec![
         Box::new(TypedRegistrarFactory::<Image>::default()),
-        Box::new(TypedRegistrarFactory::<Scene>::default()),
         Box::new(TypedRegistrarFactory::<bevy::mesh::Mesh>::default()),
         Box::new(TypedRegistrarFactory::<Font>::default()),
         Box::new(TypedRegistrarFactory::<AudioSource>::default()),
@@ -801,7 +791,8 @@ pub(crate) fn default_pack_registrar_factories() -> Vec<Box<dyn DlcPackRegistrar
         Box::new(TypedRegistrarFactory::<bevy::gltf::Gltf>::default()),
         Box::new(TypedRegistrarFactory::<bevy::gltf::GltfMesh>::default()),
         Box::new(TypedRegistrarFactory::<Shader>::default()),
-        Box::new(TypedRegistrarFactory::<DynamicScene>::default()),
+        Box::new(TypedRegistrarFactory::<ScenePatch>::default()),
+        Box::new(TypedRegistrarFactory::<SceneListPatch>::default()),
         Box::new(TypedRegistrarFactory::<AnimationClip>::default()),
         Box::new(TypedRegistrarFactory::<AnimationGraph>::default()),
     ]
@@ -993,11 +984,8 @@ impl AssetLoader for DlcPackLoader {
                     if !registered_as_labeled {
                         let mut vec_reader = bevy::asset::io::VecReader::new(plaintext.clone());
                         let result = load_context
-                            .loader()
-                            .immediate()
-                            .with_reader(&mut vec_reader)
-                            .with_unknown_type()
-                            .load(fake_path.clone())
+                            .load_builder()
+                            .load_untyped_value_from_reader(fake_path.clone(), &mut vec_reader)
                             .await;
 
                         match result {
@@ -1411,7 +1399,7 @@ mod tests {
     #[serial]
     fn dlcpack_load_missing_entry_returns_handle_without_panicking() {
         use bevy::asset::LoadState;
-
+        use bevy::asset::LoadedUntypedAsset;
         crate::encrypt_key_registry::clear_all();
 
         let mut app = App::new();
@@ -1452,7 +1440,10 @@ mod tests {
 
         let state = asset_server.get_load_state(handle.id()).into();
         assert!(
-            matches!(state, Some(LoadState::Loading) | Some(LoadState::Failed(_)) | None),
+            matches!(
+                state,
+                Some(LoadState::Loading) | Some(LoadState::Failed(_)) | None
+            ),
             "unexpected load state: {:?}",
             state
         );
@@ -1533,11 +1524,8 @@ where
         {
             let mut static_reader = bevy::asset::io::VecReader::new(bytes_clone.clone());
             if let Ok(loaded) = load_context
-                .loader()
-                .with_static_type()
-                .immediate()
-                .with_reader(&mut static_reader)
-                .load::<A>(fake_path.clone())
+                .load_builder()
+                .load_value_from_reader::<A>(fake_path.clone(), &mut static_reader)
                 .await
             {
                 return Ok(loaded.take());
@@ -1551,11 +1539,8 @@ where
             // rewind original reader and clone again
             let mut ext_reader = bevy::asset::io::VecReader::new(bytes_clone.clone());
             let attempt = load_context
-                .loader()
-                .immediate()
-                .with_reader(&mut ext_reader)
-                .with_unknown_type()
-                .load(fake_path.clone())
+                .load_builder()
+                .load_untyped_value_from_reader(fake_path.clone(), &mut ext_reader)
                 .await;
 
             if let Ok(erased) = attempt {

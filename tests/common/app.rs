@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use bevy::{
     app::{Plugins, ScheduleRunnerPlugin},
+    ecs::component::Mutable,
     prelude::*,
 };
 use secure_gate::RevealSecret;
@@ -410,7 +411,7 @@ impl TestApp {
             .expect("resource present")
     }
 
-    pub fn resource_mut<T: Resource + 'static>(&mut self) -> Mut<'_, T> {
+    pub fn resource_mut<T: Resource<Mutability = Mutable> + 'static>(&mut self) -> Mut<'_, T> {
         self.app
             .world_mut()
             .get_resource_mut::<T>()

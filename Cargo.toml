@@ -1,6 +1,6 @@
 [package]
 name = "bevy-dlc"
-version = "1.18.26"
+version = "1.19.0"
 edition = "2024"
 rust-version = "1.93"
 authors = ["Kirk <github.com/captkirk88>"]
@@ -16,21 +16,21 @@ include = ["LICENSE", "README.md", "src/"]
 default = []
 
 [dependencies]
-bevy = "0.18"
+bevy = "0.19"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = { version = "0.22" }
 thiserror = "2"
 rand = "0.10"
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 clap = { version = "4.6", features = ["derive"] }
 hex = "0.4"
 flate2 = "1.1"
 tar = "0.4"
-dashmap = "6.1"
-zeroize = "1.8"
+dashmap = "6.2"
+zeroize = "1.9"
 ring = "0.17"
-secure-gate = { version = "0.9.0-rc.5", features = ["rand", "cloneable"] }
+secure-gate = { version = "0.9.0-rc.6", features = ["rand", "cloneable"] }
 byte-aes = "0.2"
 owo-colors = "4.3"
 infer = "0.19"
@@ -47,11 +47,11 @@ winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 libc = "0.2"
 
 [dev-dependencies]
-assert_cmd = "2.1"
+assert_cmd = "2.2"
 predicates = "3.1"
-serial_test = "3.4"
-bevy_common_assets = { version = "0.16.0", features = ["json"] }
-bevy_cursor_kit = { version = "0.8.0", features = ["serde"] }
+serial_test = "3.5"
+bevy_common_assets = { version = "0.17.0", features = ["json"] }
+bevy_cursor_kit = { version = "0.9.0", features = ["serde"] }
 tempfile = "3.26"
 criterion = { version = "0.8", features = ["html_reports"] }
 
@@ -59,13 +59,8 @@ criterion = { version = "0.8", features = ["html_reports"] }
 opt-level = 3
 strip = "symbols"
 lto = "thin"
-codegen-units = 1
+# codegen-units = 1
 panic = 'abort'
-
-[profile.release.package."*"]
-opt-level = 3
-strip = "symbols"
-codegen-units = 1
 
 [package.metadata.docs.rs]
 targets = [
@@ -73,7 +68,7 @@ targets = [
     "x86_64-apple-darwin",
     "x86_64-pc-windows-msvc",
     "i686-unknown-linux-gnu",
-    "i686-pc-windows-msvc"
+    "i686-pc-windows-msvc",
 ]
 
 

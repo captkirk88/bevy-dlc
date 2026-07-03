@@ -16,6 +16,7 @@ fn strip_ansi(text: &str) -> String {
         if ch == '\u{1b}' && matches!(chars.peek(), Some('[')) {
             chars.next();
             for next in chars.by_ref() {
+                // ANSI escape sequences end with a character in the range `@` to `~`.
                 if ('@'..='~').contains(&next) {
                     break;
                 }
@@ -105,7 +106,13 @@ fn watch_cli_repacks_changed_file() {
     let dlc_id = "watch_pack";
 
     ctx.write_file("assets/foo.txt", b"old");
-    setup_watch_pack(&ctx, product, dlc_id, "assets/foo.txt", "assets/bundle.dlcpack");
+    setup_watch_pack(
+        &ctx,
+        product,
+        dlc_id,
+        "assets/foo.txt",
+        "assets/bundle.dlcpack",
+    );
 
     let source_path = ctx.path().join("assets/foo.txt");
     let output = run_watch_until_first_event(&ctx, false, &[], move || {
@@ -114,7 +121,10 @@ fn watch_cli_repacks_changed_file() {
 
     assert!(output.status.success(), "watch command should succeed");
     let stdout = strip_ansi(&String::from_utf8(output.stdout).expect("utf8 stdout from watch"));
-    assert!(stdout.contains("repacked assets\\bundle.dlcpack from assets\\foo.txt"), "expected repack output: {stdout}");
+    assert!(
+        stdout.contains("repacked assets\\bundle.dlcpack from assets\\foo.txt"),
+        "expected repack output: {stdout}"
+    );
 
     let encrypt_key = ctx.read_encrypt_key(product);
     let repacked = ctx.read_pack_entry_bytes(
@@ -133,7 +143,13 @@ fn watch_cli_dry_run_reports_change_without_repacking() {
     let dlc_id = "watch_pack";
 
     ctx.write_file("assets/foo.txt", b"old");
-    setup_watch_pack(&ctx, product, dlc_id, "assets/foo.txt", "assets/bundle.dlcpack");
+    setup_watch_pack(
+        &ctx,
+        product,
+        dlc_id,
+        "assets/foo.txt",
+        "assets/bundle.dlcpack",
+    );
 
     let source_path = ctx.path().join("assets/foo.txt");
     let output = run_watch_until_first_event(&ctx, true, &[], move || {
@@ -142,8 +158,14 @@ fn watch_cli_dry_run_reports_change_without_repacking() {
 
     assert!(output.status.success(), "watch command should succeed");
     let stdout = strip_ansi(&String::from_utf8(output.stdout).expect("utf8 stdout from watch"));
-    assert!(stdout.contains("detected change:"), "expected dry-run change output: {stdout}");
-    assert!(stdout.contains("assets\\foo.txt -> assets\\bundle.dlcpack#foo.txt"), "expected formatted dry-run output: {stdout}");
+    assert!(
+        stdout.contains("detected change:"),
+        "expected dry-run change output: {stdout}"
+    );
+    assert!(
+        stdout.contains("assets\\foo.txt -> assets\\bundle.dlcpack#foo.txt"),
+        "expected formatted dry-run output: {stdout}"
+    );
 
     let encrypt_key = ctx.read_encrypt_key(product);
     let repacked = ctx.read_pack_entry_bytes(
@@ -177,13 +199,20 @@ fn watch_cli_prefers_source_nearest_to_pack() {
     let output = run_watch_until_first_event(&ctx, true, &[], move || {
         std::fs::write(&other_path, b"other changed").expect("update unrelated source file");
         thread::sleep(Duration::from_millis(400));
-        std::fs::write(&preferred_path, b"preferred changed").expect("update preferred source file");
+        std::fs::write(&preferred_path, b"preferred changed")
+            .expect("update preferred source file");
     });
 
     assert!(output.status.success(), "watch command should succeed");
     let stdout = strip_ansi(&String::from_utf8(output.stdout).expect("utf8 stdout from watch"));
-    assert!(stdout.contains("assets\\source\\foo.txt"), "expected preferred source path in output: {stdout}");
-    assert!(!stdout.contains("other\\foo.txt"), "did not expect unrelated source path in output: {stdout}");
+    assert!(
+        stdout.contains("assets\\source\\foo.txt"),
+        "expected preferred source path in output: {stdout}"
+    );
+    assert!(
+        !stdout.contains("other\\foo.txt"),
+        "did not expect unrelated source path in output: {stdout}"
+    );
     println!("watch output:\n{stdout}");
 }
 
@@ -212,20 +241,25 @@ fn watch_cli_dlc_id_filters_to_matching_pack() {
 
     let foo_path = ctx.path().join("assets/foo.txt");
     let bar_path = ctx.path().join("assets/bar.txt");
-    let output = run_watch_until_first_event(
-        &ctx,
-        true,
-        &["--dlc-id", "watch_pack_b"],
-        move || {
+    let output =
+        run_watch_until_first_event(&ctx, true, &["--dlc-id", "watch_pack_b"], move || {
             std::fs::write(&foo_path, b"foo changed").expect("update non-target source file");
             thread::sleep(Duration::from_millis(400));
             std::fs::write(&bar_path, b"bar changed").expect("update filtered source file");
-        },
-    );
+        });
 
     assert!(output.status.success(), "watch command should succeed");
     let stdout = strip_ansi(&String::from_utf8(output.stdout).expect("utf8 stdout from watch"));
-    assert!(stdout.contains("assets\\bar.txt -> assets\\bundle_b.dlcpack#bar.txt"), "expected filtered pack output: {stdout}");
-    assert!(!stdout.contains("bundle_a.dlcpack"), "did not expect non-matching pack output: {stdout}");
-    assert!(!stdout.contains("assets\\foo.txt"), "did not expect non-matching source output: {stdout}");
+    assert!(
+        stdout.contains("assets\\bar.txt -> assets\\bundle_b.dlcpack#bar.txt"),
+        "expected filtered pack output: {stdout}"
+    );
+    assert!(
+        !stdout.contains("bundle_a.dlcpack"),
+        "did not expect non-matching pack output: {stdout}"
+    );
+    assert!(
+        !stdout.contains("assets\\foo.txt"),
+        "did not expect non-matching source output: {stdout}"
+    );
 }

@@ -73,8 +73,7 @@ use clap::{Parser, Subcommand};
 use bevy_dlc::{
     DLC_PACK_VERSION_LATEST, EncryptionKey, PackItem, extract_dlc_ids_from_license,
     extract_encrypt_key_from_license, extract_product_from_license,
-    pack_encrypted_pack_with_metadata, parse_encrypted_pack, parse_encrypted_pack_info,
-    prelude::*,
+    pack_encrypted_pack_with_metadata, parse_encrypted_pack, parse_encrypted_pack_info, prelude::*,
 };
 use owo_colors::{AnsiColors, OwoColorize};
 use secure_gate::RevealSecret;
@@ -580,9 +579,10 @@ fn resolve_pubkey_and_license_with_search_roots(
     let pubkey = pubkey.map(resolve_file_or_value);
     let signed_license = signed_license.map(resolve_file_or_value);
 
-    let resolved_pubkey = pubkey.or_else(|| find_product_file_in_search_roots(product, "pubkey", search_roots));
-    let resolved_license =
-        signed_license.or_else(|| find_product_file_in_search_roots(product, "slicense", search_roots));
+    let resolved_pubkey =
+        pubkey.or_else(|| find_product_file_in_search_roots(product, "pubkey", search_roots));
+    let resolved_license = signed_license
+        .or_else(|| find_product_file_in_search_roots(product, "slicense", search_roots));
 
     (resolved_pubkey, resolved_license)
 }
@@ -759,12 +759,9 @@ pub(crate) fn resolve_keys_with_search_roots(
         .map(|value| value.as_ref().to_string());
 
     let (resolved_pubkey_str, resolved_license_str) = match product_name.as_deref() {
-        Some(name) => resolve_pubkey_and_license_with_search_roots(
-            pubkey,
-            signed_license,
-            name,
-            search_roots,
-        ),
+        Some(name) => {
+            resolve_pubkey_and_license_with_search_roots(pubkey, signed_license, name, search_roots)
+        }
         None => (
             pubkey.map(resolve_file_or_value),
             signed_license.map(resolve_file_or_value),
@@ -875,16 +872,16 @@ fn test_decrypt_archive_with_key_from_reader<R: std::io::Read>(
 
     // replicate the current in-place decrypt logic so we don't rely on the
     // pack_format module being public.
-    use aes_gcm::aead::AeadInPlace;
+    use aes_gcm::aead::AeadInOut;
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
     use secure_gate::RevealSecret;
 
     let mut buf = archive_ciphertext.clone();
     let _ = encrypt_key.with_secret(|key_bytes| {
         let cipher = Aes256Gcm::new_from_slice(key_bytes).map_err(|e| e.to_string())?;
-        let nonce = Nonce::from_slice(&archive_nonce);
+        let nonce = Nonce::try_from(archive_nonce).map_err(|_| "invalid nonce length")?;
         cipher
-            .decrypt_in_place(nonce, &[], &mut buf)
+            .decrypt_in_place(&nonce, &[], &mut buf)
             .map_err(|_| "decryption failed (incorrect key or corrupted ciphertext)".to_string())
     })?;
     let plain = buf;

@@ -61,12 +61,30 @@ fn on_dlc_pack_loaded(
         let img: Handle<Image> = asset_server.load(entry.path());
         commands.spawn(Sprite::from_image(img));
     } else {
-        warn!("Optional entry 'dlc.png' not found in pack '{}'", event.pack().id());
+        warn!(
+            "Optional entry 'dlc.png' not found in pack '{}'",
+            event.pack().id()
+        );
     }
 
-    for entry in event.pack().find_by_type::<TextAsset>() {
+    let pack = event.pack();
+
+    for entry in pack.find_by_type::<TextAsset>() {
         let text_asset: Handle<TextAsset> = asset_server.load(entry.path());
         commands.spawn(DlcAText(text_asset));
+    }
+
+    for key in pack.metadata_keys() {
+        match pack.get_metadata_raw(key) {
+            Ok(value) => {
+                if let Some(value) = value {
+                    info!("DLC Pack metadata: {} = {}", key, value);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to get metadata for key {}: {}", key, e);
+            }
+        }
     }
 }
 
@@ -86,7 +104,7 @@ fn display_loaded_text(
                 ent.insert((
                     Text::from(text_asset.0.clone()),
                     TextFont {
-                        font_size: 12.0,
+                        font_size: FontSize::Px(12.0),
                         ..default()
                     },
                     TextColor(Color::LinearRgba(LinearRgba::BLUE)),

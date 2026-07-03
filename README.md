@@ -1,14 +1,8 @@
-<p align="center">
-  <img src="dlc.png" alt="bevy-dlc" title="Yes this was AI generated! Don't like it?  Too bad...  Complain to the AI Overlords." />
-</p>
-
----
-
 [![Crates.io](https://img.shields.io/crates/v/bevy-dlc.svg)](https://crates.io/crates/bevy-dlc)
 [![docs.rs](https://docs.rs/bevy-dlc/badge.svg)](https://docs.rs/bevy-dlc)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Encrypt and ship your DLC!  Create your DLC logic and assets and securely unlock it at runtime with signed licenses (generated using `bevy-dlc` CLI).
+Encrypt and ship your DLC! Create your DLC logic and assets and securely unlock it at runtime with signed licenses (generated using `bevy-dlc` CLI).
 
 Works with Bevy's asset pipeline.
 
@@ -27,7 +21,7 @@ Works with Bevy's asset pipeline.
 2. Use `bevy-dlc` CLI to create a `base.dlcpack` containing your base game assets, signing it with the same license.
 3. In your game, include the public key and signed license (see [examples](examples/)) and add `DlcPlugin` to your app.
 4. Load DLC assets with `AssetServer::load("base.dlcpack")` and then you can use `AssetServer::load("base.dlcpack#path/to/asset.png")` or via `DlcPackLoaded` events to access specific assets from the pack.
-5. When you want to ship DLC, create a new pack (e.g. `dlcA.dlcpack`) with the new assets, signing it with the same license.  The game can load it with `AssetServer::load("dlcA.dlcpack")` and access its assets with `AssetServer::load("dlcA.dlcpack#path/to/dlc_asset.png")` or via `DlcPackLoaded` events.
+5. When you want to ship DLC, create a new pack (e.g. `dlcA.dlcpack`) with the new assets, signing it with the same license. The game can load it with `AssetServer::load("dlcA.dlcpack")` and access its assets with `AssetServer::load("dlcA.dlcpack#path/to/dlc_asset.png")` or via `DlcPackLoaded` events.
 
 ## Install
 
@@ -36,17 +30,15 @@ Add to your `Cargo.toml`:
 ```bash
 cargo add bevy-dlc
 ```
+
 > [!NOTE]
-> `bevy-dlc` will always be compatible with Bevy 1.## with the minor version being used for bug fixes and new features.  So `bevy-dlc = "1.18"` will also work and automatically get you any compatible bug fixes and pack format version updates.  Later update it using `cargo update` or `cargo add bevy-dlc@latest` to get the latest compatible version.
+> `bevy-dlc` will always be compatible with Bevy 1.## with the minor version being used for bug fixes and new features. So `bevy-dlc = "1.18"` will also work and automatically get you any compatible bug fixes and pack format version updates. Later update it using `cargo update` or `cargo add bevy-dlc@latest` to get the latest compatible version.
 
 To use the CLI tool:
 
 ```bash
 cargo install bevy-dlc
 ```
-
-> [!NOTE]
-> For `v1.18.22` install via `cargo install --git https://github.com/captkirk88/bevy-dlc --tag v1.18.22` until `secure-gate v0.8.0` is released.
 
 Then `bevy-dlc --help` for available commands.
 
@@ -59,9 +51,10 @@ bevy-dlc generate -o keys/ my-game dlcA
 ```
 
 This will generate two files in `keys/`:
-- `dlcA.slicense` — a secure license token that can be safely embedded in your game binary (e.g. with `secure::include_secure_str_aes!()`) or stored securely on disk.  This token contains the encrypted symmetric key needed to unlock the DLC, but can't be decrypted without the private key.
+
+- `dlcA.slicense` — a secure license token that can be safely embedded in your game binary (e.g. with `secure::include_secure_str_aes!()`) or stored securely on disk by your distribution method. This token contains the encrypted symmetric key needed to unlock the DLC, but can't be decrypted without the private key.
 - `dlcA.pubkey` — the public key that your game uses to verify the license and extract the symmetric key to unlock the DLC.
-- If you later want to add more DLC regenerate 
+- If you later want to add more DLC regenerate the license with the same product name and private key, but a new DLC ID (e.g. `dlcB`).
 
 ### Create a pack
 
@@ -73,7 +66,7 @@ bevy-dlc pack my-game dlcA -o assets/ -- assets/dlcA
 - `assets/dlcA` — directory or file(s) to pack
 - `dlcA` — DLC ID (used in licenses to unlock this pack)
 - `-o dlc` — output path for the generated `.dlcpack`
-- `--types` — optional list of asset type paths to include in the pack index (e.g. `bevy::prelude::Image`), otherwise all assets will be indexed with their full type paths.  This can be used to normalize type paths across different versions of Bevy or your game.  The types you specify are fuzzy matched against the actual asset types in the pack, so you can just specify `assets::MyAsset` and it will match `my_game::assets::MyAsset` in the pack if that's the actual type.
+- `--types` — optional list of asset type paths to include in the pack index (e.g. `bevy::prelude::Image`), otherwise all assets will be indexed with their full type paths. This can be used to normalize type paths across different versions of Bevy or your game. The types you specify are fuzzy matched against the actual asset types in the pack, so you can just specify `assets::MyAsset` and it will match `my_game::assets::MyAsset` in the pack if that's the actual type.
 - `--metadata key=value` — optional pack-level metadata entry. Values are parsed as JSON when possible and otherwise stored as strings.
 
 This creates a v5 `dlcA.dlcpack` and prints a signed license token.
@@ -84,13 +77,14 @@ Alternatively you can use `bevy-dlc generate --help` to review how to generate a
 > `bevy-dlc help <command>` for detailed usage of each CLI command.
 
 ### Edit a pack
+
 You can edit the contents of a `.dlcpack` with `bevy-dlc edit`:
 
 ```bash
 bevy-dlc edit <my_dlc>.dlcpack
 ```
 
-This opens an interactive REPL where you can add/remove files, list contents, or even merge entries from another `.dlcpack`.  When merging or adding content you must supply an **Signed License** — just run `bevy-dlc edit --signed-license <token> [--pubkey <key>]` or keep `.slicense`/`.pubkey` files next to the pack (created using `bevy-dlc generate`).  Changes are saved back to the `.dlcpack` when you `save` and if you forget and exit, REPL will ask you.  REPL is not a AI.
+This opens an interactive REPL where you can add/remove files, list contents, or even merge entries from another `.dlcpack`. When merging or adding content you must supply an **Signed License** — just run `bevy-dlc edit --signed-license <token> [--pubkey <key>]` or keep `.slicense`/`.pubkey` files next to the pack (created using `bevy-dlc generate`). Changes are saved back to the `.dlcpack` when you `save` and if you forget and exit, REPL will ask you. REPL is not a AI.
 
 Use `metadata add <key> <value>`, `metadata remove <key>`, and `metadata list` to manage pack-level metadata from the REPL. Metadata values are parsed as JSON when possible and otherwise stored as strings.
 
@@ -118,22 +112,23 @@ Review the [examples](examples/) for a complete example (run with `cargo run --r
 
 ### API Overview
 
-* `DlcPack` is a custom Bevy `Asset` that represents a loaded DLC pack. In v5, it uses a binary manifest, encrypted pack-level metadata, and block metadata to support efficient random-access decryption of assets from the `.dlcpack` file on disk. You can load it directly with `AssetServer::load("my_pack.dlcpack")`.
-* Pack-level metadata is encrypted with the same DLC encryption key as the archive blocks. It can be authored programmatically with `pack_encrypted_pack_with_metadata(...)`, inspected from raw containers with `parse_encrypted_pack_info(reader, Some(&key))`, and read back from loaded packs through `DlcPack::get_metadata::<T>(...)` or `DlcPack::get_metadata_raw(...)` when you explicitly need the underlying JSON value.
-* `DlcPackEntry` represents a single asset within a pack. Loading via `AssetServer::load("my_pack.dlcpack#path/to/asset.png")` only decrypts the specific asset.
-* `DlcLoader` is the internal low-level loader that handles granular decryption and forwards resulting bytes to the appropriate concrete loader.
-* Events are emitted when packs are loaded:
+- `DlcPack` is a custom Bevy `Asset` that represents a loaded DLC pack. In v5, it uses a binary manifest, encrypted pack-level metadata, and block metadata to support efficient random-access decryption of assets from the `.dlcpack` file on disk. You can load it directly with `AssetServer::load("my_pack.dlcpack")`.
+- Pack-level metadata is encrypted with the same DLC encryption key as the archive blocks. It can be authored programmatically with `pack_encrypted_pack_with_metadata(...)`, inspected from raw containers with `parse_encrypted_pack_info(reader, Some(&key))`, and read back from loaded packs through `DlcPack::get_metadata::<T>(...)` or `DlcPack::get_metadata_raw(...)` when you explicitly need the underlying JSON value.
+- `DlcPackEntry` represents a single asset within a pack. Loading via `AssetServer::load("my_pack.dlcpack#path/to/asset.png")` only decrypts the specific asset.
+- `DlcLoader` is the internal low-level loader that handles granular decryption and forwards resulting bytes to the appropriate concrete loader.
+- Events are emitted when packs are loaded:
   - `DlcPackLoaded` — emitted when a pack manifest is successfully parsed and ready for use.
-* Finally, `DlcPlugin` is the main plugin that sets up the DLC system. It requires a `DlcKey::Public` (or `Private`) and `SignedLicense` to unlock packs.
+- Finally, `DlcPlugin` is the main plugin that sets up the DLC system. It requires a `DlcKey::Public` (or `Private`) and `SignedLicense` to unlock packs.
 
 ### Suggestions and Contributions
 
-Contributions are very welcome!  Please open an issue or submit a pull request with any improvements, bug fixes, or new features.
+Contributions are very welcome! Please open an issue or submit a pull request with any improvements, bug fixes, or new features.
 
 > [!NOTE]
 > If your PR affects the pack format or encryption logic, it will be reviewed with extra scrutiny to ensure it doesn't introduce any security issues. Please include tests. The current format is v5-only.
 
 ### Benchmarks
+
 Benchmarks are included in `benches/dlc_bench.rs` and can be run with:
 
 ```bash
@@ -147,12 +142,9 @@ See the generated reports in `reports/criterion` for results.
 
 | bevy | bevy-dlc |
 |------|----------|
+| 0.19 | 1.19     |
 | 0.18 | 1.18     |
 
 ## License
 
-Source code is under MIT.  See [LICENSE](LICENSE) for details.
-
-dlc.png is AI generated by Google Gemini.  The image is licensed under [CC0](https://creativecommons.org/publicdomain/zero/1.0/legalcode.txt) and can be used freely.  If you don't like it, complain to the AI Overlords.  Welcome to the future!
-
-
+Source code is under MIT. See [LICENSE](LICENSE) for details.
